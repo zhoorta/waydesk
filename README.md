@@ -14,7 +14,7 @@
 
 # Multi-user Linux desktops over RDP, out of the box
 
-One `apt install` on Debian 13 or Ubuntu 26.04, or a signed pacman repository on Arch Linux. Every account that logs in gets its own desktop, kept alive between connections. The picture is H.264, and a GPU is used for drawing and encoding when there is one (Intel, AMD or NVIDIA; without one, software). No client to install: use the Windows App, Remmina or any RDP client.
+Waydesk turns a Debian 13, Ubuntu 26.04 or Arch Linux server into a multi-user desktop system: every account gets its own desktop session, which keeps running when the user disconnects. Install from a signed apt or pacman repository. The picture is H.264, and a GPU is used for drawing and encoding when there is one (Intel, AMD or NVIDIA; without one, software). No shared session and no client to install: use the Windows App, Remmina or any RDP client.
 
 <table align="center">
   <tr>
