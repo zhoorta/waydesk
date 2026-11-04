@@ -69,6 +69,12 @@ pub const MAX_CLIPBOARD: usize = 1024 * 1024;
 /// Longest clipboard image either side relays (a PNG, bytes).
 pub const MAX_CLIPBOARD_IMAGE: usize = 16 * 1024 * 1024;
 
+/// Clipboard files (client to session): most files in one transfer, largest file, largest total, and the chunk size.
+pub const MAX_FILES: usize = 100;
+pub const MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;
+pub const MAX_FILES_TOTAL: u64 = 256 * 1024 * 1024;
+pub const FILE_CHUNK: u32 = 256 * 1024;
+
 /// From the network daemon to the session.
 #[derive(Debug, PartialEq)]
 pub enum Down {
@@ -90,6 +96,12 @@ pub enum Down {
     Clipboard { data: Vec<u8> },
     /// The client's clipboard image (PNG) for the session's clipboard.
     ClipboardImage { png: Vec<u8> },
+    /// The client offers these files (name, size), in this order: make room for them. Answered by `Up::FilesReady` or `Up::FilesFailed`.
+    FilesBegin { id: u32, files: Vec<(String, u64)> },
+    /// The next bytes of file number `index` of transfer `id`; `offset` is where they go (always the end of what was written).
+    FilesData { id: u32, index: u32, offset: u64, data: Vec<u8> },
+    /// Drop transfer `id` and what was written of it.
+    FilesCancel { id: u32 },
     /// The client has a clipboard channel: start watching the session's clipboard.
     ClipboardOn,
     /// The client has a sound channel: record the session's speaker and send it as `Up::Audio`.
@@ -112,6 +124,10 @@ pub enum Up {
     Clipboard { data: Vec<u8> },
     /// The session's clipboard holds this image (PNG).
     ClipboardImage { png: Vec<u8> },
+    /// Transfer `id` was accepted: the files can be sent.
+    FilesReady { id: u32 },
+    /// Transfer `id` was refused or broke off; nothing of it is left.
+    FilesFailed { id: u32 },
     /// The shape of the mouse pointer: a cursor name (`text`, `ew-resize`, ...).
     Cursor { name: String },
     /// The picture of a pointer an application drew itself: width x height pixels of 32 bit BGRA (premultiplied, rows from the top).
@@ -132,6 +148,9 @@ impl Out {
         self.0.extend_from_slice(&v.to_le_bytes());
     }
     fn u32(&mut self, v: u32) {
+        self.0.extend_from_slice(&v.to_le_bytes());
+    }
+    fn u64(&mut self, v: u64) {
         self.0.extend_from_slice(&v.to_le_bytes());
     }
     fn f64(&mut self, v: f64) {
@@ -168,6 +187,9 @@ impl<'a> In<'a> {
     }
     fn u32(&mut self) -> Result<u32, ProtoError> {
         Ok(u32::from_le_bytes(self.take(4)?.try_into().unwrap()))
+    }
+    fn u64(&mut self) -> Result<u64, ProtoError> {
+        Ok(u64::from_le_bytes(self.take(8)?.try_into().unwrap()))
     }
     fn f64(&mut self) -> Result<f64, ProtoError> {
         Ok(f64::from_le_bytes(self.take(8)?.try_into().unwrap()))
@@ -255,6 +277,26 @@ impl Down {
                 o.u8(10);
                 o.bytes(data);
             }
+            Down::FilesBegin { id, files } => {
+                o.u8(16);
+                o.u32(*id);
+                o.u32(files.len() as u32);
+                for (name, size) in files {
+                    o.str(name);
+                    o.u64(*size);
+                }
+            }
+            Down::FilesData { id, index, offset, data } => {
+                o.u8(17);
+                o.u32(*id);
+                o.u32(*index);
+                o.u64(*offset);
+                o.bytes(data);
+            }
+            Down::FilesCancel { id } => {
+                o.u8(18);
+                o.u32(*id);
+            }
             Down::ClipboardImage { png } => {
                 o.u8(15);
                 o.bytes(png);
@@ -280,6 +322,19 @@ impl Down {
             10 => Down::Clipboard { data: i.bytes()? },
             11 => Down::ClipboardOn,
             15 => Down::ClipboardImage { png: i.bytes()? },
+            16 => {
+                let (id, n) = (i.u32()?, i.u32()?);
+                if n as usize > MAX_FILES {
+                    return Err(ProtoError::TooLarge(n));
+                }
+                let mut files = Vec::with_capacity(n as usize);
+                for _ in 0..n {
+                    files.push((i.str()?, i.u64()?));
+                }
+                Down::FilesBegin { id, files }
+            }
+            17 => Down::FilesData { id: i.u32()?, index: i.u32()?, offset: i.u64()?, data: i.bytes()? },
+            18 => Down::FilesCancel { id: i.u32()? },
             12 => Down::AudioOn,
             13 => Down::AudioOff,
             255 => Down::Bye,
@@ -325,6 +380,14 @@ impl Up {
                 o.u8(8);
                 o.bytes(png);
             }
+            Up::FilesReady { id } => {
+                o.u8(9);
+                o.u32(*id);
+            }
+            Up::FilesFailed { id } => {
+                o.u8(10);
+                o.u32(*id);
+            }
             Up::Cursor { name } => {
                 o.u8(6);
                 o.str(name);
@@ -359,6 +422,8 @@ impl Up {
             4 => Up::Audio { pcm: i.bytes()? },
             5 => Up::Clipboard { data: i.bytes()? },
             8 => Up::ClipboardImage { png: i.bytes()? },
+            9 => Up::FilesReady { id: i.u32()? },
+            10 => Up::FilesFailed { id: i.u32()? },
             6 => Up::Cursor { name: i.str()? },
             7 => Up::CursorImage { hot_x: i.u16()?, hot_y: i.u16()?, width: i.u16()?, height: i.u16()?, data: i.bytes()? },
             255 => Up::Bye,
@@ -566,6 +631,9 @@ mod tests {
             Down::UseBitmaps,
             Down::Clipboard { data: b"hello".to_vec() },
             Down::ClipboardImage { png: vec![0x89, b'P'] },
+            Down::FilesBegin { id: 7, files: vec![("a.txt".into(), 5), ("b".into(), 0)] },
+            Down::FilesData { id: 7, index: 0, offset: 0, data: vec![1, 2, 3] },
+            Down::FilesCancel { id: 7 },
             Down::ClipboardOn,
             Down::AudioOn,
             Down::AudioOff,
@@ -582,6 +650,8 @@ mod tests {
             Up::Audio { pcm: vec![0; 3528] },
             Up::Clipboard { data: Vec::new() },
             Up::ClipboardImage { png: vec![0x89, b'P'] },
+            Up::FilesReady { id: 7 },
+            Up::FilesFailed { id: 7 },
             Up::Cursor { name: "ew-resize".into() },
             Up::CursorImage { hot_x: 1, hot_y: 2, width: 2, height: 1, data: vec![1, 2, 3, 4, 5, 6, 7, 8] },
             Up::Bye,
@@ -626,6 +696,14 @@ mod tests {
                 assert!(Up::decode(&b[..cut]).is_err(), "cut {cut} of {m:?}");
             }
         }
+    }
+
+    #[test]
+    fn a_list_of_too_many_files_is_refused() {
+        let mut b = vec![16u8];
+        b.extend_from_slice(&1u32.to_le_bytes());
+        b.extend_from_slice(&(MAX_FILES as u32 + 1).to_le_bytes());
+        assert_eq!(Down::decode(&b), Err(ProtoError::TooLarge(MAX_FILES as u32 + 1)));
     }
 
     #[test]

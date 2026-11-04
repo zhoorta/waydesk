@@ -156,6 +156,31 @@ impl Clipboard {
 }
 
 impl Clipboard {
+    /// Puts a list of files (`text/uri-list`, CRLF lines) on the session clipboard: a paste in the file manager copies them.
+    pub fn set_uri_list(&self, list: String) {
+        // Remembered so that the watch does not send the list back to the client as text.
+        *self.last_set.lock().unwrap() = Some(list.clone());
+        std::thread::spawn(move || {
+            let mut cmd = Command::new("wl-copy");
+            cmd.args(["--type", "text/uri-list"]).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null());
+            if crate::compositor::is_nested() {
+                if let Some(d) = nested_display() {
+                    cmd.env("WAYLAND_DISPLAY", d);
+                }
+            }
+            match cmd.spawn() {
+                Ok(mut c) => {
+                    if let Some(mut stdin) = c.stdin.take() {
+                        let _ = stdin.write_all(list.as_bytes());
+                    }
+                    let status = c.wait();
+                    info!(?status, "wl-copy (file list) done");
+                }
+                Err(e) => warn!("cannot run wl-copy: {e}"),
+            }
+        });
+    }
+
     /// Puts the client's image (PNG) on the session clipboard.
     pub fn set_image(&self, png: Vec<u8>) {
         if png.len() > MAX_CLIPBOARD_IMAGE || !png.starts_with(b"\x89PNG\r\n\x1a\n") {

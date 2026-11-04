@@ -37,6 +37,7 @@ mod session;
 mod sessionstatus;
 mod sessionaudio;
 mod sessionclip;
+mod sessionfiles;
 mod spawn;
 mod tcpinfo;
 #[cfg(feature = "vaapi")]
@@ -508,6 +509,8 @@ async fn main() -> anyhow::Result<()> {
     let mut creds_file: Option<PathBuf> = None;
     // On by default (text only); `--no-clipboard` turns it off. It needs wl-clipboard in the session.
     let mut clipboard = true;
+    // Files copied on the client: `off` (default) or `in`. WAYDESK_CLIPBOARD_FILES in /etc/default/waydesk, or --clipboard-files.
+    let mut files_mode = std::env::var("WAYDESK_CLIPBOARD_FILES").unwrap_or_default();
     let mut audio = true;
     let mut max_sessions = 64usize;
     // Internal: run as the session process of one connection (started by the daemon, with a socket as fd 3).
@@ -576,6 +579,7 @@ async fn main() -> anyhow::Result<()> {
             "--credentials" => creds_file = args.next().map(PathBuf::from),
             "--clipboard" => clipboard = true,
             "--no-clipboard" => clipboard = false,
+            "--clipboard-files" => files_mode = args.next().context("--clipboard-files needs off or in")?,
             "--no-audio" => audio = false,
             "--max-sessions" => max_sessions = args.next().context("--max-sessions needs a number")?.parse()?,
             "--bitrate" => bitrate = args.next().context("--bitrate needs a value")?.parse()?,
@@ -631,6 +635,9 @@ async fn main() -> anyhow::Result<()> {
     let identity = TlsIdentityCtx::init_from_paths(&cert, &key).context("TLS identity")?;
     let acceptor = identity.make_acceptor().context("TLS acceptor")?;
 
+    if !matches!(files_mode.as_str(), "" | "off" | "in") {
+        anyhow::bail!("--clipboard-files / WAYDESK_CLIPBOARD_FILES: {files_mode:?} is not off or in (files from the session to the client are not built yet)");
+    }
     let common = Arc::new(Common {
         cfg: Arc::new(Config { exe: std::env::current_exe().context("path of this program")?, args: worker_args, workspace: workspace.clone(), per_user }),
         acceptor,
@@ -641,6 +648,7 @@ async fn main() -> anyhow::Result<()> {
         helper_socket: via_helper.then_some(helper_socket),
         egfx: (!no_egfx).then_some(encode::Tuning { bitrate, max_qp, fps: 30 }),
         clipboard,
+        clipboard_files_in: clipboard && files_mode == "in",
         audio: audio && !per_user,
     });
     if let Some(p) = &common.pam {
@@ -758,6 +766,8 @@ struct Common {
     /// None = no graphics pipeline, bitmaps only.
     egfx: Option<encode::Tuning>,
     clipboard: bool,
+    /// Accept files copied on the client (`--clipboard-files in`).
+    clipboard_files_in: bool,
     audio: bool,
 }
 
@@ -824,7 +834,7 @@ async fn serve(stream: tokio::net::TcpStream, peer: std::net::SocketAddr, common
         .with_input_handler(handler.clone())
         .with_display_handler(handler)
         .with_gfx_factory(common.egfx.map(|_| Box::new(egfx::Factory::new(egfx_state.clone())) as Box<dyn ironrdp_server::GfxServerFactory>))
-        .with_cliprdr_factory(common.clipboard.then(|| Box::new(clipboard::Factory::new(slot.clone())) as Box<dyn ironrdp_server::CliprdrServerFactory>))
+        .with_cliprdr_factory(common.clipboard.then(|| Box::new(clipboard::Factory::new(slot.clone(), common.clipboard_files_in)) as Box<dyn ironrdp_server::CliprdrServerFactory>))
         .with_sound_factory(if !common.audio {
             None
         } else if helper.is_some() {

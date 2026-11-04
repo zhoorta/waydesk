@@ -1,6 +1,6 @@
 # 016: Clipboard files
 
-Date: 2026-11-04. Status: proposed (nothing built).
+Date: 2026-11-04. Status: accepted; stage 1 (client to session) built 2026-11-04, not yet tested with a client; stage 2 not built.
 
 ## Problem
 The clipboard carries text and images ([010](010-explicit-non-goals.md)). Business users also expect to copy files from their own machine and paste them into the session, and back. `ironrdp-cliprdr` 0.7 implements the protocol (file list, ranged file contents, locks, name sanitising) and the patched `ironrdp-server` forwards every event, but Waydesk's backend ignores them and does not advertise the capabilities, so clients never offer files. The unprivileged network daemon cannot write into an account's home, and the account's files must not be readable by the daemon, so the file work belongs to the session process, as the clipboard already does.
@@ -12,9 +12,9 @@ Build it in two stages, each behind its own switch, off by default.
 
 **Stage 1: client to session (`in`).**
 1. The client's format list names `FileGroupDescriptorW`. The daemon asks for it (`SendInitiatePaste`) and receives the descriptors in `on_remote_file_list`.
-2. The daemon checks the list before anything else: at most 100 files, 256 MiB in total, 64 MiB for one file (all adjustable in `/etc/default/waydesk`), no directories in stage 1 (a directory descriptor or a name with a path refuses the whole list), names through `sanitize_file_path`, then again by the session. A refused list ends with a log line and no paste.
+2. The daemon checks the list before anything else: at most 100 files, 256 MiB in total, 64 MiB for one file (constants in `proto.rs` for now, not settings), no directories in stage 1 (a directory descriptor or a name with a path refuses the whole list), names through `clean_name` (`sessionfiles.rs`), then again by the session. A refused list ends with a log line and no paste.
 3. The daemon sends the session `Down::FilesBegin { id, names, sizes }`. The session creates `$XDG_RUNTIME_DIR/waydesk-files/<id>/` (0700; a tmpfs, so a transfer cannot fill the account's home, and it is capped by the same totals) and answers `Up::FilesReady`.
-4. The daemon fetches each file with RANGE requests of 256 KiB, one in flight, against the locked list (`clip_data_id`), and relays each chunk as `Down::FilesData { id, index, offset, bytes }`. The session writes at the offset it expects (sequential only), refuses a chunk past the declared size, and never follows a path the daemon names: it builds the path from the index and a name it has sanitised itself (a single path component, no leading dot, no control characters, a numeric suffix on collision, `O_CREAT|O_EXCL|O_NOFOLLOW`).
+4. The daemon fetches each file with RANGE requests of 256 KiB, one in flight, against the locked list (`clip_data_id`), and relays each chunk as `Down::FilesData { id, index, offset, bytes }`. The session writes at the offset it expects (sequential only), refuses a chunk past the declared size, and never follows a path the daemon names: it builds the path from the index and a name it has sanitised itself (a single path component, no control characters, a leading dot replaced by an underscore, ` (2)` before the extension on collision, `O_CREAT|O_EXCL|O_NOFOLLOW`).
 5. When all files are complete the session sets the Wayland clipboard to `text/uri-list` and `x-special/gnome-copied-files` (`copy\nfile:///...`) with `wl-copy`, so a paste in the file manager copies from the spool into the destination. A second transfer, a new clipboard owner or the end of the connection removes the spool.
 
 A transfer has a deadline (30 s without a chunk, 10 minutes in all) and the daemon takes one transfer at a time per connection.
@@ -36,6 +36,9 @@ A transfer has a deadline (30 s without a chunk, 10 minutes in all) and the daem
 - Clients differ (Windows App on macOS, Microsoft's client on Windows, FreeRDP); each needs a real test, and Windows App on macOS is known to be slow to answer clipboard requests (see the `SETTLE` comment in `src/clipboard.rs`).
 - Antivirus and DLP scanning of transferred files is not provided.
 - Four new link messages and a new session module widen `proto.rs`; they get the same round-trip, truncation and size tests, and the fuzz targets that are still missing for the RDP side become more pressing.
+
+## Built (stage 1)
+`proto.rs` (`FilesBegin`, `FilesData`, `FilesCancel`, `FilesReady`, `FilesFailed`), `sessionfiles.rs` (spool, names, order checks; unit-tested in isolation), `clipboard.rs` (capabilities, `on_remote_file_list`, one range in flight, 30 s idle and 10 min total watchdog), `sessionclip.rs` (`set_uri_list`), `link.rs`, `worker.rs`, and the switch `--clipboard-files off|in` / `WAYDESK_CLIPBOARD_FILES`. The clipboard offers `text/uri-list` only (`wl-copy` offers one type); if a file manager needs `x-special/gnome-copied-files`, that is a change in `set_uri_list`. The switch lives in the daemon; the session enforces the limits whatever the daemon asks.
 
 ## Plan
 1. `proto.rs`: `FilesBegin`, `FilesData`, `FilesReady`, `Cancel` (Down), `FilesReady`, `FilesFailed` (Up), with limits and tests.

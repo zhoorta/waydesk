@@ -115,6 +115,13 @@ impl ClipboardGate {
     }
 }
 
+/// What the session says about a clipboard file transfer.
+#[derive(Debug, Clone, Copy)]
+pub enum FilesEvent {
+    Ready(u32),
+    Failed(u32),
+}
+
 pub enum Event {
     Frame { x: u16, y: u16, w: u16, h: u16, kind: FrameKind, data: Vec<u8> },
     /// The picture has a new size from now on; frames before this message have the old one.
@@ -136,6 +143,8 @@ pub struct Link {
     child: Mutex<Option<Child>>,
     /// Where the session's clipboard text goes (set by the clipboard channel when the client opens it).
     clipboard: Mutex<Option<Box<dyn Fn(Vec<u8>) + Send + Sync>>>,
+    /// Where the session's answers about a clipboard file transfer go.
+    files: Mutex<Option<Box<dyn Fn(FilesEvent) + Send + Sync>>>,
     /// Where the session's clipboard image (PNG) goes.
     clipboard_image: Mutex<Option<Box<dyn Fn(Vec<u8>) + Send + Sync>>>,
     /// Where the session's sound goes (set by the sound channel when the client opens it).
@@ -200,6 +209,7 @@ impl Link {
             child: Mutex::new(child),
             clipboard: Mutex::new(None),
             clipboard_image: Mutex::new(None),
+            files: Mutex::new(None),
             audio: Mutex::new(None),
             _slot: slot,
         });
@@ -255,6 +265,16 @@ impl Link {
                             }
                         }
                     }
+                    Ok(Up::FilesReady { id }) => {
+                        if let Some(sink) = reader.files.lock().unwrap().as_ref() {
+                            sink(FilesEvent::Ready(id));
+                        }
+                    }
+                    Ok(Up::FilesFailed { id }) => {
+                        if let Some(sink) = reader.files.lock().unwrap().as_ref() {
+                            sink(FilesEvent::Failed(id));
+                        }
+                    }
                     Ok(Up::Audio { pcm }) => {
                         // Untrusted too: see `AudioGate`.
                         if audio_gate.allow(std::time::Instant::now(), pcm.len()) {
@@ -296,6 +316,11 @@ impl Link {
     /// Sets where the session's clipboard text is delivered.
     pub fn set_clipboard_sink(&self, sink: Box<dyn Fn(Vec<u8>) + Send + Sync>) {
         *self.clipboard.lock().unwrap() = Some(sink);
+    }
+
+    /// Sets where the session's answers about clipboard files are delivered.
+    pub fn set_files_sink(&self, sink: Box<dyn Fn(FilesEvent) + Send + Sync>) {
+        *self.files.lock().unwrap() = Some(sink);
     }
 
     /// Sets where the session's clipboard image (PNG) is delivered.

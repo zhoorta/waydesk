@@ -19,6 +19,7 @@ use crate::input;
 use crate::proto::{self, Down, FrameKind, Up};
 use crate::sessionaudio::Audio;
 use crate::sessionclip::Clipboard;
+use crate::sessionfiles::{Files, FilesOutcome};
 use crate::session::{self, Session};
 
 /// The daemon never grants more than this many at once (1000 when the client switched acknowledgements off).
@@ -115,6 +116,8 @@ struct Worker {
     up: mpsc::UnboundedSender<Up>,
     audio: Audio,
     clipboard: Clipboard,
+    /// The clipboard files being received from the client.
+    files: Files,
     /// Area changed since the last settle refresh. Between keyframes the encoder keeps improving the picture in
     /// places the client was not told to redraw, so a region drawn roughly during motion would stay rough.
     settle: Option<Rect>,
@@ -344,7 +347,7 @@ async fn serve_client(
     };
     let (w, h) = (session.shared.width, session.shared.height);
     session.shared.force_full();
-    let mut me = Worker { session: Some(session), enc: None, tuning: cfg.tuning, credits: 0, bitrate: None, bitmaps: cfg.tuning.is_none(), up: up_tx.clone(), audio: Audio::new(up_tx.clone()), clipboard: Clipboard::new(up_tx), settle: None, settling: false, last_frame: tokio::time::Instant::now(), last_rect: None, last_change: tokio::time::Instant::now() };
+    let mut me = Worker { session: Some(session), enc: None, tuning: cfg.tuning, credits: 0, bitrate: None, bitmaps: cfg.tuning.is_none(), up: up_tx.clone(), audio: Audio::new(up_tx.clone()), clipboard: Clipboard::new(up_tx), files: Files::default(), settle: None, settling: false, last_frame: tokio::time::Instant::now(), last_rect: None, last_change: tokio::time::Instant::now() };
     let _ = me.up.send(Up::Ready { width: w, height: h });
     // The shape of the mouse pointer goes to the client as it changes (when the client draws the pointer itself).
     if !crate::capture::cursor_in_picture() && crate::cursors::sway_reports_cursor() {
@@ -455,6 +458,25 @@ impl Worker {
             Down::Clipboard { data } => self.clipboard.set(data),
             Down::ClipboardImage { png } => self.clipboard.set_image(png),
             Down::ClipboardOn => self.clipboard.watch(),
+            Down::FilesBegin { id, files } => match self.files.begin(id, &files) {
+                FilesOutcome::Ready { done } => {
+                    let _ = self.up.send(Up::FilesReady { id });
+                    if let Some(list) = done {
+                        self.clipboard.set_uri_list(list);
+                    }
+                }
+                _ => {
+                    let _ = self.up.send(Up::FilesFailed { id });
+                }
+            },
+            Down::FilesData { id, index, offset, data } => match self.files.data(id, index, offset, &data) {
+                FilesOutcome::Done(list) => self.clipboard.set_uri_list(list),
+                FilesOutcome::Failed => {
+                    let _ = self.up.send(Up::FilesFailed { id });
+                }
+                _ => {}
+            },
+            Down::FilesCancel { id } => self.files.cancel(id),
             Down::AudioOn => self.audio.start(),
             Down::AudioOff => self.audio.stop(),
             Down::Resize { width, height, scale_percent } => self.resize(width, height, scale_percent).await,
