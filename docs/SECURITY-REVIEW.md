@@ -2,7 +2,8 @@
 
 Who wrote it: the author of the code, with an AI assistant, walking `docs/MULTIUSER-DESIGN.md` section 7 against the code
 and then testing what could be tested in a VM. **This is not an independent review and not an audit.** Nothing here
-justifies exposing the server to the internet. The stated deployment is: loopback, an SSH tunnel or a VPN.
+justifies exposing the server to the internet. The reasons behind the security-relevant design choices are in
+[`decisions/`](decisions/README.md) (002 privilege split, 008 memory, 009 network and login). The stated deployment is: loopback, an SSH tunnel or a VPN.
 
 Trust model used: the *network* is hostile; the *daemon* (`waydesk`, unprivileged) is the network-facing part and is
 assumed to be compromisable; the *helper* (root) and the packaged files are trusted; a *logged-in account* is trusted

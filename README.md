@@ -61,6 +61,7 @@ Early. Tested with FreeRDP and the Windows App on macOS. Not independently revie
 ## Documentation
 
 - [Website](https://waydesk.dev): architecture, measurements and their methods, security and a reference
+- [Decision records](docs/decisions/README.md): why Waydesk is built the way it is
 - [Guide](docs/GUIDE.md): the long form of this page: server and desktop packages, memory protection, who may log in, account management, running the daemon by hand
 - [Reference](docs/REFERENCE.md): packages, commands, units, ports and files
 - [Access](docs/ACCESS.md) and [WireGuard](docs/WIREGUARD.md): who can reach the port
