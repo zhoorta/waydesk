@@ -4,9 +4,9 @@ What changed, newest first. The numbered releases are the ones in the apt reposi
 
 ## Unreleased
 
-**Clipboard files, client to session.** `WAYDESK_CLIPBOARD_FILES=in` (or `--clipboard-files in`; default off) lets a client copy files and paste them in the session: up to 100 files, 64 MiB each, 256 MiB in all, no folders. The files are written by the session into a private spool under the runtime directory and offered on the clipboard as a file list. Design in `docs/decisions/016-clipboard-files.md`. Unit-tested in parts; not yet tried with a client.
+**Clipboard files, client to session.** `WAYDESK_CLIPBOARD_FILES=in` (or `--clipboard-files in`; default off) lets a client copy files and paste them in the session: up to 100 files, 64 MiB each, 256 MiB in all, no folders. The files are written by the session into a private spool under the runtime directory and offered on the clipboard as a file list. Design in `docs/decisions/016-clipboard-files.md`. Tried on 2026-11-04 with FreeRDP 3.15 on Linux (two files of 19 bytes and 300 kB arrive byte for byte; a 70 MB file and a folder are refused; a new copy replaces the spool). The macOS FreeRDP client offers no files at all, so it cannot test this. Not yet tried with the Windows App or a Windows client; the paste into a real file manager is not tried.
 
-**Clipboard images.** Copy a picture on the client and paste it in the session, and the other way round (CF_DIB on the RDP side, PNG on the Wayland side; 16 megapixels at most, transparency shown on white, text wins when both are offered). Files are not carried yet. Written and unit-tested for the converter on 2026-11-04; not yet tried with a real client.
+**Clipboard images.** Copy a picture on the client and paste it in the session, and the other way round (CF_DIB on the RDP side, PNG on the Wayland side; 16 megapixels at most, transparency shown on white, text wins when both are offered). Files are not carried yet. Tried on 2026-11-04 with FreeRDP 3.32 on macOS (picture both ways; it offers a PNG format, which Waydesk now takes before CF_DIB and also announces to the client as `PNG` and `image/png`). Not yet tried with the Windows App or a Windows client.
 
 ## 2026-11-01 · 0.5.0
 

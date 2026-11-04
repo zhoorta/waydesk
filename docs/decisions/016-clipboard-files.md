@@ -1,6 +1,6 @@
 # 016: Clipboard files
 
-Date: 2026-11-04. Status: accepted; stage 1 (client to session) built 2026-11-04, not yet tested with a client; stage 2 not built.
+Date: 2026-11-04. Status: accepted; stage 1 (client to session) built 2026-11-04, tested with FreeRDP on Linux (copy, limits, refusals), not with the Windows App or a file manager; stage 2 not built.
 
 ## Problem
 The clipboard carries text and images ([010](010-explicit-non-goals.md)). Business users also expect to copy files from their own machine and paste them into the session, and back. `ironrdp-cliprdr` 0.7 implements the protocol (file list, ranged file contents, locks, name sanitising) and the patched `ironrdp-server` forwards every event, but Waydesk's backend ignores them and does not advertise the capabilities, so clients never offer files. The unprivileged network daemon cannot write into an account's home, and the account's files must not be readable by the daemon, so the file work belongs to the session process, as the clipboard already does.
