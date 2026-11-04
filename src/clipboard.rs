@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use ironrdp_cliprdr::backend::{CliprdrBackend, CliprdrBackendFactory, ClipboardMessage};
 use ironrdp_cliprdr::pdu::{
-    ClipboardFileAttributes, ClipboardFormat, ClipboardFormatId, ClipboardGeneralCapabilityFlags, FileContentsFlags,
+    ClipboardFileAttributes, ClipboardFormat, ClipboardFormatId, ClipboardFormatName, ClipboardGeneralCapabilityFlags, FileContentsFlags,
     FileContentsRequest, FileContentsResponse, FileDescriptor, FormatDataRequest, FormatDataResponse, LockDataId,
 };
 use ironrdp_server::tokio::sync::mpsc::UnboundedSender;
@@ -176,6 +176,16 @@ fn image_format() -> ClipboardFormat {
     ClipboardFormat::new(ClipboardFormatId::CF_DIB)
 }
 
+/// The registered ids and names a PNG is offered under: Windows applications call it "PNG", FreeRDP and others "image/png".
+const PNG_NAMES: [(u32, &str); 2] = [(0xC100, "PNG"), (0xC101, "image/png")];
+
+/// What an image on the session clipboard is announced as: a DIB for anything, and the PNG itself under its two names.
+fn image_formats() -> Vec<ClipboardFormat> {
+    let mut v = vec![image_format()];
+    v.extend(PNG_NAMES.iter().map(|(id, name)| ClipboardFormat::new(ClipboardFormatId(*id)).with_name(ClipboardFormatName::new(*name))));
+    v
+}
+
 fn text_format() -> ClipboardFormat {
     ClipboardFormat::new(ClipboardFormatId::CF_UNICODETEXT)
 }
@@ -227,7 +237,7 @@ impl CliprdrBackend for Backend {
             info!(len = png.len(), "session clipboard image changed; announcing to the client");
             *st.session_image.lock().unwrap() = Some(png);
             *st.session_text.lock().unwrap() = None;
-            st.send(ClipboardMessage::SendInitiateCopy(vec![image_format()]));
+            st.send(ClipboardMessage::SendInitiateCopy(image_formats()));
         }));
         if self.st.files_in {
             let st = self.st.clone();
@@ -257,7 +267,7 @@ impl CliprdrBackend for Backend {
         if self.st.session_text.lock().unwrap().is_some() {
             self.st.send(ClipboardMessage::SendInitiateCopy(vec![text_format()]));
         } else if self.st.session_image.lock().unwrap().is_some() {
-            self.st.send(ClipboardMessage::SendInitiateCopy(vec![image_format()]));
+            self.st.send(ClipboardMessage::SendInitiateCopy(image_formats()));
         }
     }
 
@@ -310,6 +320,18 @@ impl CliprdrBackend for Backend {
 
     fn on_format_data_request(&mut self, request: FormatDataRequest) {
         info!(format = request.format.0, "client asks for the session clipboard");
+        if PNG_NAMES.iter().any(|(id, _)| *id == request.format.0) {
+            let png = self.st.session_image.lock().unwrap().clone();
+            let msg = match png {
+                Some(png) => {
+                    info!(bytes = png.len(), "sending the session clipboard image (PNG) to the client");
+                    FormatDataResponse::new_data(png)
+                }
+                None => FormatDataResponse::new_error(),
+            };
+            self.st.send(ClipboardMessage::SendFormatData(msg));
+            return;
+        }
         if request.format == ClipboardFormatId::CF_DIB {
             let png = self.st.session_image.lock().unwrap().clone();
             let dib = png.and_then(|p| crate::clipimage::png_to_dib(&p));
