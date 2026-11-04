@@ -142,7 +142,7 @@ impl ServerEventSender for Factory {
 
 impl CliprdrBackendFactory for Factory {
     fn build_cliprdr_backend(&self) -> Box<dyn CliprdrBackend> {
-        Box::new(Backend { st: self.st.clone(), ready_at: None, asked: ClipboardFormatId::CF_UNICODETEXT })
+        Box::new(Backend { st: self.st.clone(), ready_at: None, asked: ClipboardFormatId::CF_UNICODETEXT, asked_png: false })
     }
 }
 
@@ -154,6 +154,8 @@ struct Backend {
     ready_at: Option<std::time::Instant>,
     /// The format the last request to the client was for (the answer does not say).
     asked: ClipboardFormatId,
+    /// The last request was for the client's PNG format (named "PNG" or "image/png"), not CF_DIB.
+    asked_png: bool,
 }
 
 /// How long after the channel is ready the client's clipboard is left alone. The Windows App announces
@@ -262,6 +264,7 @@ impl CliprdrBackend for Backend {
     fn on_process_negotiated_capabilities(&mut self, _capabilities: ClipboardGeneralCapabilityFlags) {}
 
     fn on_remote_copy(&mut self, available_formats: &[ClipboardFormat]) {
+        info!(formats = ?available_formats.iter().map(|f| (f.id.0, f.name().map(|n| n.value().to_owned()))).collect::<Vec<_>>(), "client clipboard formats");
         // A new copy on the client ends a transfer of the old one.
         let old = self.st.xfer.lock().unwrap().as_ref().map(|t| t.id);
         if let Some(id) = old {
@@ -272,10 +275,17 @@ impl CliprdrBackend for Backend {
             .iter()
             .find(|f| f.name().is_some_and(|n| n.value().eq_ignore_ascii_case("FileGroupDescriptorW")))
             .map(|f| f.id);
+        // Windows clients name a PNG format "PNG"; FreeRDP calls it "image/png". It keeps transparency and needs no conversion.
+        let png_format = available_formats
+            .iter()
+            .find(|f| f.name().is_some_and(|n| n.value().eq_ignore_ascii_case("PNG") || n.value().eq_ignore_ascii_case("image/png")))
+            .map(|f| f.id);
         let format = if let Some(id) = file_format.filter(|_| self.st.files_in) {
             id
         } else if available_formats.iter().any(|f| f.id == ClipboardFormatId::CF_UNICODETEXT) {
             ClipboardFormatId::CF_UNICODETEXT
+        } else if let Some(id) = png_format {
+            id
         } else if available_formats.iter().any(|f| f.id == ClipboardFormatId::CF_DIB) {
             ClipboardFormatId::CF_DIB
         } else {
@@ -283,6 +293,7 @@ impl CliprdrBackend for Backend {
             return;
         };
         self.asked = format;
+        self.asked_png = png_format == Some(format);
         let wait = self.ready_at.map_or(SETTLE, |t| SETTLE.saturating_sub(t.elapsed()));
         if wait.is_zero() {
             info!(format = format.0, "client copied; asking for it");
@@ -331,7 +342,20 @@ impl CliprdrBackend for Backend {
 
     fn on_format_data_response(&mut self, response: FormatDataResponse<'_>) {
         if response.is_error() {
-            info!("the client could not provide the clipboard text");
+            info!(asked = self.asked.0, "the client could not provide the clipboard data it was asked for");
+            return;
+        }
+        if self.asked_png {
+            info!(bytes = response.data().len(), "client clipboard image (PNG) received");
+            let png = response.data();
+            if png.len() <= MAX_CLIPBOARD_IMAGE && crate::clipimage::png_within_limits(png) {
+                match self.st.slot.link() {
+                    Some(link) => link.send(Down::ClipboardImage { png: png.to_vec() }),
+                    None => debug!("client clipboard image dropped: no session"),
+                }
+            } else {
+                info!("client clipboard PNG refused (size or limits)");
+            }
             return;
         }
         if self.asked == ClipboardFormatId::CF_DIB {

@@ -86,6 +86,13 @@ pub fn dib_to_png(dib: &[u8]) -> Option<Vec<u8>> {
     Some(out)
 }
 
+/// Whether `data` is a PNG whose declared size is within the limits (the header only: applications decode it themselves).
+pub fn png_within_limits(data: &[u8]) -> bool {
+    let mut dec = png::Decoder::new(Cursor::new(data));
+    dec.set_limits(png::Limits { bytes: 3 * MAX_PIXELS as usize });
+    dec.read_info().is_ok_and(|r| size_ok(r.info().width, r.info().height))
+}
+
 /// A PNG as a CF_DIB: 24 bits per pixel, bottom row first; transparent parts are shown on white.
 pub fn png_to_dib(data: &[u8]) -> Option<Vec<u8>> {
     let mut dec = png::Decoder::new(Cursor::new(data));
@@ -203,6 +210,27 @@ mod tests {
         assert!(dib_to_png(&dib_header(i32::MAX, i32::MIN, 24, 0)).is_none());
         assert!(dib_to_png(&dib_header(1, 1, 24, 1)).is_none(), "RLE");
         assert!(dib_to_png(&dib_header(1, 1, 8, 0)).is_none(), "palette");
+    }
+
+    #[test]
+    fn png_limits_are_checked_on_the_header() {
+        let mut out = Vec::new();
+        let mut enc = png::Encoder::new(&mut out, 4, 4);
+        enc.set_color(png::ColorType::Grayscale);
+        enc.set_depth(png::BitDepth::Eight);
+        let mut w = enc.write_header().unwrap();
+        w.write_image_data(&[0u8; 16]).unwrap();
+        w.finish().unwrap();
+        assert!(png_within_limits(&out));
+        assert!(!png_within_limits(b"nope"));
+        let mut big = Vec::new();
+        let mut enc = png::Encoder::new(&mut big, 20000, 1);
+        enc.set_color(png::ColorType::Grayscale);
+        enc.set_depth(png::BitDepth::Eight);
+        let mut w = enc.write_header().unwrap();
+        w.write_image_data(&vec![0u8; 20000]).unwrap();
+        w.finish().unwrap();
+        assert!(!png_within_limits(&big));
     }
 
     #[test]
