@@ -21,3 +21,4 @@ A record is not rewritten when things change: a later record supersedes it and b
 | [013](013-repository-keys-and-first-administrator.md) | Own apt repository, the maintainer holds the key, every install creates an administrator | Accepted |
 | [014](014-agpl-licence.md) | AGPL-3.0-or-later | Accepted |
 | [015](015-existing-shell-and-chromium.md) | Reuse an existing shell; Chromium as the default browser | Accepted |
+| [016](016-clipboard-files.md) | Clipboard files, in two stages behind switches (design) | Proposed |
