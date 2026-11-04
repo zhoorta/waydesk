@@ -1,6 +1,6 @@
 # 016: Clipboard files
 
-Date: 2026-11-04. Status: accepted; stage 1 (client to session) built 2026-11-04, tested with FreeRDP on Linux (copy, limits, refusals), not with the Windows App or a file manager; stage 2 not built.
+Date: 2026-11-04. Status: accepted; both stages built 2026-11-04 and tested with FreeRDP on Linux (copy, limits, refusals, a changed file); not tested with the Windows App or a file manager.
 
 ## Problem
 The clipboard carries text and images ([010](010-explicit-non-goals.md)). Business users also expect to copy files from their own machine and paste them into the session, and back. `ironrdp-cliprdr` 0.7 implements the protocol (file list, ranged file contents, locks, name sanitising) and the patched `ironrdp-server` forwards every event, but Waydesk's backend ignores them and does not advertise the capabilities, so clients never offer files. The unprivileged network daemon cannot write into an account's home, and the account's files must not be readable by the daemon, so the file work belongs to the session process, as the clipboard already does.
@@ -39,6 +39,9 @@ A transfer has a deadline (30 s without a chunk, 10 minutes in all) and the daem
 
 ## Built (stage 1)
 `proto.rs` (`FilesBegin`, `FilesData`, `FilesCancel`, `FilesReady`, `FilesFailed`), `sessionfiles.rs` (spool, names, order checks; unit-tested in isolation), `clipboard.rs` (capabilities, `on_remote_file_list`, one range in flight, 30 s idle and 10 min total watchdog), `sessionclip.rs` (`set_uri_list`), `link.rs`, `worker.rs`, and the switch `--clipboard-files off|in` / `WAYDESK_CLIPBOARD_FILES`. The clipboard offers `text/uri-list` only (`wl-copy` offers one type); if a file manager needs `x-special/gnome-copied-files`, that is a change in `set_uri_list`. The switch lives in the daemon; the session enforces the limits whatever the daemon asks.
+
+## Built (stage 2)
+`--clipboard-files out|both`. The daemon tells the session (`Down::FilesOut`) that files may be offered; the session watches for a `text/uri-list` on its clipboard, and for a list of regular files (no folders, no links, 100 files, 64 MiB each, 256 MiB in all, names cleaned like stage 1) records path, size, device, inode and modification time and sends `Up::FilesOffered`. The daemon announces them (`SendInitiateFileCopy`), answers SIZE requests itself and RANGE requests (at most 1 MiB, cut at the end of the file, 16 waiting at most) through `Down::FilesRead`; the session opens the recorded path with `O_NOFOLLOW`, checks that size, inode and time are unchanged and answers with `Up::FilesData` or `Up::FilesReadFailed`. A new session or client copy replaces the offer. Tested: two files (19 bytes, 2.5 MB random) read byte for byte through FreeRDP's mount; a file changed after the offer is refused (the client sees an I/O error). A list the session cannot offer (a folder, a link) is not offered as files; the paths may go to the client as text, as before.
 
 ## Plan
 1. `proto.rs`: `FilesBegin`, `FilesData`, `FilesReady`, `Cancel` (Down), `FilesReady`, `FilesFailed` (Up), with limits and tests.

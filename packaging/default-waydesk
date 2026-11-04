@@ -89,5 +89,5 @@ WAYDESK_SESSION_ARGS=
 # The compositor of the sessions: sway (default), or hyprland, which needs a GPU and Hyprland 0.55 or later. Experimental: see docs/HYPRLAND.md.
 #WAYDESK_COMPOSITOR=sway
 
-# Files copied on the client and pasted in the session: off (default) or in. Up to 100 files, 64 MiB each, 256 MiB in all, no folders.
+# Files in the clipboard: off (default), in (client to session), out (session to client) or both. Up to 100 files, 64 MiB each, 256 MiB in all, no folders.
 #WAYDESK_CLIPBOARD_FILES=off
