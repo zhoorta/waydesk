@@ -87,6 +87,9 @@ impl AudioGate {
 /// The most clipboard texts a session may announce in a second. People copy a few times a second at most.
 const MAX_CLIPBOARD_PER_SECOND: u32 = 10;
 
+/// The most file offers a session may make in a second.
+const MAX_FILE_OFFERS_PER_SECOND: u32 = 5;
+
 /// The most clipboard images a session may announce in a second (each one can be megabytes).
 const MAX_CLIPBOARD_IMAGES_PER_SECOND: u32 = 2;
 
@@ -122,6 +125,14 @@ pub enum FilesEvent {
     Failed(u32),
 }
 
+/// What the session says about the files it offers to the client.
+#[derive(Debug)]
+pub enum FilesOutEvent {
+    Offered { id: u32, files: Vec<(String, u64)> },
+    Data { id: u32, index: u32, offset: u64, data: Vec<u8> },
+    ReadFailed { id: u32, index: u32, offset: u64 },
+}
+
 pub enum Event {
     Frame { x: u16, y: u16, w: u16, h: u16, kind: FrameKind, data: Vec<u8> },
     /// The picture has a new size from now on; frames before this message have the old one.
@@ -143,6 +154,8 @@ pub struct Link {
     child: Mutex<Option<Child>>,
     /// Where the session's clipboard text goes (set by the clipboard channel when the client opens it).
     clipboard: Mutex<Option<Box<dyn Fn(Vec<u8>) + Send + Sync>>>,
+    /// Where the session's offers of files (and their bytes) go.
+    files_out: Mutex<Option<Box<dyn Fn(FilesOutEvent) + Send + Sync>>>,
     /// Where the session's answers about a clipboard file transfer go.
     files: Mutex<Option<Box<dyn Fn(FilesEvent) + Send + Sync>>>,
     /// Where the session's clipboard image (PNG) goes.
@@ -210,6 +223,7 @@ impl Link {
             clipboard: Mutex::new(None),
             clipboard_image: Mutex::new(None),
             files: Mutex::new(None),
+            files_out: Mutex::new(None),
             audio: Mutex::new(None),
             _slot: slot,
         });
@@ -218,6 +232,7 @@ impl Link {
             let mut audio_gate = AudioGate::new(std::time::Instant::now());
             let mut clipboard_gate = ClipboardGate::new(std::time::Instant::now());
             let mut image_gate = ClipboardGate::new(std::time::Instant::now());
+            let mut offer_gate = ClipboardGate::new(std::time::Instant::now());
             loop {
                 let body = match proto::read_frame_async(&mut rd).await {
                     Ok(Some(b)) => b,
@@ -263,6 +278,24 @@ impl Link {
                             if let Some(sink) = reader.clipboard_image.lock().unwrap().as_ref() {
                                 sink(png);
                             }
+                        }
+                    }
+                    Ok(Up::FilesOffered { id, files }) => {
+                        // Untrusted: a few offers a second (the daemon checks the list itself).
+                        if offer_gate.allow(std::time::Instant::now(), 0, 0, MAX_FILE_OFFERS_PER_SECOND) {
+                            if let Some(sink) = reader.files_out.lock().unwrap().as_ref() {
+                                sink(FilesOutEvent::Offered { id, files });
+                            }
+                        }
+                    }
+                    Ok(Up::FilesData { id, index, offset, data }) => {
+                        if let Some(sink) = reader.files_out.lock().unwrap().as_ref() {
+                            sink(FilesOutEvent::Data { id, index, offset, data });
+                        }
+                    }
+                    Ok(Up::FilesReadFailed { id, index, offset }) => {
+                        if let Some(sink) = reader.files_out.lock().unwrap().as_ref() {
+                            sink(FilesOutEvent::ReadFailed { id, index, offset });
                         }
                     }
                     Ok(Up::FilesReady { id }) => {
@@ -316,6 +349,11 @@ impl Link {
     /// Sets where the session's clipboard text is delivered.
     pub fn set_clipboard_sink(&self, sink: Box<dyn Fn(Vec<u8>) + Send + Sync>) {
         *self.clipboard.lock().unwrap() = Some(sink);
+    }
+
+    /// Sets where the session's offers of files are delivered.
+    pub fn set_files_out_sink(&self, sink: Box<dyn Fn(FilesOutEvent) + Send + Sync>) {
+        *self.files_out.lock().unwrap() = Some(sink);
     }
 
     /// Sets where the session's answers about clipboard files are delivered.

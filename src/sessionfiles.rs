@@ -6,12 +6,12 @@
 use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
 use std::io::Write as _;
-use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
+use std::os::unix::fs::{DirBuilderExt as _, FileExt as _, MetadataExt as _, OpenOptionsExt as _};
 use std::path::{Path, PathBuf};
 
 use tracing::{info, warn};
 
-use crate::proto::{MAX_FILES, MAX_FILES_TOTAL, MAX_FILE_BYTES};
+use crate::proto::{MAX_FILES, MAX_FILES_TOTAL, MAX_FILE_BYTES, MAX_FILE_READ};
 
 /// The name a received file gets, or `None` when the whole list must be refused: a name with a path in it, a control
 /// character, nothing at all, or too long. A leading dot is replaced by an underscore (a transfer does not create
@@ -222,6 +222,114 @@ impl Transfer {
     }
 }
 
+// ---- session to client ----
+
+/// The files of a `text/uri-list` (CRLF lines) as paths; `None` when a line is not a `file:` URI of this machine.
+pub fn parse_uri_list(list: &str) -> Option<Vec<PathBuf>> {
+    use std::os::unix::ffi::OsStringExt as _;
+    let mut out = Vec::new();
+    for line in list.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')) {
+        let rest = line.strip_prefix("file://")?;
+        let path = rest.strip_prefix("localhost").unwrap_or(rest);
+        if !path.starts_with('/') {
+            return None;
+        }
+        let bytes = path.as_bytes();
+        let mut dec = Vec::with_capacity(bytes.len());
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == b'%' {
+                let hex = std::str::from_utf8(bytes.get(i + 1..i + 3)?).ok()?;
+                dec.push(u8::from_str_radix(hex, 16).ok()?);
+                i += 3;
+            } else {
+                dec.push(bytes[i]);
+                i += 1;
+            }
+        }
+        if dec.contains(&0) {
+            return None;
+        }
+        out.push(PathBuf::from(std::ffi::OsString::from_vec(dec)));
+        if out.len() > MAX_FILES {
+            return None;
+        }
+    }
+    Some(out)
+}
+
+struct OfferFile {
+    path: PathBuf,
+    size: u64,
+    dev: u64,
+    ino: u64,
+    mtime: (i64, i64),
+}
+
+struct Offer {
+    id: u32,
+    files: Vec<OfferFile>,
+}
+
+/// The files of the session's clipboard that are offered to the client. The client (through the daemon) names a file only
+/// by number; the path is the one recorded here, and a file that changed since is not served.
+#[derive(Default)]
+pub struct OutFiles {
+    next_id: u32,
+    offer: Option<Offer>,
+}
+
+impl OutFiles {
+    /// Records the files of `list` as the current offer and returns its id with the names and sizes to announce. `None` (and
+    /// no offer) when there is nothing acceptable: a folder, a link, something that is not a regular file, over the limits.
+    pub fn offer(&mut self, list: &str) -> Option<(u32, Vec<(String, u64)>)> {
+        self.offer = None;
+        let paths = parse_uri_list(list)?;
+        if paths.is_empty() || paths.len() > MAX_FILES {
+            return None;
+        }
+        let (mut files, mut names, mut used, mut total) = (Vec::new(), Vec::new(), HashSet::new(), 0u64);
+        for path in paths {
+            let m = std::fs::symlink_metadata(&path).ok()?;
+            if !m.is_file() || m.size() > MAX_FILE_BYTES {
+                return None;
+            }
+            total = total.saturating_add(m.size());
+            if total > MAX_FILES_TOTAL {
+                return None;
+            }
+            let name = unique(&clean_name(path.file_name()?.to_str()?)?, &used);
+            used.insert(name.clone());
+            names.push((name, m.size()));
+            files.push(OfferFile { path, size: m.size(), dev: m.dev(), ino: m.ino(), mtime: (m.mtime(), m.mtime_nsec()) });
+        }
+        self.next_id = self.next_id.wrapping_add(1).max(1);
+        let id = self.next_id;
+        info!(id, files = files.len(), total, "clipboard files offered to the client");
+        self.offer = Some(Offer { id, files });
+        Some((id, names))
+    }
+
+    /// `len` bytes at `offset` of file `index` of offer `id`, or `None` when it is not the current offer, the range is not in
+    /// the file, or the file is not the one that was offered any more.
+    pub fn read(&self, id: u32, index: u32, offset: u64, len: u32) -> Option<Vec<u8>> {
+        let offer = self.offer.as_ref().filter(|o| o.id == id)?;
+        let f = offer.files.get(index as usize)?;
+        if len > MAX_FILE_READ || offset > f.size {
+            return None;
+        }
+        let file = OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(&f.path).ok()?;
+        let m = file.metadata().ok()?;
+        if !m.is_file() || m.size() != f.size || m.dev() != f.dev || m.ino() != f.ino || (m.mtime(), m.mtime_nsec()) != f.mtime {
+            warn!("clipboard files: a file changed since it was offered; not served");
+            return None;
+        }
+        let mut buf = vec![0u8; (u64::from(len)).min(f.size - offset) as usize];
+        file.read_exact_at(&mut buf, offset).ok()?;
+        Some(buf)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -306,5 +414,58 @@ mod tests {
             f.cancel(9);
             assert!(f.cur.is_none());
         });
+    }
+
+    #[test]
+    fn uri_lists_are_parsed_strictly() {
+        assert_eq!(parse_uri_list("file:///a/b%20c\r\nfile://localhost/d\r\n# note\r\n").unwrap(), vec![PathBuf::from("/a/b c"), PathBuf::from("/d")]);
+        for bad in ["http://x/y", "file://host/x", "file:relative", "file:///a%zz", "file:///a%00b", "/plain/path"] {
+            assert_eq!(parse_uri_list(bad), None, "{bad}");
+        }
+        assert_eq!(parse_uri_list("").unwrap(), Vec::<PathBuf>::new());
+    }
+
+    #[test]
+    fn offered_files_are_served_by_index_and_only_while_unchanged() {
+        let dir = std::env::temp_dir().join(format!("wdout-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("a.txt"), b"0123456789").unwrap();
+        std::fs::write(dir.join("b.txt"), b"").unwrap();
+        std::os::unix::fs::symlink(dir.join("a.txt"), dir.join("link")).unwrap();
+        let uri = |n: &str| format!("file://{}\r\n", dir.join(n).display());
+        let mut o = OutFiles::default();
+
+        let (id, names) = o.offer(&format!("{}{}", uri("a.txt"), uri("b.txt"))).expect("offer");
+        assert_eq!(names, vec![("a.txt".to_string(), 10), ("b.txt".to_string(), 0)]);
+        assert_eq!(o.read(id, 0, 2, 4).unwrap(), b"2345");
+        assert_eq!(o.read(id, 0, 8, 100).unwrap(), b"89", "a range past the end is cut");
+        assert_eq!(o.read(id, 0, 10, 4).unwrap(), b"", "at the end");
+        assert_eq!(o.read(id, 1, 0, 4).unwrap(), b"");
+        assert!(o.read(id, 0, 11, 1).is_none(), "past the end");
+        assert!(o.read(id, 2, 0, 1).is_none(), "no such file");
+        assert!(o.read(id + 1, 0, 0, 1).is_none(), "not the current offer");
+        assert!(o.read(id, 0, 0, MAX_FILE_READ + 1).is_none(), "too long a range");
+
+        // A file that changed is not served.
+        std::fs::write(dir.join("a.txt"), b"0123456789!").unwrap();
+        assert!(o.read(id, 0, 0, 4).is_none());
+
+        // Not offered at all: folders, links, other lines, a missing file, a name that is not acceptable.
+        for list in [uri("sub"), uri("link"), uri("missing"), "file:///etc/hostname\r\nhttp://x\r\n".to_string()] {
+            assert!(o.offer(&list).is_none(), "{list}");
+            assert!(o.read(id, 0, 0, 1).is_none(), "a refused list leaves no offer");
+        }
+        // The same name twice gets a number; a new offer has a new id.
+        std::fs::create_dir_all(dir.join("sub2")).unwrap();
+        std::fs::write(dir.join("sub2/b.txt"), b"x").unwrap();
+        let (id2, names) = o.offer(&format!("{}file://{}\r\n", uri("b.txt"), dir.join("sub2/b.txt").display())).unwrap();
+        assert_ne!(id2, id);
+        assert_eq!(names[1].0, "b (2).txt");
+        // Over the limits.
+        let big = std::fs::File::create(dir.join("big")).unwrap();
+        big.set_len(MAX_FILE_BYTES + 1).unwrap();
+        assert!(o.offer(&uri("big")).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

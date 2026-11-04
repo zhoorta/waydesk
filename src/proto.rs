@@ -74,6 +74,8 @@ pub const MAX_FILES: usize = 100;
 pub const MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;
 pub const MAX_FILES_TOTAL: u64 = 256 * 1024 * 1024;
 pub const FILE_CHUNK: u32 = 256 * 1024;
+/// Clipboard files, session to client: the most bytes of one range the client may ask for.
+pub const MAX_FILE_READ: u32 = 1024 * 1024;
 
 /// From the network daemon to the session.
 #[derive(Debug, PartialEq)]
@@ -102,6 +104,10 @@ pub enum Down {
     FilesData { id: u32, index: u32, offset: u64, data: Vec<u8> },
     /// Drop transfer `id` and what was written of it.
     FilesCancel { id: u32 },
+    /// The client may be offered the session's files: from now on report file lists on the session clipboard (`Up::FilesOffered`).
+    FilesOut,
+    /// Read `len` bytes at `offset` of file number `index` of the offer `id`. Answered by `Up::FilesData` or `Up::FilesReadFailed`.
+    FilesRead { id: u32, index: u32, offset: u64, len: u32 },
     /// The client has a clipboard channel: start watching the session's clipboard.
     ClipboardOn,
     /// The client has a sound channel: record the session's speaker and send it as `Up::Audio`.
@@ -124,6 +130,12 @@ pub enum Up {
     Clipboard { data: Vec<u8> },
     /// The session's clipboard holds this image (PNG).
     ClipboardImage { png: Vec<u8> },
+    /// The session clipboard holds these files (name, size); offer `id` stays valid until the next one.
+    FilesOffered { id: u32, files: Vec<(String, u64)> },
+    /// The bytes asked for by `Down::FilesRead`.
+    FilesData { id: u32, index: u32, offset: u64, data: Vec<u8> },
+    /// `Down::FilesRead` could not be served (the file changed or is gone).
+    FilesReadFailed { id: u32, index: u32, offset: u64 },
     /// Transfer `id` was accepted: the files can be sent.
     FilesReady { id: u32 },
     /// Transfer `id` was refused or broke off; nothing of it is left.
@@ -297,6 +309,14 @@ impl Down {
                 o.u8(18);
                 o.u32(*id);
             }
+            Down::FilesOut => o.u8(19),
+            Down::FilesRead { id, index, offset, len } => {
+                o.u8(20);
+                o.u32(*id);
+                o.u32(*index);
+                o.u64(*offset);
+                o.u32(*len);
+            }
             Down::ClipboardImage { png } => {
                 o.u8(15);
                 o.bytes(png);
@@ -335,6 +355,8 @@ impl Down {
             }
             17 => Down::FilesData { id: i.u32()?, index: i.u32()?, offset: i.u64()?, data: i.bytes()? },
             18 => Down::FilesCancel { id: i.u32()? },
+            19 => Down::FilesOut,
+            20 => Down::FilesRead { id: i.u32()?, index: i.u32()?, offset: i.u64()?, len: i.u32()? },
             12 => Down::AudioOn,
             13 => Down::AudioOff,
             255 => Down::Bye,
@@ -380,6 +402,28 @@ impl Up {
                 o.u8(8);
                 o.bytes(png);
             }
+            Up::FilesOffered { id, files } => {
+                o.u8(11);
+                o.u32(*id);
+                o.u32(files.len() as u32);
+                for (name, size) in files {
+                    o.str(name);
+                    o.u64(*size);
+                }
+            }
+            Up::FilesData { id, index, offset, data } => {
+                o.u8(12);
+                o.u32(*id);
+                o.u32(*index);
+                o.u64(*offset);
+                o.bytes(data);
+            }
+            Up::FilesReadFailed { id, index, offset } => {
+                o.u8(13);
+                o.u32(*id);
+                o.u32(*index);
+                o.u64(*offset);
+            }
             Up::FilesReady { id } => {
                 o.u8(9);
                 o.u32(*id);
@@ -423,6 +467,19 @@ impl Up {
             5 => Up::Clipboard { data: i.bytes()? },
             8 => Up::ClipboardImage { png: i.bytes()? },
             9 => Up::FilesReady { id: i.u32()? },
+            11 => {
+                let (id, n) = (i.u32()?, i.u32()?);
+                if n as usize > MAX_FILES {
+                    return Err(ProtoError::TooLarge(n));
+                }
+                let mut files = Vec::with_capacity(n as usize);
+                for _ in 0..n {
+                    files.push((i.str()?, i.u64()?));
+                }
+                Up::FilesOffered { id, files }
+            }
+            12 => Up::FilesData { id: i.u32()?, index: i.u32()?, offset: i.u64()?, data: i.bytes()? },
+            13 => Up::FilesReadFailed { id: i.u32()?, index: i.u32()?, offset: i.u64()? },
             10 => Up::FilesFailed { id: i.u32()? },
             6 => Up::Cursor { name: i.str()? },
             7 => Up::CursorImage { hot_x: i.u16()?, hot_y: i.u16()?, width: i.u16()?, height: i.u16()?, data: i.bytes()? },
@@ -634,6 +691,8 @@ mod tests {
             Down::FilesBegin { id: 7, files: vec![("a.txt".into(), 5), ("b".into(), 0)] },
             Down::FilesData { id: 7, index: 0, offset: 0, data: vec![1, 2, 3] },
             Down::FilesCancel { id: 7 },
+            Down::FilesOut,
+            Down::FilesRead { id: 7, index: 1, offset: 4096, len: 65536 },
             Down::ClipboardOn,
             Down::AudioOn,
             Down::AudioOff,
@@ -652,6 +711,9 @@ mod tests {
             Up::ClipboardImage { png: vec![0x89, b'P'] },
             Up::FilesReady { id: 7 },
             Up::FilesFailed { id: 7 },
+            Up::FilesOffered { id: 3, files: vec![("x.txt".into(), 9)] },
+            Up::FilesData { id: 3, index: 0, offset: 0, data: vec![1, 2] },
+            Up::FilesReadFailed { id: 3, index: 0, offset: 0 },
             Up::Cursor { name: "ew-resize".into() },
             Up::CursorImage { hot_x: 1, hot_y: 2, width: 2, height: 1, data: vec![1, 2, 3, 4, 5, 6, 7, 8] },
             Up::Bye,

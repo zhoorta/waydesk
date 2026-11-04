@@ -4,7 +4,8 @@
 //! Session copy: the session sends its text when the clipboard changes, we announce it and answer the client's request.
 //! Images (CF_DIB on the RDP side, PNG on the Wayland side) go the same way and are converted here (`clipimage.rs`), with limits.
 //! Files from the client (docs/decisions/016-clipboard-files.md) are fetched in ranges here and handed to the session, which
-//! writes them (`sessionfiles.rs`); they are on only when the daemon is started with `--clipboard-files in`.
+//! writes them (`sessionfiles.rs`); they are on only when the daemon is started with `--clipboard-files in`. Files the session
+//! copies go the other way (`--clipboard-files out`): the session offers a list, and the client's range requests are answered from the session.
 
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
@@ -19,8 +20,8 @@ use ironrdp_server::tokio::sync::mpsc::UnboundedSender;
 use ironrdp_server::{CliprdrServerFactory, ServerEvent, ServerEventSender};
 use tracing::{debug, info};
 
-use crate::link::FilesEvent;
-use crate::proto::{Down, FILE_CHUNK, MAX_CLIPBOARD, MAX_CLIPBOARD_IMAGE, MAX_FILES, MAX_FILES_TOTAL, MAX_FILE_BYTES};
+use crate::link::{FilesEvent, FilesOutEvent};
+use crate::proto::{Down, FILE_CHUNK, MAX_CLIPBOARD, MAX_CLIPBOARD_IMAGE, MAX_FILE_READ, MAX_FILES, MAX_FILES_TOTAL, MAX_FILE_BYTES};
 use crate::Slot;
 
 struct Shared {
@@ -33,10 +34,32 @@ struct Shared {
     session_image: Mutex<Option<Vec<u8>>>,
     /// Files from the client are accepted (`--clipboard-files in`).
     files_in: bool,
+    /// Files of the session are offered to the client (`--clipboard-files out`).
+    files_out: bool,
+    /// The session's files offered to the client now, and the ranges asked for.
+    out_offer: Mutex<Option<OutOffer>>,
     /// The file transfer in progress, if any (one at a time).
     xfer: Mutex<Option<Xfer>>,
     next_id: AtomicU32,
 }
+
+/// The files of the session that the client was told about.
+struct OutOffer {
+    id: u32,
+    sizes: Vec<u64>,
+    pending: Vec<Pending>,
+}
+
+/// A range the client asked for and the session has not answered yet.
+struct Pending {
+    index: u32,
+    offset: u64,
+    len: u32,
+    stream: u32,
+}
+
+/// Most ranges waiting for the session at once.
+const MAX_PENDING_READS: usize = 16;
 
 /// A transfer of the client's files to the session: the daemon asks the client for one range at a time.
 struct Xfer {
@@ -69,6 +92,50 @@ impl Shared {
             drop(x);
             if let Some(link) = self.slot.link() {
                 link.send(Down::FilesCancel { id });
+            }
+        }
+    }
+
+    /// The session offers files, sends bytes the client asked for, or could not.
+    fn files_out_event(&self, event: FilesOutEvent) {
+        match event {
+            FilesOutEvent::Offered { id, files } => {
+                let ok = !files.is_empty()
+                    && files.len() <= MAX_FILES
+                    && files.iter().all(|(n, s)| *s <= MAX_FILE_BYTES && crate::sessionfiles::clean_name(n).as_deref() == Some(n.as_str()))
+                    && files.iter().map(|(_, s)| *s).fold(0, u64::saturating_add) <= MAX_FILES_TOTAL;
+                if !ok {
+                    info!(id, files = files.len(), "files offered by the session refused: over the limits or an unacceptable name");
+                    return;
+                }
+                let descriptors: Vec<FileDescriptor> = files
+                    .iter()
+                    .map(|(n, s)| FileDescriptor::new(n.clone()).with_file_size(*s).with_attributes(ClipboardFileAttributes::NORMAL))
+                    .collect();
+                *self.out_offer.lock().unwrap() = Some(OutOffer { id, sizes: files.iter().map(|(_, s)| *s).collect(), pending: Vec::new() });
+                // The clipboard now holds files, not what it held before.
+                *self.session_text.lock().unwrap() = None;
+                *self.session_image.lock().unwrap() = None;
+                info!(id, files = files.len(), "session files offered to the client");
+                self.send(ClipboardMessage::SendInitiateFileCopy(descriptors));
+            }
+            FilesOutEvent::Data { id, index, offset, data } => {
+                let stream = {
+                    let mut guard = self.out_offer.lock().unwrap();
+                    let Some(o) = guard.as_mut().filter(|o| o.id == id) else { return };
+                    let Some(at) = o.pending.iter().position(|p| p.index == index && p.offset == offset && p.len as usize >= data.len()) else { return };
+                    o.pending.remove(at).stream
+                };
+                self.send(ClipboardMessage::SendFileContentsResponse(FileContentsResponse::new_data_response(stream, data)));
+            }
+            FilesOutEvent::ReadFailed { id, index, offset } => {
+                let stream = {
+                    let mut guard = self.out_offer.lock().unwrap();
+                    let Some(o) = guard.as_mut().filter(|o| o.id == id) else { return };
+                    let Some(at) = o.pending.iter().position(|p| p.index == index && p.offset == offset) else { return };
+                    o.pending.remove(at).stream
+                };
+                self.send(ClipboardMessage::SendFileContentsResponse(FileContentsResponse::new_error(stream)));
             }
         }
     }
@@ -119,7 +186,7 @@ pub struct Factory {
 }
 
 impl Factory {
-    pub fn new(slot: Arc<Slot>, files_in: bool) -> Self {
+    pub fn new(slot: Arc<Slot>, files_in: bool, files_out: bool) -> Self {
         Self {
             st: Arc::new(Shared {
                 sender: Mutex::new(None),
@@ -127,6 +194,8 @@ impl Factory {
                 session_text: Mutex::new(None),
                 session_image: Mutex::new(None),
                 files_in,
+                files_out,
+                out_offer: Mutex::new(None),
                 xfer: Mutex::new(None),
                 next_id: AtomicU32::new(1),
             }),
@@ -209,7 +278,7 @@ impl CliprdrBackend for Backend {
     fn client_capabilities(&self) -> ClipboardGeneralCapabilityFlags {
         // The Windows App on macOS did not answer requests for the text without this one.
         let mut flags = ClipboardGeneralCapabilityFlags::USE_LONG_FORMAT_NAMES;
-        if self.st.files_in {
+        if self.st.files_in || self.st.files_out {
             flags |= ClipboardGeneralCapabilityFlags::STREAM_FILECLIP_ENABLED
                 | ClipboardGeneralCapabilityFlags::CAN_LOCK_CLIPDATA
                 | ClipboardGeneralCapabilityFlags::FILECLIP_NO_FILE_PATHS;
@@ -230,6 +299,7 @@ impl CliprdrBackend for Backend {
             info!(len = text.len(), "session clipboard changed; announcing to the client");
             *st.session_text.lock().unwrap() = Some(text);
             *st.session_image.lock().unwrap() = None;
+            *st.out_offer.lock().unwrap() = None;
             st.send(ClipboardMessage::SendInitiateCopy(vec![text_format()]));
         }));
         let st = self.st.clone();
@@ -237,6 +307,7 @@ impl CliprdrBackend for Backend {
             info!(len = png.len(), "session clipboard image changed; announcing to the client");
             *st.session_image.lock().unwrap() = Some(png);
             *st.session_text.lock().unwrap() = None;
+            *st.out_offer.lock().unwrap() = None;
             st.send(ClipboardMessage::SendInitiateCopy(image_formats()));
         }));
         if self.st.files_in {
@@ -258,6 +329,11 @@ impl CliprdrBackend for Backend {
                 }
             }));
         }
+        if self.st.files_out {
+            let st = self.st.clone();
+            link.set_files_out_sink(Box::new(move |event| st.files_out_event(event)));
+            link.send(Down::FilesOut);
+        }
         // The session reports its clipboard changes from now on.
         link.send(Down::ClipboardOn);
     }
@@ -275,6 +351,8 @@ impl CliprdrBackend for Backend {
 
     fn on_remote_copy(&mut self, available_formats: &[ClipboardFormat]) {
         info!(formats = ?available_formats.iter().map(|f| (f.id.0, f.name().map(|n| n.value().to_owned()))).collect::<Vec<_>>(), "client clipboard formats");
+        // The client owns the clipboard now: the session's files are not on offer any more.
+        *self.st.out_offer.lock().unwrap() = None;
         // A new copy on the client ends a transfer of the old one.
         let old = self.st.xfer.lock().unwrap().as_ref().map(|t| t.id);
         if let Some(id) = old {
@@ -448,7 +526,32 @@ impl CliprdrBackend for Backend {
         });
     }
 
-    fn on_file_contents_request(&mut self, _request: FileContentsRequest) {}
+    fn on_file_contents_request(&mut self, request: FileContentsRequest) {
+        let st = &self.st;
+        let error = || st.send(ClipboardMessage::SendFileContentsResponse(FileContentsResponse::new_error(request.stream_id)));
+        let Some(link) = st.slot.link() else { return error() };
+        let mut guard = st.out_offer.lock().unwrap();
+        let Some(o) = guard.as_mut() else { return error() };
+        let Some(&size) = usize::try_from(request.index).ok().and_then(|i| o.sizes.get(i)) else { return error() };
+        if request.flags.contains(FileContentsFlags::SIZE) {
+            drop(guard);
+            return st.send(ClipboardMessage::SendFileContentsResponse(FileContentsResponse::new_size_response(request.stream_id, size)));
+        }
+        // A range: at most 1 MiB, cut at the end of the file, answered by the session.
+        if !request.flags.contains(FileContentsFlags::RANGE) || request.requested_size > MAX_FILE_READ || request.position > size || o.pending.len() >= MAX_PENDING_READS {
+            drop(guard);
+            return error();
+        }
+        let len = u32::try_from((size - request.position).min(u64::from(request.requested_size))).unwrap_or(0);
+        if len == 0 {
+            drop(guard);
+            return st.send(ClipboardMessage::SendFileContentsResponse(FileContentsResponse::new_data_response(request.stream_id, Vec::new())));
+        }
+        o.pending.push(Pending { index: request.index as u32, offset: request.position, len, stream: request.stream_id });
+        let id = o.id;
+        drop(guard);
+        link.send(Down::FilesRead { id, index: request.index as u32, offset: request.position, len });
+    }
 
     fn on_file_contents_response(&mut self, response: FileContentsResponse<'_>) {
         let step = {

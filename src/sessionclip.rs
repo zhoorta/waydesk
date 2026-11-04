@@ -22,11 +22,15 @@ pub struct Clipboard {
     last_set: Arc<Mutex<Option<String>>>,
     /// The same for an image (PNG bytes).
     last_image: Arc<Mutex<Option<Vec<u8>>>>,
+    /// The daemon allows files to go to the client (`Down::FilesOut`).
+    files_out: Arc<std::sync::atomic::AtomicBool>,
+    /// The files of the session clipboard that were offered to the client.
+    out_files: Arc<Mutex<crate::sessionfiles::OutFiles>>,
 }
 
 impl Clipboard {
     pub fn new(up: mpsc::UnboundedSender<Up>) -> Self {
-        Self { watcher: Arc::new(Mutex::new(None)), stopped: Arc::new(std::sync::atomic::AtomicBool::new(false)), up, last_set: Arc::new(Mutex::new(None)), last_image: Arc::new(Mutex::new(None)) }
+        Self { watcher: Arc::new(Mutex::new(None)), stopped: Arc::new(std::sync::atomic::AtomicBool::new(false)), up, last_set: Arc::new(Mutex::new(None)), last_image: Arc::new(Mutex::new(None)), files_out: Arc::new(std::sync::atomic::AtomicBool::new(false)), out_files: Arc::new(Mutex::new(Default::default())) }
     }
 
     /// (Re)starts the watch. `wl-paste --watch` runs its command once at once and then on every change; that first
@@ -36,6 +40,7 @@ impl Clipboard {
         self.stop();
         self.stopped = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let (up, last_set, last_image, watcher, stopped) = (self.up.clone(), self.last_set.clone(), self.last_image.clone(), self.watcher.clone(), self.stopped.clone());
+        let (files_out, out_files) = (self.files_out.clone(), self.out_files.clone());
         // The clipboard of a nested desktop (COSMIC, Plasma) is its own, on its own display, which appears some seconds after the session starts: wait for it off this thread.
         std::thread::spawn(move || {
             let display = if crate::compositor::is_nested() {
@@ -78,6 +83,21 @@ impl Clipboard {
                         }
                         if std::mem::take(&mut first) {
                             continue;
+                        }
+                        // Files copied in the session (a file manager) go to the client as files, when that is allowed.
+                        if files_out.load(std::sync::atomic::Ordering::Relaxed) {
+                            if let Some(list) = wayland_uri_list() {
+                                if last_set.lock().unwrap().as_deref() == Some(list.as_str()) {
+                                    continue; // the files the client just sent
+                                }
+                                let offered = out_files.lock().unwrap().offer(&list);
+                                if let Some((id, files)) = offered {
+                                    if up.send(Up::FilesOffered { id, files }).is_err() {
+                                        break;
+                                    }
+                                    continue;
+                                }
+                            }
                         }
                         // Text wins when both are offered (a spreadsheet cell comes as text and as a picture).
                         let Some(text) = wayland_text() else {
@@ -156,6 +176,27 @@ impl Clipboard {
 }
 
 impl Clipboard {
+    /// The daemon allows (or not) the session's files to be offered to the client.
+    pub fn set_files_out(&self, on: bool) {
+        self.files_out.store(on, std::sync::atomic::Ordering::Relaxed);
+        if !on {
+            *self.out_files.lock().unwrap() = Default::default();
+        }
+    }
+
+    /// Reads a range of an offered file and sends it (or the failure) to the daemon.
+    pub fn files_read(&self, id: u32, index: u32, offset: u64, len: u32) {
+        let (out, up) = (self.out_files.clone(), self.up.clone());
+        let allowed = self.files_out.load(std::sync::atomic::Ordering::Relaxed);
+        std::thread::spawn(move || {
+            let data = if allowed { out.lock().unwrap().read(id, index, offset, len) } else { None };
+            let _ = up.send(match data {
+                Some(data) => Up::FilesData { id, index, offset, data },
+                None => Up::FilesReadFailed { id, index, offset },
+            });
+        });
+    }
+
     /// Puts a list of files (`text/uri-list`, CRLF lines) on the session clipboard: a paste in the file manager copies them.
     pub fn set_uri_list(&self, list: String) {
         // Remembered so that the watch does not send the list back to the client as text.
@@ -229,6 +270,32 @@ fn wayland_text() -> Option<String> {
     }
     let text = String::from_utf8(out.stdout).ok()?;
     (!text.is_empty()).then_some(text)
+}
+
+/// The `text/uri-list` the Wayland clipboard offers (at most 256 kB), if it offers one.
+fn wayland_uri_list() -> Option<String> {
+    use std::io::Read as _;
+    let display = if crate::compositor::is_nested() { Some(nested_display()?) } else { None };
+    let mut types = Command::new("wl-paste");
+    types.arg("--list-types").stderr(Stdio::null());
+    if let Some(d) = &display {
+        types.env("WAYLAND_DISPLAY", d);
+    }
+    let listed = String::from_utf8(types.output().ok()?.stdout).ok()?;
+    if !listed.lines().any(|t| t == "text/uri-list") {
+        return None;
+    }
+    let mut cmd = Command::new("wl-paste");
+    cmd.args(["--type", "text/uri-list"]).stdout(Stdio::piped()).stderr(Stdio::null());
+    if let Some(d) = &display {
+        cmd.env("WAYLAND_DISPLAY", d);
+    }
+    let mut child = cmd.spawn().ok()?;
+    let mut bytes = Vec::new();
+    child.stdout.take()?.take(256 * 1024 + 1).read_to_end(&mut bytes).ok()?;
+    let _ = child.kill();
+    let _ = child.wait();
+    (bytes.len() <= 256 * 1024).then(|| String::from_utf8(bytes).ok()).flatten().filter(|s| !s.is_empty())
 }
 
 /// What the Wayland clipboard holds as a PNG, if it offers an image and no text.

@@ -477,6 +477,8 @@ impl Worker {
                 _ => {}
             },
             Down::FilesCancel { id } => self.files.cancel(id),
+            Down::FilesOut => self.clipboard.set_files_out(true),
+            Down::FilesRead { id, index, offset, len } => self.clipboard.files_read(id, index, offset, len),
             Down::AudioOn => self.audio.start(),
             Down::AudioOff => self.audio.stop(),
             Down::Resize { width, height, scale_percent } => self.resize(width, height, scale_percent).await,
