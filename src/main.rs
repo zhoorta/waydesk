@@ -9,6 +9,7 @@ mod capture;
 mod capture_ext;
 mod base64;
 mod clipboard;
+mod clipimage;
 mod compositor;
 mod configcheck;
 mod cursors;

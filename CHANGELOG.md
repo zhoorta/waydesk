@@ -2,6 +2,10 @@
 
 What changed, newest first. The numbered releases are the ones in the apt repository.
 
+## Unreleased
+
+**Clipboard images.** Copy a picture on the client and paste it in the session, and the other way round (CF_DIB on the RDP side, PNG on the Wayland side; 16 megapixels at most, transparency shown on white, text wins when both are offered). Files are not carried yet. Written and unit-tested for the converter on 2026-11-04; not yet tried with a real client.
+
 ## 2026-11-01 · 0.5.0
 
 **Licence.** Waydesk is now licensed under the GNU Affero General Public License, version 3 or later (AGPL-3.0-or-later), with the full text in `LICENSE`; the MIT and Apache-2.0 files are gone. The third-party code in the repository (`patches/ironrdp-server` and the other patches) keeps its own licences, and the 411 Rust crates the server builds on are all permissive (MIT, Apache-2.0, BSD, ISC and the like), which the AGPL can include. The Debian packages carry the licence text in their `copyright` file, the Arch package in `/usr/share/licenses`.

@@ -2,6 +2,8 @@
 //! the account and is reached through the session process (`sessionclip.rs`), which this side talks to over the link.
 //! Client copy: the client announces formats, we ask for the text and send it to the session.
 //! Session copy: the session sends its text when the clipboard changes, we announce it and answer the client's request.
+//! Images (CF_DIB on the RDP side, PNG on the Wayland side) go the same way and are converted here (`clipimage.rs`), with limits.
+//! Files are not carried.
 
 use std::sync::{Arc, Mutex};
 
@@ -14,7 +16,7 @@ use ironrdp_server::tokio::sync::mpsc::UnboundedSender;
 use ironrdp_server::{CliprdrServerFactory, ServerEvent, ServerEventSender};
 use tracing::{debug, info};
 
-use crate::proto::{Down, MAX_CLIPBOARD};
+use crate::proto::{Down, MAX_CLIPBOARD, MAX_CLIPBOARD_IMAGE};
 use crate::Slot;
 
 struct Shared {
@@ -23,6 +25,8 @@ struct Shared {
     slot: Arc<Slot>,
     /// The text the session's clipboard holds, as the session last reported it.
     session_text: Mutex<Option<String>>,
+    /// The image (PNG) the session's clipboard holds, as the session last reported it. Only one of text and image is set.
+    session_image: Mutex<Option<Vec<u8>>>,
 }
 
 impl Shared {
@@ -41,7 +45,7 @@ pub struct Factory {
 
 impl Factory {
     pub fn new(slot: Arc<Slot>) -> Self {
-        Self { st: Arc::new(Shared { sender: Mutex::new(None), slot, session_text: Mutex::new(None) }) }
+        Self { st: Arc::new(Shared { sender: Mutex::new(None), slot, session_text: Mutex::new(None), session_image: Mutex::new(None) }) }
     }
 }
 
@@ -53,7 +57,7 @@ impl ServerEventSender for Factory {
 
 impl CliprdrBackendFactory for Factory {
     fn build_cliprdr_backend(&self) -> Box<dyn CliprdrBackend> {
-        Box::new(Backend { st: self.st.clone(), ready_at: None })
+        Box::new(Backend { st: self.st.clone(), ready_at: None, asked: ClipboardFormatId::CF_UNICODETEXT })
     }
 }
 
@@ -63,6 +67,8 @@ impl CliprdrServerFactory for Factory {}
 struct Backend {
     st: Arc<Shared>,
     ready_at: Option<std::time::Instant>,
+    /// The format the last request to the client was for (the answer does not say).
+    asked: ClipboardFormatId,
 }
 
 /// How long after the channel is ready the client's clipboard is left alone. The Windows App announces
@@ -78,6 +84,10 @@ impl std::fmt::Debug for Shared {
 }
 
 ironrdp_core::impl_as_any!(Backend);
+
+fn image_format() -> ClipboardFormat {
+    ClipboardFormat::new(ClipboardFormatId::CF_DIB)
+}
 
 fn text_format() -> ClipboardFormat {
     ClipboardFormat::new(ClipboardFormatId::CF_UNICODETEXT)
@@ -116,7 +126,15 @@ impl CliprdrBackend for Backend {
             let Ok(text) = String::from_utf8(data) else { return };
             info!(len = text.len(), "session clipboard changed; announcing to the client");
             *st.session_text.lock().unwrap() = Some(text);
+            *st.session_image.lock().unwrap() = None;
             st.send(ClipboardMessage::SendInitiateCopy(vec![text_format()]));
+        }));
+        let st = self.st.clone();
+        link.set_clipboard_image_sink(Box::new(move |png| {
+            info!(len = png.len(), "session clipboard image changed; announcing to the client");
+            *st.session_image.lock().unwrap() = Some(png);
+            *st.session_text.lock().unwrap() = None;
+            st.send(ClipboardMessage::SendInitiateCopy(vec![image_format()]));
         }));
         // The session reports its clipboard changes from now on.
         link.send(Down::ClipboardOn);
@@ -126,32 +144,56 @@ impl CliprdrBackend for Backend {
         // Start of the session: offer what is already on the clipboard.
         if self.st.session_text.lock().unwrap().is_some() {
             self.st.send(ClipboardMessage::SendInitiateCopy(vec![text_format()]));
+        } else if self.st.session_image.lock().unwrap().is_some() {
+            self.st.send(ClipboardMessage::SendInitiateCopy(vec![image_format()]));
         }
     }
 
     fn on_process_negotiated_capabilities(&mut self, _capabilities: ClipboardGeneralCapabilityFlags) {}
 
     fn on_remote_copy(&mut self, available_formats: &[ClipboardFormat]) {
-        if !available_formats.iter().any(|f| f.id == ClipboardFormatId::CF_UNICODETEXT) {
-            debug!(formats = ?available_formats.iter().map(|f| f.id.0).collect::<Vec<_>>(), "client copied something other than text; ignored");
+        // Text wins when both are offered.
+        let format = if available_formats.iter().any(|f| f.id == ClipboardFormatId::CF_UNICODETEXT) {
+            ClipboardFormatId::CF_UNICODETEXT
+        } else if available_formats.iter().any(|f| f.id == ClipboardFormatId::CF_DIB) {
+            ClipboardFormatId::CF_DIB
+        } else {
+            debug!(formats = ?available_formats.iter().map(|f| f.id.0).collect::<Vec<_>>(), "client copied something other than text or an image; ignored");
             return;
-        }
+        };
+        self.asked = format;
         let wait = self.ready_at.map_or(SETTLE, |t| SETTLE.saturating_sub(t.elapsed()));
         if wait.is_zero() {
-            info!("client copied text; asking for it");
-            self.st.send(ClipboardMessage::SendInitiatePaste(ClipboardFormatId::CF_UNICODETEXT));
+            info!(format = format.0, "client copied; asking for it");
+            self.st.send(ClipboardMessage::SendInitiatePaste(format));
         } else {
-            info!(?wait, "client copied text during connection setup; asking for it a little later");
+            info!(?wait, "client copied during connection setup; asking for it a little later");
             let st = self.st.clone();
             std::thread::spawn(move || {
                 std::thread::sleep(wait);
-                st.send(ClipboardMessage::SendInitiatePaste(ClipboardFormatId::CF_UNICODETEXT));
+                st.send(ClipboardMessage::SendInitiatePaste(format));
             });
         }
     }
 
     fn on_format_data_request(&mut self, request: FormatDataRequest) {
         info!(format = request.format.0, "client asks for the session clipboard");
+        if request.format == ClipboardFormatId::CF_DIB {
+            let png = self.st.session_image.lock().unwrap().clone();
+            let dib = png.and_then(|p| crate::clipimage::png_to_dib(&p));
+            let msg = match dib {
+                Some(dib) => {
+                    info!(bytes = dib.len(), "sending the session clipboard image to the client");
+                    FormatDataResponse::new_data(dib)
+                }
+                None => {
+                    info!("cannot provide the image (none, or not acceptable)");
+                    FormatDataResponse::new_error()
+                }
+            };
+            self.st.send(ClipboardMessage::SendFormatData(msg));
+            return;
+        }
         let text = self.st.session_text.lock().unwrap().clone();
         let msg = match (request.format == ClipboardFormatId::CF_UNICODETEXT, text) {
             (true, Some(text)) => {
@@ -169,6 +211,21 @@ impl CliprdrBackend for Backend {
     fn on_format_data_response(&mut self, response: FormatDataResponse<'_>) {
         if response.is_error() {
             info!("the client could not provide the clipboard text");
+            return;
+        }
+        if self.asked == ClipboardFormatId::CF_DIB {
+            info!(bytes = response.data().len(), "client clipboard image received");
+            if response.data().len() > 4 * MAX_CLIPBOARD_IMAGE {
+                info!("client clipboard image refused: too big");
+                return;
+            }
+            match crate::clipimage::dib_to_png(response.data()) {
+                Some(png) if png.len() <= MAX_CLIPBOARD_IMAGE => match self.st.slot.link() {
+                    Some(link) => link.send(Down::ClipboardImage { png }),
+                    None => debug!("client clipboard image dropped: no session"),
+                },
+                _ => info!("client clipboard image refused (format, size or limits)"),
+            }
             return;
         }
         let text = from_unicode_text(response.data());

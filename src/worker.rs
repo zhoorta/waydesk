@@ -453,6 +453,7 @@ impl Worker {
                 session.shared.force_full();
             }
             Down::Clipboard { data } => self.clipboard.set(data),
+            Down::ClipboardImage { png } => self.clipboard.set_image(png),
             Down::ClipboardOn => self.clipboard.watch(),
             Down::AudioOn => self.audio.start(),
             Down::AudioOff => self.audio.stop(),

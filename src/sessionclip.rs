@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
-use crate::proto::{Up, MAX_CLIPBOARD};
+use crate::proto::{Up, MAX_CLIPBOARD, MAX_CLIPBOARD_IMAGE};
 
 /// Watches the session's clipboard while the client's channel is open. Stopped when dropped.
 pub struct Clipboard {
@@ -20,11 +20,13 @@ pub struct Clipboard {
     up: mpsc::UnboundedSender<Up>,
     /// Text the client put on the clipboard: its echo must not go back to the client.
     last_set: Arc<Mutex<Option<String>>>,
+    /// The same for an image (PNG bytes).
+    last_image: Arc<Mutex<Option<Vec<u8>>>>,
 }
 
 impl Clipboard {
     pub fn new(up: mpsc::UnboundedSender<Up>) -> Self {
-        Self { watcher: Arc::new(Mutex::new(None)), stopped: Arc::new(std::sync::atomic::AtomicBool::new(false)), up, last_set: Arc::new(Mutex::new(None)) }
+        Self { watcher: Arc::new(Mutex::new(None)), stopped: Arc::new(std::sync::atomic::AtomicBool::new(false)), up, last_set: Arc::new(Mutex::new(None)), last_image: Arc::new(Mutex::new(None)) }
     }
 
     /// (Re)starts the watch. `wl-paste --watch` runs its command once at once and then on every change; that first
@@ -33,7 +35,7 @@ impl Clipboard {
     pub fn watch(&mut self) {
         self.stop();
         self.stopped = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let (up, last_set, watcher, stopped) = (self.up.clone(), self.last_set.clone(), self.watcher.clone(), self.stopped.clone());
+        let (up, last_set, last_image, watcher, stopped) = (self.up.clone(), self.last_set.clone(), self.last_image.clone(), self.watcher.clone(), self.stopped.clone());
         // The clipboard of a nested desktop (COSMIC, Plasma) is its own, on its own display, which appears some seconds after the session starts: wait for it off this thread.
         std::thread::spawn(move || {
             let display = if crate::compositor::is_nested() {
@@ -77,7 +79,19 @@ impl Clipboard {
                         if std::mem::take(&mut first) {
                             continue;
                         }
-                        let Some(text) = wayland_text() else { continue };
+                        // Text wins when both are offered (a spreadsheet cell comes as text and as a picture).
+                        let Some(text) = wayland_text() else {
+                            if let Some(png) = wayland_image() {
+                                if last_image.lock().unwrap().as_deref() == Some(png.as_slice()) {
+                                    continue;
+                                }
+                                info!(len = png.len(), "session clipboard image changed");
+                                if up.send(Up::ClipboardImage { png }).is_err() {
+                                    break;
+                                }
+                            }
+                            continue;
+                        };
                         if last_set.lock().unwrap().as_deref() == Some(text.as_str()) {
                             continue;
                         }
@@ -141,6 +155,36 @@ impl Clipboard {
     }
 }
 
+impl Clipboard {
+    /// Puts the client's image (PNG) on the session clipboard.
+    pub fn set_image(&self, png: Vec<u8>) {
+        if png.len() > MAX_CLIPBOARD_IMAGE || !png.starts_with(b"\x89PNG\r\n\x1a\n") {
+            warn!(len = png.len(), "client clipboard image is not an acceptable PNG; ignored");
+            return;
+        }
+        *self.last_image.lock().unwrap() = Some(png.clone());
+        std::thread::spawn(move || {
+            let mut cmd = Command::new("wl-copy");
+            cmd.args(["--type", "image/png"]).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null());
+            if crate::compositor::is_nested() {
+                if let Some(d) = nested_display() {
+                    cmd.env("WAYLAND_DISPLAY", d);
+                }
+            }
+            match cmd.spawn() {
+                Ok(mut c) => {
+                    if let Some(mut stdin) = c.stdin.take() {
+                        let _ = stdin.write_all(&png);
+                    }
+                    let status = c.wait();
+                    info!(?status, "wl-copy (image) done");
+                }
+                Err(e) => warn!("cannot run wl-copy: {e}"),
+            }
+        });
+    }
+}
+
 impl Drop for Clipboard {
     fn drop(&mut self) {
         self.stop();
@@ -160,6 +204,33 @@ fn wayland_text() -> Option<String> {
     }
     let text = String::from_utf8(out.stdout).ok()?;
     (!text.is_empty()).then_some(text)
+}
+
+/// What the Wayland clipboard holds as a PNG, if it offers an image and no text.
+fn wayland_image() -> Option<Vec<u8>> {
+    use std::io::Read as _;
+    let display = if crate::compositor::is_nested() { Some(nested_display()?) } else { None };
+    let mut types = Command::new("wl-paste");
+    types.arg("--list-types").stderr(Stdio::null());
+    if let Some(d) = &display {
+        types.env("WAYLAND_DISPLAY", d);
+    }
+    let listed = String::from_utf8(types.output().ok()?.stdout).ok()?;
+    if !listed.lines().any(|t| t == "image/png") {
+        return None;
+    }
+    let mut cmd = Command::new("wl-paste");
+    cmd.args(["--type", "image/png"]).stdout(Stdio::piped()).stderr(Stdio::null());
+    if let Some(d) = &display {
+        cmd.env("WAYLAND_DISPLAY", d);
+    }
+    let mut child = cmd.spawn().ok()?;
+    // Read at most one byte more than allowed: an application that offers an endless image cannot fill memory.
+    let mut png = Vec::new();
+    child.stdout.take()?.take(MAX_CLIPBOARD_IMAGE as u64 + 1).read_to_end(&mut png).ok()?;
+    let _ = child.kill();
+    let _ = child.wait();
+    (!png.is_empty() && png.len() <= MAX_CLIPBOARD_IMAGE).then_some(png)
 }
 
 /// The display of the desktop (COSMIC, Plasma) that runs inside the session's sway: the other Wayland socket of the runtime directory (sway's own is `WAYLAND_DISPLAY`).

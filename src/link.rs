@@ -87,6 +87,9 @@ impl AudioGate {
 /// The most clipboard texts a session may announce in a second. People copy a few times a second at most.
 const MAX_CLIPBOARD_PER_SECOND: u32 = 10;
 
+/// The most clipboard images a session may announce in a second (each one can be megabytes).
+const MAX_CLIPBOARD_IMAGES_PER_SECOND: u32 = 2;
+
 /// Decides which clipboard texts of a session are passed on: each one is announced to the client, so a session that
 /// copies in a loop would flood the client and take daemon time that belongs to everybody.
 struct ClipboardGate {
@@ -99,16 +102,16 @@ impl ClipboardGate {
         Self { window: now, count: 0 }
     }
 
-    fn allow(&mut self, now: std::time::Instant, len: usize) -> bool {
+    fn allow(&mut self, now: std::time::Instant, len: usize, max_len: usize, per_second: u32) -> bool {
         if now.duration_since(self.window) >= Duration::from_secs(1) {
             self.window = now;
             self.count = 0;
         }
-        if len > proto::MAX_CLIPBOARD {
+        if len > max_len {
             return false;
         }
         self.count += 1;
-        self.count <= MAX_CLIPBOARD_PER_SECOND
+        self.count <= per_second
     }
 }
 
@@ -133,6 +136,8 @@ pub struct Link {
     child: Mutex<Option<Child>>,
     /// Where the session's clipboard text goes (set by the clipboard channel when the client opens it).
     clipboard: Mutex<Option<Box<dyn Fn(Vec<u8>) + Send + Sync>>>,
+    /// Where the session's clipboard image (PNG) goes.
+    clipboard_image: Mutex<Option<Box<dyn Fn(Vec<u8>) + Send + Sync>>>,
     /// Where the session's sound goes (set by the sound channel when the client opens it).
     audio: Mutex<Option<Box<dyn Fn(Vec<u8>) + Send + Sync>>>,
     _slot: Slot,
@@ -194,6 +199,7 @@ impl Link {
             resized: tokio::sync::Notify::new(),
             child: Mutex::new(child),
             clipboard: Mutex::new(None),
+            clipboard_image: Mutex::new(None),
             audio: Mutex::new(None),
             _slot: slot,
         });
@@ -201,6 +207,7 @@ impl Link {
         tokio::spawn(async move {
             let mut audio_gate = AudioGate::new(std::time::Instant::now());
             let mut clipboard_gate = ClipboardGate::new(std::time::Instant::now());
+            let mut image_gate = ClipboardGate::new(std::time::Instant::now());
             loop {
                 let body = match proto::read_frame_async(&mut rd).await {
                     Ok(Some(b)) => b,
@@ -234,9 +241,17 @@ impl Link {
                     }
                     Ok(Up::Clipboard { data }) => {
                         // Untrusted like everything from the session: bounded in size and speed (see `ClipboardGate`), and only text is made of it.
-                        if clipboard_gate.allow(std::time::Instant::now(), data.len()) {
+                        if clipboard_gate.allow(std::time::Instant::now(), data.len(), proto::MAX_CLIPBOARD, MAX_CLIPBOARD_PER_SECOND) {
                             if let Some(sink) = reader.clipboard.lock().unwrap().as_ref() {
                                 sink(data);
+                            }
+                        }
+                    }
+                    Ok(Up::ClipboardImage { png }) => {
+                        // Untrusted: bounded in size and speed; the daemon decodes it with limits before the client sees it.
+                        if image_gate.allow(std::time::Instant::now(), png.len(), proto::MAX_CLIPBOARD_IMAGE, MAX_CLIPBOARD_IMAGES_PER_SECOND) {
+                            if let Some(sink) = reader.clipboard_image.lock().unwrap().as_ref() {
+                                sink(png);
                             }
                         }
                     }
@@ -281,6 +296,11 @@ impl Link {
     /// Sets where the session's clipboard text is delivered.
     pub fn set_clipboard_sink(&self, sink: Box<dyn Fn(Vec<u8>) + Send + Sync>) {
         *self.clipboard.lock().unwrap() = Some(sink);
+    }
+
+    /// Sets where the session's clipboard image (PNG) is delivered.
+    pub fn set_clipboard_image_sink(&self, sink: Box<dyn Fn(Vec<u8>) + Send + Sync>) {
+        *self.clipboard_image.lock().unwrap() = Some(sink);
     }
 
     /// Sets where the session's sound is delivered; `None` when the sound channel closes.
@@ -366,12 +386,24 @@ mod tests {
     fn clipboard_texts_of_a_session_are_limited_in_size_and_speed() {
         let t0 = std::time::Instant::now();
         let mut gate = ClipboardGate::new(t0);
-        assert!(!gate.allow(t0, proto::MAX_CLIPBOARD + 1), "a text that is too long");
+        assert!(!gate.allow(t0, proto::MAX_CLIPBOARD + 1, proto::MAX_CLIPBOARD, MAX_CLIPBOARD_PER_SECOND), "a text that is too long");
         for _ in 0..MAX_CLIPBOARD_PER_SECOND {
-            assert!(gate.allow(t0, 5));
+            assert!(gate.allow(t0, 5, proto::MAX_CLIPBOARD, MAX_CLIPBOARD_PER_SECOND));
         }
-        assert!(!gate.allow(t0, 5), "more than the limit in one second");
-        assert!(gate.allow(t0 + Duration::from_millis(1100), proto::MAX_CLIPBOARD), "a new second starts again");
+        assert!(!gate.allow(t0, 5, proto::MAX_CLIPBOARD, MAX_CLIPBOARD_PER_SECOND), "more than the limit in one second");
+        assert!(gate.allow(t0 + Duration::from_millis(1100), proto::MAX_CLIPBOARD, proto::MAX_CLIPBOARD, MAX_CLIPBOARD_PER_SECOND), "a new second starts again");
+    }
+
+    #[test]
+    fn clipboard_images_of_a_session_are_limited_in_size_and_speed() {
+        let t0 = std::time::Instant::now();
+        let mut gate = ClipboardGate::new(t0);
+        let max = proto::MAX_CLIPBOARD_IMAGE;
+        assert!(!gate.allow(t0, max + 1, max, MAX_CLIPBOARD_IMAGES_PER_SECOND), "an image that is too big");
+        for _ in 0..MAX_CLIPBOARD_IMAGES_PER_SECOND {
+            assert!(gate.allow(t0, max, max, MAX_CLIPBOARD_IMAGES_PER_SECOND));
+        }
+        assert!(!gate.allow(t0, 5, max, MAX_CLIPBOARD_IMAGES_PER_SECOND), "more than the limit in one second");
     }
 
     #[test]

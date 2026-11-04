@@ -8,6 +8,7 @@ Who we assume is hostile, what each part can and cannot do, and what is known to
 - **Attacker on the network:** sees only TLS. Can guess passwords; failures are counted per account and per address, delayed, and answered identically for unknown and known accounts.
 - **Compromised daemon:** runs as an unprivileged user with a system call filter and a narrow capability set. It can read the streams of live sessions and type into them, and sees passwords in transit. It cannot start a session for an account that did not authenticate on the same connection, and the helper takes no program, path or arguments from it.
 - **Malicious account:** has its own sway, its own runtime directory (0700) and its own clipboard; it cannot capture or inject into another account's session. Memory, tasks and CPU ceilings apply per account.
+- **Clipboard images:** the client's bitmap and the session's PNG are both untrusted and are decoded in the unprivileged daemon with the `png` crate (pure Rust), after checking the declared size (16 megapixels, 16384 a side, 16 MiB of PNG) and before allocating; formats that are not plain 24/32 bit bitmaps are refused. A session may announce two images a second. A compromised daemon could already read the clipboard; the new surface is the decoder. Files are not carried.
 - **Out of scope:** drive, printer and smartcard redirection, RD Gateway, running exposed to the internet, GPU sharing.
 
 ## Open items

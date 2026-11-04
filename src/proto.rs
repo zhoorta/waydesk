@@ -66,6 +66,9 @@ pub enum FrameKind {
 /// Longest clipboard text either side relays (UTF-8 bytes).
 pub const MAX_CLIPBOARD: usize = 1024 * 1024;
 
+/// Longest clipboard image either side relays (a PNG, bytes).
+pub const MAX_CLIPBOARD_IMAGE: usize = 16 * 1024 * 1024;
+
 /// From the network daemon to the session.
 #[derive(Debug, PartialEq)]
 pub enum Down {
@@ -85,6 +88,8 @@ pub enum Down {
     UseBitmaps,
     /// The client's clipboard text (UTF-8) for the session's clipboard.
     Clipboard { data: Vec<u8> },
+    /// The client's clipboard image (PNG) for the session's clipboard.
+    ClipboardImage { png: Vec<u8> },
     /// The client has a clipboard channel: start watching the session's clipboard.
     ClipboardOn,
     /// The client has a sound channel: record the session's speaker and send it as `Up::Audio`.
@@ -105,6 +110,8 @@ pub enum Up {
     /// 20 ms chunk of 16-bit stereo PCM at 44.1 kHz.
     Audio { pcm: Vec<u8> },
     Clipboard { data: Vec<u8> },
+    /// The session's clipboard holds this image (PNG).
+    ClipboardImage { png: Vec<u8> },
     /// The shape of the mouse pointer: a cursor name (`text`, `ew-resize`, ...).
     Cursor { name: String },
     /// The picture of a pointer an application drew itself: width x height pixels of 32 bit BGRA (premultiplied, rows from the top).
@@ -248,6 +255,10 @@ impl Down {
                 o.u8(10);
                 o.bytes(data);
             }
+            Down::ClipboardImage { png } => {
+                o.u8(15);
+                o.bytes(png);
+            }
             Down::Bye => o.u8(255),
         }
         o.0
@@ -268,6 +279,7 @@ impl Down {
             9 => Down::UseBitmaps,
             10 => Down::Clipboard { data: i.bytes()? },
             11 => Down::ClipboardOn,
+            15 => Down::ClipboardImage { png: i.bytes()? },
             12 => Down::AudioOn,
             13 => Down::AudioOff,
             255 => Down::Bye,
@@ -309,6 +321,10 @@ impl Up {
                 o.u8(5);
                 o.bytes(data);
             }
+            Up::ClipboardImage { png } => {
+                o.u8(8);
+                o.bytes(png);
+            }
             Up::Cursor { name } => {
                 o.u8(6);
                 o.str(name);
@@ -342,6 +358,7 @@ impl Up {
             }
             4 => Up::Audio { pcm: i.bytes()? },
             5 => Up::Clipboard { data: i.bytes()? },
+            8 => Up::ClipboardImage { png: i.bytes()? },
             6 => Up::Cursor { name: i.str()? },
             7 => Up::CursorImage { hot_x: i.u16()?, hot_y: i.u16()?, width: i.u16()?, height: i.u16()?, data: i.bytes()? },
             255 => Up::Bye,
@@ -548,6 +565,7 @@ mod tests {
             Down::RequestFull,
             Down::UseBitmaps,
             Down::Clipboard { data: b"hello".to_vec() },
+            Down::ClipboardImage { png: vec![0x89, b'P'] },
             Down::ClipboardOn,
             Down::AudioOn,
             Down::AudioOff,
@@ -563,6 +581,7 @@ mod tests {
             Up::Frame { x: 3, y: 4, w: 1, h: 1, kind: FrameKind::Bgra, data: vec![1, 2, 3, 4] },
             Up::Audio { pcm: vec![0; 3528] },
             Up::Clipboard { data: Vec::new() },
+            Up::ClipboardImage { png: vec![0x89, b'P'] },
             Up::Cursor { name: "ew-resize".into() },
             Up::CursorImage { hot_x: 1, hot_y: 2, width: 2, height: 1, data: vec![1, 2, 3, 4, 5, 6, 7, 8] },
             Up::Bye,
