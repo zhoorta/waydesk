@@ -747,7 +747,7 @@ mod tests {
     #[test]
     fn unknown_tags_are_refused() {
         assert_eq!(Down::decode(&[200]), Err(ProtoError::UnknownTag(200)));
-        assert_eq!(Up::decode(&[9]), Err(ProtoError::UnknownTag(9)));
+        assert_eq!(Up::decode(&[200]), Err(ProtoError::UnknownTag(200)));
         // frame kind
         let mut b = Up::Frame { x: 0, y: 0, w: 1, h: 1, kind: FrameKind::Bgra, data: vec![] }.encode();
         b[9] = 7;
