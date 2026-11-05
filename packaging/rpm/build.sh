@@ -1,6 +1,7 @@
 #!/bin/sh
 # Builds the RPM from the committed tree, in a Fedora container (Docker). Output: packaging/out/rpm/<arch>/waydesk-server-<version>-<rel>.<dist>.<arch>.rpm
-#   [WAYDESK_WORKTREE=1] packaging/rpm/build.sh [FEDORA_RELEASE]     default 43. The architecture is the one of the Docker host (arm64 Macs make aarch64 packages).
+#   [WAYDESK_SNAP=20261105git8f691b7] [WAYDESK_WORKTREE=1] packaging/rpm/build.sh [FEDORA_RELEASE]
+# WAYDESK_SNAP makes a snapshot release (0.<snap>, which sorts before the real release 1).     default 43. The architecture is the one of the Docker host (arm64 Macs make aarch64 packages).
 set -e
 cd "$(dirname "$0")/../.."
 rel=${1:-43}
@@ -15,13 +16,13 @@ if [ -n "$WAYDESK_WORKTREE" ]; then
 else
     git archive --format=tar.gz --prefix="waydesk-server-$ver/" -o "$out/waydesk-server-$ver.tar.gz" HEAD -- . ':(exclude)site' ':(exclude)branding' ':(exclude)packaging/out'
 fi
-docker run --rm -v "$PWD/$out:/out" -v "$PWD/packaging/rpm:/rpm:ro" "fedora:$rel" sh -ec '
+docker run --rm -e SNAP="$WAYDESK_SNAP" -v "$PWD/$out:/out" -v "$PWD/packaging/rpm:/rpm:ro" "fedora:$rel" sh -ec '
   dnf -y install rpm-build rpmdevtools dnf-plugins-core gcc gcc-c++ make cmake clang clang-devel pkgconf-pkg-config cargo rust \
       libva-devel libdrm-devel mesa-libgbm-devel libxkbcommon-devel openssl-devel pam-devel systemd-rpm-macros perl-FindBin perl-IPC-Cmd
   rpmdev-setuptree
   cp /out/waydesk-server-*.tar.gz /rpm/waydesk.sysusers /rpm/waydesk.tmpfiles /rpm/pam-waydesk-server /rpm/waydesk-firewalld.xml ~/rpmbuild/SOURCES/
   cp /rpm/waydesk-server.spec ~/rpmbuild/SPECS/
-  rpmbuild -ba ~/rpmbuild/SPECS/waydesk-server.spec
+  rpmbuild -ba ${SNAP:+--define "snap $SNAP"} ~/rpmbuild/SPECS/waydesk-server.spec
   mkdir -p /out/$(uname -m) && cp ~/rpmbuild/RPMS/*/*.rpm ~/rpmbuild/SRPMS/*.rpm /out/$(uname -m)/
 '
 ls "$out"/*/*.rpm
