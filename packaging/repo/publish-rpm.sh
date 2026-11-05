@@ -33,6 +33,12 @@ tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 gpg --homedir "$tmp" --batch --import "$SRC/RPM-GPG-KEY-waydesk" 2>/dev/null
 gpg --homedir "$tmp" --export > "$tmp/k.gpg"
 for a in "$SRC"/fedora/*/*/repodata/repomd.xml.asc; do gpgv --keyring "$tmp/k.gpg" "$a" "${a%.asc}" >/dev/null 2>&1 || { echo "publish-rpm.sh: $a does not verify with RPM-GPG-KEY-waydesk: refusing" >&2; exit 1; }; done
+# every package the metadata names must be in REPO-DIR (a repository whose packages were removed after it was made would be published broken)
+for r in $(cd "$SRC" && ls -d fedora/*/*); do
+    for h in $(gzip -dc "$SRC/$r"/repodata/*-primary.xml.gz | sed -n 's/.*<location href="\([^"]*\)".*/\1/p'); do
+        [ -f "$SRC/$r/$h" ] || { echo "publish-rpm.sh: the metadata of $r names $h, which is not in $SRC/$r: run make-rpm-repo.sh again" >&2; exit 1; }
+    done
+done
 if [ -n "$REAL" ] && [ "$WANT" != "$fp" ]; then echo "publish-rpm.sh: --really needs --key $fp (the key you intend to publish, typed by you)" >&2; exit 1; fi
 echo "target: $HOST:~/$DIR/   ${REAL:+(for real)}${REAL:-(dry run: nothing is changed)}"
 # files by name and checksum: what is on the server and what is here, below fedora/ (the metadata files that are replaced are handled last)
