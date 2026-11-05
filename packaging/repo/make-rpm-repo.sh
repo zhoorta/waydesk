@@ -30,13 +30,17 @@ for f in "$SRC"/*/*.rpm; do
     list="$list $f"
 done
 [ -n "$list" ] || { echo "make-rpm-repo.sh: no packages in $SRC" >&2; exit 1; }
+# packages already signed with this key in OUT (put the published ones there first: curl them from the server) are kept as they are: signing again changes
+# the bytes (the signature carries a time), and a published package must never change
+old=$(mktemp -d); [ -d "$OUT/fedora" ] && find "$OUT/fedora" -name '*.rpm' -exec cp {} "$old/" \;
 rm -rf "$OUT/fedora" "$OUT/RPM-GPG-KEY-waydesk" "$OUT/waydesk.repo"
 for f in $list; do
     b=$(basename "$f")
     rel=$(printf '%s' "$b" | sed -n 's/.*\.fc\([0-9][0-9]*\)\.[^.]*\.rpm$/\1/p')
     arch=$(printf '%s' "$b" | sed -n 's/.*\.\([A-Za-z0-9_]*\)\.rpm$/\1/p')
     [ -n "$rel" ] && [ -n "$arch" ] || { echo "make-rpm-repo.sh: cannot read the release and architecture of $b" >&2; exit 1; }
-    mkdir -p "$OUT/fedora/$rel/$arch"; cp "$f" "$OUT/fedora/$rel/$arch/$b"
+    mkdir -p "$OUT/fedora/$rel/$arch"
+    if [ -f "$old/$b" ]; then cp "$old/$b" "$OUT/fedora/$rel/$arch/$b"; else cp "$f" "$OUT/fedora/$rel/$arch/$b"; fi
 done
 gpg --armor --export "$KEY" > "$OUT/RPM-GPG-KEY-waydesk"
 
@@ -60,10 +64,13 @@ cat > /root/.rpmmacros <<MAC
 %_gpg_name $FPR
 %_gpg_sign_cmd_extra_args $EXTRA
 MAC
-find /r/fedora -name '*.rpm' | sort | while read -r f; do rpmsign --addsign "$f" >/dev/null; done
+rpm --dbpath /tmp/db --import /r/RPM-GPG-KEY-waydesk
+# a package that already verifies with the key is left alone
+find /r/fedora -name '*.rpm' | sort | while read -r f; do
+    case "$(rpm --dbpath /tmp/db -K "$f")" in *"digests signatures OK"*) echo "  kept $(basename "$f")" ;; *) rpmsign --addsign "$f" >/dev/null ;; esac
+done
 for d in /r/fedora/*/*; do createrepo_c -q --general-compress-type gz "$d"; done
 # the signatures must verify with the exported public key, in a clean rpm database
-rpm --dbpath /tmp/db --import /r/RPM-GPG-KEY-waydesk
 bad=0
 for f in $(find /r/fedora -name '*.rpm' | sort); do
     out=$(rpm --dbpath /tmp/db -K "$f") || bad=1
@@ -91,6 +98,7 @@ gpgcheck=1
 repo_gpgcheck=1
 gpgkey=$URL/RPM-GPG-KEY-waydesk
 EOF
+rm -rf "$old"
 find "$OUT" -name '._*' -delete
 echo "made $OUT (key $FPR)"
 ( cd "$OUT" && find . -type f | sort | sed 's|^\./||' | grep -v "repodata/.*\(primary\|filelists\|other\)" | sed 's/^/  /' )
