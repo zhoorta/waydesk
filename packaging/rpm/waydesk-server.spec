@@ -3,7 +3,8 @@
 # (/usr/share/waydesk/sway-minimal.conf) or, with WAYDESK_COMPOSITOR=hyprland, the account's own Hyprland (docs/HYPRLAND.md).
 Name:           waydesk-server
 Version:        0.5.0
-Release:        1%{?dist}
+# A snapshot (a build that is not a release): rpmbuild --define 'snap 20261105git1234567' makes the release 0.20261105git1234567, which sorts before 1 so that the release upgrades it.
+Release:        %{?snap:0.%{snap}}%{!?snap:1}%{?dist}
 Summary:        RDP server giving each account its own headless Wayland desktop
 License:        AGPL-3.0-or-later
 URL:            https://waydesk.stackcare.pt
