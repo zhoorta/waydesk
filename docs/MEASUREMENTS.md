@@ -257,6 +257,39 @@ logs in over RDP from a short-lived `xfreerdp3` on the server (Xvfb) and then op
 - An earlier run of the same procedure on another server ended with that server taken over (SSH root password login, see `HETZNER-TEST.md` section 0); the capacity figures were taken before that and agree with
   the clean rerun (six users fit, the seventh refused). The lock-up that followed was the intruder's miner, not memory.
 
+## Active heavy users on the 8 GB / 4 vCPU x86 server, Fedora 44 (2026-11-05)
+The first run of this size with users who work: the section above left its applications idle. Hetzner 8 GB / 4 vCPU x86, **Fedora 44**, the RPM of this repository (0.5.0, built on the server; SELinux enforcing, the session's
+sway runs the package's lean `/etc/xdg/waydesk/sway.conf`: no bar, floating windows). Harness: `docs/measure-data/harness/ramp-remote.sh`, one account added at a time, **the RDP clients on a second machine**
+(Hetzner, 2 vCPU / 3.8 GB, Ubuntu 26.04, the clients in a Debian 13 container: see the trap below), H.264 (`/gfx:AVC420`), 1680x1050 each. Every user has Chromium on a page that scrolls and a terminal that types;
+users 2, 6, 10 also have GIMP, and every user has Calc (300,000 rows), VS Code and keystrokes into them; every fourth user (4, 8) loops a 720p video, users 3, 7, 11 a video with sound. After each new user, 100 s to settle and a 60 s sample.
+It stops at 14 users, 97 % CPU on the server, or under 1.5 GB available (the harness's own floor; the server itself refuses a new session under about 1.16 GB).
+
+| Users | Newest user | Available | Swap used | Server CPU | Client machine CPU | Errors | `swaymsg` answer |
+|---|---|---|---|---|---|---|---|
+| 0 | | 7,104 MB | | | | | |
+| 1 | worker | 6,074 MB | 1 MB | 35 % | 4.6 % | 0 | 14 ms |
+| 2 | worker + GIMP | 5,110 MB | 190 MB | 54 % | 8.3 % | 0 | 26 ms |
+| 3 | video + sound | 4,439 MB | 656 MB | 56 % | 8.6 % | 0 | 15 ms |
+| 4 | video | 3,356 MB | 895 MB | 50 % | 13.1 % | 0 | 29 ms |
+| 5 | worker | 2,807 MB | 1,006 MB | 74 % | 18.1 % | 0 | 19 ms |
+| 6 | worker + GIMP | 1,874 MB | 1,253 MB | 45 % | 16.7 % | 0 | 35 ms |
+| 7 | video + sound | 1,647 MB | 2,125 MB | 48 % | 19.3 % | 0 | 17 ms |
+| 8 | video | 1,257 MB | 2,996 MB | 50 % | 22.3 % | 0 | 15 ms |
+
+- **7 active heavy users fit above the harness's floor; the 8th ended the run (1,257 MB available, 3.0 GB in the zram).** About 730 MB of available memory per user on average (7,104 to 1,257 MB over 8 users), the first costing most (1.0 GB). It agrees with the idle run
+  above (six users on Debian's 3.8 GB zram, eight on a zram as large as the RAM): active use did not change the count much, because what the users hold (Chromium, VS Code, Calc) is the same.
+- **Memory ends it, not the CPU:** the server stayed under 75 % CPU (the 97 % limit was never near), and the client machine under 23 %, so its 2 vCPU did not limit the run. No out-of-memory kill, no error in the journal (0 on every row), and the session answered in 15 to 35 ms at every step.
+- The swap is zram (the package makes the device as large as the RAM), 3.0 GB of swap held at the end is compressed memory, not a disk.
+- Not compared here: the lean sway configuration against Fedora's stock one (no bar process per user), and the same run on Debian. One run, one workload; the CPU figures are 60 s samples.
+
+Traps of this run, so that they do not repeat:
+- **Ubuntu's FreeRDP cannot decode H.264** (`WITH_GFX_H264=OFF`, no FFmpeg or OpenH264: `/gfx:AVC420` is refused at parsing). A client machine with it makes the server fall back to bitmaps and the run means nothing. Debian 13's `freerdp3-sdl`
+  has it (checked with `sdl-freerdp3 /buildconfig`); on Ubuntu run it in a Debian container (`--network host`), and check in the server's log that EGFX negotiated `AVC420_ENABLED`.
+- A `ramp.sh` started on the server (clients on the same machine) kept running while packages were installed and then lost its clients when the daemon's address was changed: its rows are unusable. Check `pgrep -af ramp` before the real run.
+- Opening the RDP port for the client machine (`waydesk-admin access custom --bind ADDR:3389 --allow CLIENT`) does not close it for others at the network level: the TCP connection succeeds from anywhere and the daemon then refuses
+  (`the source address is not in the allowed list`). Close it again with `waydesk-admin access local` when done.
+- On a Mac with several keys in the agent, `ramp-remote.sh` needs a copy without `-i $K -o IdentitiesOnly=yes` (the agent chooses the key).
+
 ## Clean installs from the published repository, x86 and arm64 (2026-10-23)
 Two fresh Hetzner servers, Debian 13: **x86_64, 4 vCPU, 7.6 GB** and **arm64 (CAX), 2 vCPU, 3.7 GB**. SSH hardened first (key only, checked from outside). Then exactly what the site tells a user, with nothing built locally:
 `waydesk-repo.deb` from `https://waydesk.stackcare.pt/apt`, fingerprint compared (C646 72B2 5ECD 4773 196C 3958 9D8E 8874 E676 17F4), `apt update`, `apt install waydesk`,

@@ -1,0 +1,11 @@
+n	account	profile	avail_MB	swap_MB	load1	cpu_busy_pct	cpu_waydesk	cpu_sway	cpu_chromium	cpu_shell	cpu_foot	cpu_sshd	cpu_harness	cpu_other	cpu_CLIENTS	server_side_pct	gpu_Render	gpu_Video	gpu_VideoEnhance	gpu_Blitter	gpu_MHz	pkg_W	errors	probe_ms	client_vps_cpu_pct	note
+1	lt1	worker	6074	1	1.10	35.3	7.7	0.7	-	-	0.0	0.0	0.0	20.4	-	35.3	-	-	-	-	-	-	0	14	4.6	ok
+2	lt2	worker	5110	190	2.84	54.3	10.5	1.0	-	-	0.0	0.0	0.0	35.6	-	54.3	-	-	-	-	-	-	0	26	8.3	ok
+3	lt3	videoaudio	4439	656	2.29	55.6	6.1	1.0	-	-	0.1	0.0	0.0	41.4	-	55.6	-	-	-	-	-	-	0	15	8.6	ok
+4	lt4	video	3356	895	4.48	50.2	11.5	1.0	-	-	0.1	0.0	0.0	31.3	-	50.2	-	-	-	-	-	-	0	29	13.1	ok
+5	lt5	worker	2807	1006	3.64	73.9	14.7	1.4	-	-	0.1	0.0	0.0	50.8	-	73.9	-	-	-	-	-	-	0	19	18.1	ok
+6	lt6	worker	1874	1253	2.98	44.5	10.4	0.9	-	-	0.1	0.0	0.0	28.9	-	44.5	-	-	-	-	-	-	0	35	16.7	ok
+7	lt7	videoaudio	1647	2125	2.60	47.7	12.0	1.1	-	-	0.2	0.0	0.0	29.8	-	47.7	-	-	-	-	-	-	0	17	19.3	ok
+8	lt8	video	1257	2996	3.15	50.2	13.5	1.1	-	-	0.2	0.0	0.0	30.9	-	50.2	-	-	-	-	-	-	0	15	22.3	ok
+stop: memory
+done 19:51:51

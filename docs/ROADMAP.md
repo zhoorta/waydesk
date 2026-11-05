@@ -6,7 +6,6 @@ What is planned or open, in no particular order inside a group. Nothing here is 
 
 Small, already understood, in the order I would do them.
 
-- **Measure active users on an 8 GB server.** The 7 to 8 users on 8 GB were idle ones; active users were measured on 23 GB and 64 GB machines only. One ramp with the current harness (`docs/measure-data/harness/ramp.sh`) on a rented 8 GB, 4-vCPU box closes it, and gives the sizing page one workload on one machine.
 - **WebGL without a GPU.** Chromium is started with `--disable-gpu` when there is no render node, so a WebGL page does not animate; with `--use-angle=swiftshader --enable-unsafe-swiftshader` it runs at about 8 fps using three of four cores. Decide whether to offer it as a setting (default stays off: memory and CPU).
 - **A browser crash after a screen recorder.** On Debian 13 a Chromium started in a session where `wf-recorder` or `grim` had run crashed (SIGSEGV) until a new session was made. Find out whether it is the recorder, sway or Chromium; it matters for anyone who records a Waydesk session.
 - **Docs still to write:** a line about Software (gnome-software) being heavy on small servers; a THREAT-MODEL note for the per-account keyboard file; recipes (a team server, a company behind a VPN, a slow link, removal).

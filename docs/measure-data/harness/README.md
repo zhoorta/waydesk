@@ -53,5 +53,6 @@ On the client machine: `apt install freerdp3-sdl`.
 - `intel_gpu_top -J` must write to a **file**, not a pipe: with many clients one sample is large, the pipe fills and the tool blocks.
 - LibreOffice rewrites a pre-seeded `registrymodifications.xcu` at its first start, so its "Tip of the Day" is closed by `swaymsg '[title="Tip of the Day.*"] kill'` instead; GIMP's welcome window ignores Escape, `kill` closes it.
 - The windows must be started through `swaymsg exec` (they then inherit sway's `DISPLAY`), not from the shell of `runuser`: Blender and `glxgears` need X11.
+- The client machine's FreeRDP must decode H.264: Ubuntu 26.04's `freerdp3-sdl` is built without it and refuses `/gfx:AVC420` (`sdl-freerdp3 /buildconfig` shows `WITH_GFX_H264`); Debian 13's has it (run it in a container on Ubuntu). A `ramp.sh` left running on the server spoils a remote run: look with `pgrep -af ramp` first.
 - A laptop that sleeps ends the run: `caffeinate -dis` on macOS, plugged in.
 - `waydesk-admin status --json --watch 1` follows a machine under load without these scripts; `sample.py` predates it.
