@@ -5,7 +5,7 @@
 #
 # Needs: Docker (a Fedora container with createrepo_c, rpm-sign and gpg: the Mac has none of them), gpg.
 # Environment: WAYDESK_REPO_KEY  id of the signing key (required; the key of the apt and Arch repositories). WAYDESK_GNUPGHOME: its keyring (default ~/.gnupg).
-# WAYDESK_GPG_PASSPHRASE_FILE: a file with the key's passphrase. The container has no way to ask for it (a key without a passphrase needs nothing). Make the
+# WAYDESK_GPG_PASSPHRASE_FILE: a file with the key's passphrase, used for the packages (the container has no way to ask) and for the metadata (a key without a passphrase needs nothing). Make the
 # file for the run and delete it after (chmod 600; it is mounted read-only into the container, and the key ring is copied to a temporary folder that is removed).
 # WAYDESK_RPM_URL: where the repository will be served (default https://waydesk.dev/rpm), written into waydesk.repo.
 # Layout of OUTDIR (serve it as it is, any static web server): RPM-GPG-KEY-waydesk (public key, armored), waydesk.repo (for /etc/yum.repos.d),
@@ -75,8 +75,11 @@ chown -R "$OWNER" /r
 EOF
 docker run --rm -e FPR="$FPR" -e EXTRA="$EXTRA" -e OWNER="$(id -u):$(id -g)" -v "$job:/job" -v "$OUT:/r" fedora:44 sh /job/run.sh
 # the metadata is signed on this machine (pinentry works here): dnf's repo_gpgcheck asks for repomd.xml.asc
+HOSTPASS=""
+[ -n "${WAYDESK_GPG_PASSPHRASE_FILE:-}" ] && HOSTPASS="--pinentry-mode loopback --passphrase-file $WAYDESK_GPG_PASSPHRASE_FILE"
 for m in "$OUT"/fedora/*/*/repodata/repomd.xml; do
-    gpg --batch --yes -u "$KEY" --detach-sign --armor -o "$m.asc" "$m"
+    # shellcheck disable=SC2086
+    gpg --batch --yes $HOSTPASS -u "$KEY" --detach-sign --armor -o "$m.asc" "$m"
     gpg --batch --verify "$m.asc" "$m" 2>/dev/null || { echo "make-rpm-repo.sh: $m.asc does not verify" >&2; exit 1; }
 done
 cat > "$OUT/waydesk.repo" <<EOF
