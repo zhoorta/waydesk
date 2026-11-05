@@ -53,7 +53,15 @@ mod sessionstatus;
 
 const RDP_GROUP: &str = "waydesk-users";
 const ADMIN_GROUP: &str = "waydesk-admins";
-const SUDO_GROUP: &str = "sudo";
+
+/// The group whose members administer the machine: `sudo` on Debian and Ubuntu, `wheel` on Arch and Fedora (the first one that exists, `sudo` when both do).
+fn sudo_group() -> &'static str {
+    static GROUP: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
+    GROUP.get_or_init(|| {
+        let groups = std::fs::read_to_string("/etc/group").unwrap_or_default();
+        if groups.lines().any(|l| l.starts_with("sudo:")) || !groups.lines().any(|l| l.starts_with("wheel:")) { "sudo" } else { "wheel" }
+    })
+}
 const MIN_UID: u32 = 1000;
 const NOBODY: u32 = 65534;
 
@@ -185,7 +193,7 @@ fn only_visible(all: Vec<Account>, caller: u32, caller_is_admin: bool) -> Vec<Ac
 fn visible_accounts() -> Result<Vec<Account>> {
     let all = accounts()?;
     let uid = unsafe { libc::getuid() };
-    let is_admin = all.iter().find(|a| a.uid == uid).is_some_and(|me| in_group(me, SUDO_GROUP));
+    let is_admin = all.iter().find(|a| a.uid == uid).is_some_and(|me| in_group(me, sudo_group()));
     Ok(only_visible(all, uid, is_admin))
 }
 
@@ -328,7 +336,7 @@ fn users_list(json_out: bool) -> Result<()> {
         let (desktop, source) = desktop_of(a.uid);
         let gpu = gpu_of(a.uid);
         let running = sessionstatus::read(Path::new(sessionstatus::DIR), a.uid).and_then(|s| s.compositor);
-        rows.push((a.name.clone(), a.uid, in_group(&a, RDP_GROUP), in_group(&a, ADMIN_GROUP), in_group(&a, SUDO_GROUP), login_shell(&a.shell, &shells), session, since, desktop, source, gpu, running));
+        rows.push((a.name.clone(), a.uid, in_group(&a, RDP_GROUP), in_group(&a, ADMIN_GROUP), in_group(&a, sudo_group()), login_shell(&a.shell, &shells), session, since, desktop, source, gpu, running));
     }
     if json_out {
         let list: Vec<_> = rows
@@ -448,9 +456,9 @@ fn users_sudo(name: &str, on: bool) -> Result<()> {
     let a = account(name)?;
     if !on {
         ensure!(caller_uid() != Some(a.uid), "you cannot take administrator rights from yourself");
-        ensure!(!would_leave_nobody(&members_of(SUDO_GROUP)?, &a.name), "{} is the only administrator (group {SUDO_GROUP}): make another one first", a.name);
+        ensure!(!would_leave_nobody(&members_of(sudo_group())?, &a.name), "{} is the only administrator (group {}): make another one first", a.name, sudo_group());
     }
-    set_group(name, SUDO_GROUP, on)
+    set_group(name, sudo_group(), on)
 }
 
 /// The groups `users add` puts the account in, in order: the RDP group unless `--no-rdp`, then `--admin` and `--sudo`.
@@ -463,7 +471,7 @@ fn groups_for_add(rest: &[&str]) -> Vec<&'static str> {
         v.push(ADMIN_GROUP);
     }
     if rest.contains(&"--sudo") {
-        v.push(SUDO_GROUP);
+        v.push(sudo_group());
     }
     v
 }
@@ -517,7 +525,7 @@ fn users_remove(name: &str, rest: &[&str]) -> Result<()> {
     require_root()?;
     let a = account(name)?;
     ensure!(caller_uid() != Some(a.uid), "you cannot remove your own account");
-    ensure!(!would_leave_nobody(&members_of(SUDO_GROUP)?, &a.name), "{} is the only administrator (group {SUDO_GROUP}): make another one first", a.name);
+    ensure!(!would_leave_nobody(&members_of(sudo_group())?, &a.name), "{} is the only administrator (group {}): make another one first", a.name, sudo_group());
     end_session(&a);
     // loginctl returns before everything is gone: give userdel a moment.
     for _ in 0..20 {
@@ -1527,9 +1535,9 @@ mod tests {
     fn add_puts_the_account_in_the_groups_that_were_asked_for_in_order() {
         assert_eq!(groups_for_add(&[]), vec![RDP_GROUP]);
         assert_eq!(groups_for_add(&["--admin"]), vec![RDP_GROUP, ADMIN_GROUP]);
-        assert_eq!(groups_for_add(&["--sudo", "--admin"]), vec![RDP_GROUP, ADMIN_GROUP, SUDO_GROUP]);
+        assert_eq!(groups_for_add(&["--sudo", "--admin"]), vec![RDP_GROUP, ADMIN_GROUP, sudo_group()]);
         assert_eq!(groups_for_add(&["--no-rdp"]), Vec::<&str>::new());
-        assert_eq!(groups_for_add(&["--no-rdp", "--sudo"]), vec![SUDO_GROUP]);
+        assert_eq!(groups_for_add(&["--no-rdp", "--sudo"]), vec![sudo_group()]);
     }
 
     #[test]

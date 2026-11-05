@@ -1,0 +1,4 @@
+# The unprivileged account of the network daemon, the group whose members may log in over RDP, and the group of the administrators (`waydesk-admin users add NAME --admin`).
+u waydesk  -  "waydesk daemon"  -  /usr/sbin/nologin
+g waydesk-users  -
+g waydesk-admins  -
