@@ -24,6 +24,14 @@ Each account's sessions need a sound server: `systemctl --user enable --now pipe
 - OpenH264: Fedora has it in the Cisco repository (`fedora-cisco-openh264`, enabled by default; the install on Fedora 44 found `openh264` 2.6.0): the package *recommends* `openh264`. Without it, GPUs encode in hardware and a
   machine without a GPU has no video. The server accepts 2.6 and 2.7 (`/usr/lib64/libopenh264.so.8`).
 
+## The session's sway configuration
+
+The package installs `/etc/xdg/waydesk/sway.conf` (a config file: your edits survive upgrades). Sessions use it instead of Fedora's own `/etc/sway/config`, which would
+start a status bar with a shell loop in every account's session and tile the windows. This one is lean and Windows-like: windows float with title bars,
+Alt+Tab switches, Alt+F4 closes, Super+Return opens `foot`, Super+D runs `wmenu-run`, Print takes a screenshot with `grim`, there is no bar, and
+`/etc/sway/config.d/*` (Fedora's systemd integration) is included. An account replaces it with its own `~/.config/waydesk/config`
+(docs/BRING-YOUR-OWN-CONFIG.md). The Debian desktop (bar, launcher, title-bar buttons) is not packaged for Fedora.
+
 ## SELinux
 
 Tested 2026-11-05 on Fedora 44 (x86_64) with SELinux **enforcing**: the services and the whole session (sway, foot, swaybar, pipewire) run as

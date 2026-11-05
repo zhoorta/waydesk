@@ -28,6 +28,7 @@ Requires:       pipewire, pipewire-pulseaudio, pulseaudio-utils, wireplumber, wl
 # H.264 in software needs OpenH264 2.6 or 2.7, which Fedora only offers from Cisco's repository (fedora-cisco-openh264, enabled by default on Workstation).
 # Without it a GPU encodes in hardware and a machine without a GPU has no video.
 Recommends:     openh264
+Recommends:     grim, slurp, wmenu
 Recommends:     zram-generator-defaults, wireguard-tools, qrencode
 Suggests:       plasma-desktop, hyprland, intel-media-driver
 %{?systemd_requires}
@@ -74,6 +75,7 @@ install -Dm644 %{SOURCE3} %{buildroot}%{_sysconfdir}/pam.d/waydesk-server
 install -Dm644 packaging/pam-waydesk-session %{buildroot}%{_sysconfdir}/pam.d/waydesk-session
 
 # sessions: a minimal sway configuration, the blank cursor theme, the Mac keyboard layout, the GPU rules
+install -Dm644 packaging/rpm/sway.conf %{buildroot}%{_sysconfdir}/xdg/waydesk/sway.conf
 install -Dm644 packaging/sway-minimal.conf %{buildroot}%{_datadir}/waydesk/sway-minimal.conf
 install -Dm644 packaging/sway-cosmic.conf %{buildroot}%{_datadir}/waydesk/sway-cosmic.conf
 install -Dm644 packaging/sway-plasma.conf %{buildroot}%{_datadir}/waydesk/sway-plasma.conf
@@ -138,6 +140,7 @@ fi
 %files
 %license LICENSE
 %{_docdir}/%{name}
+%config(noreplace) %{_sysconfdir}/xdg/waydesk/sway.conf
 %{_bindir}/waydesk-server
 %{_bindir}/waydesk-admin
 %{_bindir}/waydesk-passwd
