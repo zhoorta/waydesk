@@ -18,6 +18,8 @@ use std::time::{Duration, Instant};
 use ironrdp_server::{CredentialDecision, CredentialValidationError, CredentialValidator, Credentials};
 use tracing::{info, warn};
 
+use crate::audit;
+
 /// An account, as the system knows it.
 #[derive(Clone, Debug)]
 pub struct UserInfo {
@@ -131,6 +133,8 @@ struct Guard {
     lockouts: u32,
     /// The last attempt.
     last: Instant,
+    /// The audit log has said that this key is locked out (once per lockout: a flood of refused attempts must not fill the disk).
+    block_logged: bool,
 }
 
 /// How long the `lockouts`-th lockout of a key lasts.
@@ -222,26 +226,35 @@ impl PamPolicy {
 
     /// The account `name` if it may log in at all (before the password is looked at).
     fn candidate(&self, name: &str) -> Option<UserInfo> {
-        let info = lookup_user(name)?;
+        self.candidate_why(name).ok()
+    }
+
+    /// Like `candidate`; when the account may not log in, the reason, for the audit log only (the client is told nothing).
+    fn candidate_why(&self, name: &str) -> Result<UserInfo, &'static str> {
+        let info = lookup_user(name).ok_or("unknown_user")?;
         // Never root, whoever runs the server (a root daemon would otherwise match "the account running the server").
         if info.uid == 0 {
-            return None;
+            return Err("not_allowed");
         }
         if !shell_allows_login(&info.shell, &std::fs::read_to_string("/etc/shells").unwrap_or_default()) {
-            return None;
+            return Err("no_login_shell");
         }
         if let Some(group) = &self.require_group {
             // `info.groups` has every group of the account (the primary one and the others).
             if !group_gid(group).is_some_and(|gid| info.groups.contains(&gid)) {
-                return None;
+                return Err("not_in_group");
             }
         }
         if info.uid == self.running.uid {
-            return Some(info);
+            return Ok(info);
         }
         // Another account: only possible as root, and only an ordinary one, never a system account.
         let ordinary = info.uid >= 1000 && info.uid != 65534;
-        (self.root && ordinary && self.allow.as_ref().is_none_or(|a| a.iter().any(|n| n == name))).then_some(info)
+        if self.root && ordinary && self.allow.as_ref().is_none_or(|a| a.iter().any(|n| n == name)) {
+            Ok(info)
+        } else {
+            Err("not_allowed")
+        }
     }
 
     /// Counts this attempt as a failure right away (it is cleared again on success), so an attempt that is cancelled
@@ -255,7 +268,7 @@ impl PamPolicy {
         if guards.len() >= MAX_TRACKED {
             guards.retain(|_, g| g.locked_until.is_some_and(|t| t > now));
         }
-        let g = guards.entry(key.to_owned()).or_insert(Guard { failures: 0, locked_until: None, lockouts: 0, last: now });
+        let g = guards.entry(key.to_owned()).or_insert(Guard { failures: 0, locked_until: None, lockouts: 0, last: now, block_logged: false });
         if let Some(t) = g.locked_until {
             if t > now {
                 return false;
@@ -273,7 +286,14 @@ impl PamPolicy {
             g.lockouts += 1;
             let for_how_long = lockout_for(g.lockouts);
             g.locked_until = Some(now + for_how_long);
+            g.block_logged = false;
             warn!(key = ?key, lockouts = g.lockouts, "too many failed logins: refusing this one for {}s", for_how_long.as_secs());
+            let (scope, name, source) = describe_key(key);
+            let mut e = audit::event("login.lockout", audit::Outcome::Refused).str("scope", scope).num("seconds", for_how_long.as_secs()).num("lockouts", g.lockouts.into());
+            if let Some(name) = name {
+                e = e.typed_name(name);
+            }
+            e.source(source).emit();
             return false;
         }
         true
@@ -306,6 +326,7 @@ impl PamPolicy {
         if entry.1 >= WATCH_FAILURES && !entry.2 {
             entry.2 = true;
             warn!(user = ?name, failures = entry.1, "many failed logins of one account in {} minutes, from any address: guessing?", WATCH_WINDOW.as_secs() / 60);
+            audit::event("login.guessing", audit::Outcome::Fail).typed_name(name).num("failures", entry.1.into()).num("window_min", WATCH_WINDOW.as_secs() / 60).emit();
         }
     }
 
@@ -317,24 +338,62 @@ impl PamPolicy {
         // address: someone who guesses at an account from elsewhere cannot lock its owner out of their own address.
         let (pair_key, source_key) = (format!("pair:{}:{name}:{source}", name.len()), format!("ip:{source}"));
         if !self.begin_attempt(&pair_key, MAX_FAILURES_PAIR) || !self.begin_attempt(&source_key, MAX_FAILURES_SOURCE) {
+            if self.first_block_unlogged(&pair_key) || self.first_block_unlogged(&source_key) {
+                audit::event("login", audit::Outcome::Fail).str("reason", "rate_limited").typed_name(name).source(source).emit();
+            }
             return None;
         }
-        let candidate = if password.is_empty() { None } else { self.candidate(name) };
-        let accepted = candidate.filter(|_| pam_check(&self.service, name, password));
-        match &accepted {
-            Some(info) => {
+        let candidate = if password.is_empty() { Err("empty_password") } else { self.candidate_why(name) };
+        let result = candidate.and_then(|info| if pam_check(&self.service, name, password) { Ok(info) } else { Err("bad_password") });
+        // The audit line comes before the answer: with `--audit-required` a login that cannot be written down is refused.
+        let result = match result {
+            Ok(info) => {
+                let written = audit::event("login", audit::Outcome::Ok).typed_name(name).num("uid", info.uid.into()).source(source).emit();
+                if written || !audit::required() {
+                    Ok(info)
+                } else {
+                    warn!(user = ?name, "login refused: the audit log cannot be written (--audit-required)");
+                    Err("audit_unavailable")
+                }
+            }
+            Err(reason) => {
+                audit::event("login", audit::Outcome::Fail).str("reason", reason).typed_name(name).source(source).emit();
+                Err(reason)
+            }
+        };
+        match result {
+            Ok(info) => {
                 self.succeeded(&pair_key);
                 self.eased(&source_key);
                 info!(user = ?name, uid = info.uid, source = ?source, "login accepted (PAM)");
+                Some(info)
             }
-            None => {
+            Err(_) => {
                 self.note_failure(name, Instant::now());
                 warn!(user = ?name, source = ?source, "login rejected (PAM)");
                 std::thread::sleep(FAIL_DELAY);
+                None
             }
         }
-        accepted
     }
+
+    /// True the first time it is asked while `key` is locked out, so that a lockout is written down once, not once per refused attempt.
+    fn first_block_unlogged(&self, key: &str) -> bool {
+        self.guards.lock().unwrap().get_mut(key).is_some_and(|g| g.locked_until.is_some() && !std::mem::replace(&mut g.block_logged, true))
+    }
+}
+
+/// What a failure-counter key stands for: its kind, the account name if it has one, and the source address (`pair:LEN:NAME:SOURCE`, `ip:SOURCE`).
+fn describe_key(key: &str) -> (&'static str, Option<&str>, &str) {
+    if let Some(rest) = key.strip_prefix("pair:") {
+        if let Some((len, rest)) = rest.split_once(':') {
+            if let Some(n) = len.parse::<usize>().ok().filter(|n| rest.is_char_boundary(*n) && rest.len() > *n) {
+                return ("account", Some(&rest[..n]), rest[n..].trim_start_matches(':'));
+            }
+        }
+        return ("account", None, "");
+    }
+    ("source", None, key.strip_prefix("ip:").unwrap_or(""))
 }
 
 /// The validator of one connection when PAM runs in this process: `outcome` receives the account that logged in.
@@ -368,6 +427,15 @@ impl CredentialValidator for PamValidator {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_failure_counter_key_says_what_it_stands_for() {
+        assert_eq!(describe_key("ip:10.0.0.1"), ("source", None, "10.0.0.1"));
+        assert_eq!(describe_key("pair:3:ana:10.0.0.1"), ("account", Some("ana"), "10.0.0.1"));
+        // A name with colons in it cannot be taken for a different name and address.
+        assert_eq!(describe_key("pair:5:a:b:c:fe80::1"), ("account", Some("a:b:c"), "fe80::1"));
+        assert_eq!(describe_key("pair:x"), ("account", None, ""));
+    }
 
     #[test]
     fn root_and_system_accounts_never_log_in() {

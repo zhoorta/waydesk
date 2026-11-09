@@ -31,8 +31,10 @@ to a card, or take it off the GPU:
     waydesk-admin users set alice --gpu renderD129       # a render node that exists here (see `waydesk-admin status`); `auto`, `off`, or `default` (the server's setting)
     waydesk-admin users set alice --desktop sway --gpu off   # both settings in one command
 
+`WAYDESK_GPU=balance` (server or account) lets the server choose when the session starts: the card with the fewest sessions for its weight, see [GPU-PLACEMENT-DESIGN.md](GPU-PLACEMENT-DESIGN.md).
+
 `users list` has a GPU column (a star: set for this account). The video encoder follows the card: VA-API on Intel and AMD, NVENC on NVIDIA. The setting is read when the session starts; a running
-session keeps its card until it is restarted.
+session keeps its card until it is restarted. Every change is in the audit log (`admin.user.set`).
 
 ## Which configuration is used
 

@@ -32,11 +32,12 @@ install -m 644 packaging/default-waydesk $P/etc/default/waydesk
 mkdir -p $P/usr/share/waydesk && install -m 644 packaging/sway-minimal.conf $P/usr/share/waydesk/sway-minimal.conf   # a server without waydesk-desktop still gets a session
 install -m 644 packaging/sway-cosmic.conf $P/usr/share/waydesk/sway-cosmic.conf; install -m 644 packaging/sway-plasma.conf $P/usr/share/waydesk/sway-plasma.conf   # the cosmic desktop (COSMIC inside the sway of the session)
 install -m 644 packaging/pam-waydesk-server $P/etc/pam.d/waydesk-server
+mkdir -p $P/etc/logrotate.d && install -m 644 packaging/logrotate-waydesk $P/etc/logrotate.d/waydesk   # the audit log
 install -m 644 packaging/pam-waydesk-session $P/etc/pam.d/waydesk-session
 mkdir -p $P/usr/share/icons && cp -a packaging/cursors/waydesk-blank $P/usr/share/icons/   # cursors with nothing in them
 install -m 644 README.md $P/usr/share/doc/waydesk-server/README.md
 install -m 644 docs/MULTIUSER-DESIGN.md $P/usr/share/doc/waydesk-server/MULTIUSER-DESIGN.md
-install -m 644 docs/WIREGUARD.md docs/ACCESS.md docs/THREAT-MODEL.md docs/SECURITY-REVIEW.md docs/MEASUREMENTS.md $P/usr/share/doc/waydesk-server/
+install -m 644 docs/WIREGUARD.md docs/ACCESS.md docs/AUDIT-DESIGN.md docs/THREAT-MODEL.md docs/SECURITY-REVIEW.md docs/MEASUREMENTS.md $P/usr/share/doc/waydesk-server/
 { printf "Waydesk\nCopyright (c) 2026 StackCare\nLicense: GNU Affero General Public License, version 3 or later (AGPL-3.0-or-later). The full text follows.\n\n"; cat LICENSE; } > $P/usr/share/doc/waydesk-server/copyright
 for f in postinst prerm postrm conffiles; do install -m 755 packaging/debian/$f $P/DEBIAN/$f; done
 chmod 644 $P/DEBIAN/conffiles

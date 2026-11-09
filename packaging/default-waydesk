@@ -35,6 +35,10 @@ WAYDESK_SESSION_ARGS=
 # rounded or shaded then, so new accounts start with square corners; some previews stay blank.
 #WAYDESK_DMS_SOFTWARE=1
 
+# The audit log (/var/log/waydesk/audit.log, docs/REFERENCE.md): a login that cannot be written to it goes through with a warning. For a site where an
+# unlogged login is not acceptable, add --audit-required to the helper's options (keep the group): then a full disk stops logins.
+#WAYDESK_HELPER_ARGS=--require-group waydesk-users --audit-required
+
 # A new session is refused when the machine cannot take one more (the account's running session is never refused: it reconnects).
 # By default it needs the larger of 900 MB and 15 % of the memory available (`waydesk-admin status` shows it and whether a login would
 # be accepted now). Change it, or limit the accounts that may have a session, by adding to the helper's options (keep the group):
@@ -76,14 +80,19 @@ WAYDESK_SESSION_ARGS=
 #WAYDESK_VA_MAX_QP=40
 # Takes effect for sessions that start after the change (end the session or log out first).
 #WAYDESK_GPU=auto
+# WAYDESK_GPU=balance: on a machine with more than one GPU, each new session is placed on the card with the fewest sessions for its weight (a card with its own memory counts 4,
+# an integrated one 1), when the session starts and as root (waydesk-admin gpu place; a running session stays where it is). An account pinned with
+# `waydesk-admin users set NAME --gpu ...` is left alone. No card that can take it: software rendering, with a line in the log and the audit trail.
 #WAYDESK_GPU_ROLES=renderD128=render,renderD129=inference,renderD130=both   (or: waydesk-admin gpu roles renderD129=inference)
-#                                        what each card is for: render = sessions only; inference = a model only (`auto` never picks it, and no other card's session
-#                                        encodes on it; an account pinned there by hand still can); both = sessions and a model. Cards not listed are render.
+#                                        what each card is for: render = sessions only; inference = a model only (`auto` and balance never place a session there, and no other card's
+#                                        session encodes on it; an account pinned there by hand still can); both = sessions and a model (the free-memory floor below protects the model). Cards not listed are render.
 #                                        `waydesk-admin status` prints the CUDA_VISIBLE_DEVICES for the inference and both cards; point the model service at those.
 #                                        A role starts nothing and moves nothing: it tells Waydesk which cards to keep sessions off, and which NVIDIA cards to name for a model. Point the model
 #                                        service at its card yourself; `inference` on an Intel or AMD card only keeps sessions off it.
 #WAYDESK_AI_ENDPOINT=127.0.0.1:11434    a local inference service (Ollama, vLLM, llama.cpp). `waydesk-admin status` then shows an AI line (the model it holds and its video
 #                                        memory, if it is Ollama; how many connections are open) and an AI column with each account's open connections to it
+#WAYDESK_GPU_WEIGHTS=renderD128=1,renderD129=4
+#WAYDESK_GPU_MIN_FREE_VRAM_MB=4096        no new session on a card with less free video memory than this (NVIDIA, AMD)
 #WAYDESK_ENCODER=auto
 
 # The compositor of the sessions: sway (default), or hyprland, which needs a GPU and Hyprland 0.55 or later. Experimental: see docs/HYPRLAND.md.

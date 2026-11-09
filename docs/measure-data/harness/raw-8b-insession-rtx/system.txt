@@ -118,7 +118,7 @@ WAYDESK_SESSION_ARGS=
 
 # The compositor of the sessions: sway (default), or hyprland, which needs a GPU and Hyprland 0.55 or later. Experimental: see docs/HYPRLAND.md.
 #WAYDESK_COMPOSITOR=sway
-WAYDESK_ALLOW_FROM="91.99.155.107"
+WAYDESK_ALLOW_FROM="CLIENT-IP"
 
 WAYDESK_AI_ENDPOINT=127.0.0.1:11434
 

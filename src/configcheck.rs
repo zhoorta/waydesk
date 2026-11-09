@@ -465,7 +465,7 @@ pub fn normalize_desktop(s: &str) -> Option<&'static str> {
 pub struct AccountSettings {
     /// `sway` or `hyprland` (`WAYDESK_COMPOSITOR`).
     pub desktop: Option<String>,
-    /// `auto`, `off` or a render node (`WAYDESK_GPU`).
+    /// `auto`, `balance`, `off` or a render node (`WAYDESK_GPU`).
     pub gpu: Option<String>,
 }
 
@@ -507,6 +507,7 @@ pub fn normalize_gpu(s: &str, nodes: &[String]) -> Result<Option<String>, String
     match t.to_ascii_lowercase().as_str() {
         "default" | "server" => return Ok(None),
         "auto" => return Ok(Some("auto".into())),
+        "balance" => return Ok(Some("balance".into())),
         "off" | "none" | "cpu" => return Ok(Some("off".into())),
         _ => {}
     }
@@ -514,9 +515,9 @@ pub fn normalize_gpu(s: &str, nodes: &[String]) -> Result<Option<String>, String
     if nodes.contains(&path) {
         Ok(Some(path))
     } else if nodes.is_empty() {
-        Err(format!("{t:?} is not a render node of this machine (it has no GPU); use auto, off or default"))
+        Err(format!("{t:?} is not a render node of this machine (it has no GPU); use auto, balance, off or default"))
     } else {
-        Err(format!("{t:?} is not a render node of this machine; use auto, off, default or one of: {}", nodes.join(", ")))
+        Err(format!("{t:?} is not a render node of this machine; use auto, balance, off, default or one of: {}", nodes.join(", ")))
     }
 }
 
@@ -665,6 +666,7 @@ mod tests {
         assert_eq!(normalize_gpu("/dev/dri/renderD128", &nodes), Ok(Some("/dev/dri/renderD128".into())));
         assert_eq!(normalize_gpu("OFF", &nodes), Ok(Some("off".into())));
         assert_eq!(normalize_gpu("auto", &[]), Ok(Some("auto".into())));
+        assert_eq!(normalize_gpu("Balance", &nodes), Ok(Some("balance".into())));
         assert_eq!(normalize_gpu("default", &nodes), Ok(None));
         assert!(normalize_gpu("renderD130", &nodes).is_err(), "a node that does not exist is refused");
         assert!(normalize_gpu("renderD128", &[]).is_err());

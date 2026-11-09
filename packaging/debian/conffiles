@@ -1,3 +1,4 @@
 /etc/default/waydesk
 /etc/pam.d/waydesk-server
 /etc/xkb/symbols/waydeskmac
+/etc/logrotate.d/waydesk

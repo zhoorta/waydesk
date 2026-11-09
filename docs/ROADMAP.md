@@ -41,7 +41,7 @@ Small, already understood, in the order I would do them.
   cheaper path for tiny damage; compare real text legibility of screen and camera mode (PSNR says 12 dB lower at rest). Numbers in `docs/MEASUREMENTS.md`.
 
 - **Access control and auditing.** Planned, in this order:
-  - an audit log of logins, failures, session ends and administrator actions, with export to syslog;
+  - ~~an audit log of logins, failures, session ends and administrator actions, with export to syslog~~ (built, unreleased; still to do: the Users & Access panel tab, a `session.end` reason, a hash chain if anyone asks);
   - per-group switches for the clipboard and file transfer;
   - idle and maximum session limits;
   - alerts on distributed password guessing (only logged today);

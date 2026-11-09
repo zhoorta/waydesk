@@ -15,7 +15,7 @@ Packages, commands, units, ports and files of Waydesk. The short version is on [
 
 ## Commands: administration
 
-- `waydesk-admin status [--json] [--watch [SECONDS]]`: memory, swap, load, the GPUs and how busy they are, running sessions and what each account uses and runs (GPU or CPU rendering, the video encoder: `vaapi`, `nvenc` or `openh264`, with its quantiser and frame rate); `--watch` repeats it (2 s by default), `--json --watch` prints one line of JSON each time With `WAYDESK_AI_ENDPOINT` set (a local inference service, `127.0.0.1:11434`), an `AI` line shows what the service holds (for Ollama: the model and how much of it is in video memory, from `/api/ps`) and how many connections are open to it, and the table gets an `AI` column: the connections each account has open to the service (the owner of a client socket in the kernel's TCP table; a streaming request keeps its connection open until the answer ends, so it counts requests running and connections left idle, not tokens). Connections of root or other non-account users are counted in the line, not the column. JSON: `ai` (endpoint, state, models, connections, connections_other) and per user `ai_connections`.
+- `waydesk-admin status [--json] [--watch [SECONDS]]`: memory, swap, load, the GPUs and how busy they are, running sessions and what each account uses and runs (GPU or CPU rendering, the video encoder: `vaapi`, `nvenc` or `openh264`, with its quantiser and frame rate); `--watch` repeats it (2 s by default), `--json --watch` prints one line of JSON each time Under each GPU: its role when `WAYDESK_GPU_ROLES` sets one (`render`, `inference`, `both`), the accounts whose session draws on it, and for NVIDIA the `CUDA_VISIBLE_DEVICES=GPU-...` value that pins a model to that card (the UUID does not depend on how CUDA orders the devices); an `Inference` line gives the value for every card a model may use (`inference` and `both`). In the table, RENDER is the card's render node (or `cpu`) and ENCODER names the card the encoder runs on (`nvenc@renderD129 q18 12fps`). A `Warning` line names a session that renders in software although its account's GPU setting asks for a GPU, one that renders on one card and encodes on another, or one that renders on a card kept for inference. JSON: per GPU `uuid`, `role`, `reserved`, `sessions`; per user `video.encoder_node`; top level `gpu_roles` and `warnings`. With `WAYDESK_AI_ENDPOINT` set (a local inference service, `127.0.0.1:11434`), an `AI` line shows what the service holds (for Ollama: the model and how much of it is in video memory, from `/api/ps`) and how many connections are open to it, and the table gets an `AI` column: the connections each account has open to the service (the owner of a client socket in the kernel's TCP table; a streaming request keeps its connection open until the answer ends, so it counts requests running and connections left idle, not tokens). Connections of root or other non-account users are counted in the line, not the column. JSON: `ai` (endpoint, state, models, connections, connections_other) and per user `ai_connections`.
 - `waydesk-admin users list [--json]`: accounts that may log in
 - `waydesk-admin users add NAME [--admin] [--sudo] [--no-rdp]`: create an account; prints a generated password
 - `waydesk-admin users passwd NAME [--stdin]`: set a password (read from stdin, never from an argument)
@@ -24,11 +24,13 @@ Packages, commands, units, ports and files of Waydesk. The short version is on [
 - `waydesk-admin users admin NAME on|off`: Flatpak installs without a password
 - `waydesk-admin users sudo NAME on|off`: membership of the sudo group
 - `waydesk-admin users limit NAME [show | reset | --memory SIZE] [--swap SIZE] [--cpu-weight N] [--tasks N]`: per-account ceilings
-- `waydesk-admin users set NAME [--desktop sway|hyprland|default] [--gpu auto|off|renderDN|default]`: the compositor and the GPU of one account's sessions (`default`: the server's `WAYDESK_COMPOSITOR` / `WAYDESK_GPU`; a render node must exist on this machine, e.g. `renderD129`; the encoder follows the GPU); written to `/etc/default/waydesk.d/UID.env`, taken up when the session next starts ([BRING-YOUR-OWN-CONFIG.md](BRING-YOUR-OWN-CONFIG.md))
+- `waydesk-admin users set NAME [--desktop sway|hyprland|default] [--gpu auto|balance|off|renderDN|default]`: the compositor and the GPU of one account's sessions (`default`: the server's `WAYDESK_COMPOSITOR` / `WAYDESK_GPU`; a render node must exist on this machine, e.g. `renderD129`; the encoder follows the GPU); written to `/etc/default/waydesk.d/UID.env`, taken up when the session next starts ([BRING-YOUR-OWN-CONFIG.md](BRING-YOUR-OWN-CONFIG.md))
+- `waydesk-admin gpu place UID`: run by the session unit (as root) before a session starts; for an account whose GPU is `balance` it picks the card and writes `/run/waydesk/gpu/UID.env` (`WAYDESK_GPU_ROLES`, `WAYDESK_GPU_WEIGHTS`, `WAYDESK_GPU_MIN_FREE_VRAM_MB` in `/etc/default/waydesk`); audited as `gpu.place` ([GPU-PLACEMENT-DESIGN.md](GPU-PLACEMENT-DESIGN.md))
 - `waydesk-admin gpu roles [show | reset | NODE=ROLE ...]`: what each GPU is for (`render`, `inference` or `both`); shows the cards and their roles, or writes `WAYDESK_GPU_ROLES` in `/etc/default/waydesk` (root; only the named cards change, `reset` removes the setting; it applies to sessions that start afterwards)
 - `waydesk-admin ai [show | endpoint HOST:PORT | endpoint off]`: the local inference service `status` reports on (Ollama, vLLM, llama.cpp); writes `WAYDESK_AI_ENDPOINT` (root) and says what answers there. Waydesk neither installs nor starts the service
 - `waydesk-admin config check NAME [--json]`: whether the account's own sway or Hyprland setup will work as a session (exit status 1 when something is a problem)
 - `waydesk-admin sessions list [--json] | end NAME`: running sessions; ending one closes that account's desktop
+- `waydesk-admin audit [--since 2h|7d|2026-10-29] [--user NAME] [--event PREFIX] [--outcome ok|fail|refused] [--limit N] [--json]`: the audit log (current and rotated files); needs root or the group `adm`
 
 ## Commands: setup
 
@@ -52,9 +54,35 @@ Packages, commands, units, ports and files of Waydesk. The short version is on [
 - `/etc/xdg/waydesk/sway.conf`: the session's sway config (fallback: /usr/share/waydesk/sway-minimal.conf)
 - `/usr/lib/waydesk/bin`: private sway, swaymsg and swaybar; first in the session's PATH
 - `/run/waydesk/`: helper and session sockets
+- `/var/log/waydesk/audit.log`: the audit log (root, readable by the group `adm`); rotated weekly by `/etc/logrotate.d/waydesk`, 26 weeks kept. See "Audit log" below
 - `/etc/apt/sources.list.d/waydesk.sources`: the repository, written for your release
 - `/etc/apt/preferences.d/waydesk`: the pin: these packages win over third-party builds of the same names
 - `/usr/lib/systemd/zram-generator.conf.d/50-waydesk.conf`: zram as large as the RAM, at most 16 GiB
+
+## Audit log
+
+One JSON object per line in `/var/log/waydesk/audit.log`, and a copy in the system log (identifier `waydesk-audit`, facility `authpriv`), which is how it
+leaves the machine: forward it with rsyslog (`omfwd`) or `systemd-journal-upload` if the log has to be tamper-evident, because root on the same machine can
+edit a file. Only root-owned processes write it; the network daemon cannot. Read it with `waydesk-admin audit`. Design and reasons: `docs/AUDIT-DESIGN.md`.
+
+Every line has `ts` (UTC, milliseconds), `host`, `version`, `origin` (`helper` or `admin`), `event` and `outcome` (`ok`, `fail`, `refused`); the helper's lines
+also have `seq`, a counter since the helper started (a gap means a lost line). Passwords are never written. A user name that cannot be an account name
+(too long, or with spaces: often a password typed in the wrong box) is written as `"user_invalid":true,"user_len":N` and nothing else.
+
+| Event | Other fields | When |
+|---|---|---|
+| `audit.start` | `required` | the helper starts |
+| `login` | `user`, `uid`, `source`; on failure `reason`: `bad_password`, `empty_password`, `unknown_user`, `not_in_group`, `no_login_shell`, `not_allowed`, `rate_limited`, `audit_unavailable` | every password check |
+| `login.lockout` | `scope` (`account` or `source`), `user`, `source`, `seconds`, `lockouts` | a limit on failures starts |
+| `login.guessing` | `user`, `failures`, `window_min` | many failures of one account from any address |
+| `session.start` / `session.reconnect` | `user`, `uid`, `source` | a new session, or one taken over |
+| `session.refused` | `user`, `uid`, `reason` (`memory`, `users_limit`), `source` | a new session was not allowed |
+| `session.end` | `user`, `uid`, `seconds` | the session process ended |
+| `connection.end` | `user`, `uid`, `source`, `seconds` | the client that logged in is gone |
+| `admin.user.add` `.remove` `.passwd` `.enable` `.disable` `.limit`, `admin.group`, `admin.session.end`, `admin.access`, `admin.cert`, `admin.vpn` | `via` (`pkexec`, `sudo`, `root`), `actor`, `actor_uid`, `target`, `detail` | `waydesk-admin` changed something (also when it failed: `outcome` is `fail`) |
+
+`--audit-required` in the helper's options (`WAYDESK_HELPER_ARGS`) refuses every login that cannot be written to the file; without it a full disk only
+logs a warning and logins go on. Connections that never log in, and addresses refused by `WAYDESK_ALLOW_FROM`, are in the journal only.
 
 ## Who can reach the port
 

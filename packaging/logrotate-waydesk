@@ -1,0 +1,15 @@
+# The audit log (docs/AUDIT-DESIGN.md). Weekly, 26 weeks (about six months) kept: it holds account names and IP addresses, which are personal data, so
+# keep it no longer than you need it (the GDPR) and forward it to a central log server if you need it to be tamper-evident.
+/var/log/waydesk/audit.log {
+    weekly
+    rotate 26
+    maxsize 200M
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 0640 root adm
+    postrotate
+        systemctl kill --signal=HUP --kill-whom=main waydesk-helper.service >/dev/null 2>&1 || true
+    endscript
+}

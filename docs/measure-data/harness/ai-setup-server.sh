@@ -24,6 +24,7 @@ EOF
 systemctl daemon-reload && systemctl enable --now ollama && systemctl restart ollama
 for i in $(seq 1 30); do curl -fs http://127.0.0.1:11434/api/version >/dev/null && break; sleep 1; done
 for m in $MODELS; do ollama pull "$m"; done
+grep -q '^WAYDESK_AI_ENDPOINT=' /etc/default/waydesk 2>/dev/null || printf '\nWAYDESK_AI_ENDPOINT=127.0.0.1:11434\n' >> /etc/default/waydesk   # waydesk-admin status shows the model and each account's connections
 mkdir -p /srv/load && cp "$HERE"/llm-bench.py "$HERE"/ai-sample.py /srv/load/ && chmod 755 /srv/load/llm-bench.py /srv/load/ai-sample.py
 echo
 echo "Ollama pinned to $UUID, models: $MODELS"

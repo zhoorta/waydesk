@@ -9,13 +9,16 @@ use std::path::PathBuf;
 pub enum Setting {
     Off,
     Auto,
+    /// Placed by `waydesk-admin gpu place` before the session starts, which writes the node; a session that still sees this was not placed and takes the first node.
+    Balance,
     Node(PathBuf),
 }
 
-/// `WAYDESK_GPU`: `off`, `auto` (also nothing set) or the path of a render node.
+/// `WAYDESK_GPU`: `off`, `auto` (also nothing set), `balance` or the path of a render node.
 pub fn parse(value: Option<&str>) -> Setting {
     match value.map(str::trim) {
         None | Some("") | Some("auto") => Setting::Auto,
+        Some("balance") => Setting::Balance,
         Some("off") | Some("0") | Some("no") => Setting::Off,
         Some(path) => Setting::Node(PathBuf::from(path)),
     }
@@ -40,7 +43,7 @@ pub fn render_nodes() -> Vec<PathBuf> {
 pub fn choose(setting: &Setting, nodes: &[PathBuf], reserved: &[String]) -> Option<PathBuf> {
     match setting {
         Setting::Off => None,
-        Setting::Auto => nodes.iter().find(|n| !n.file_name().is_some_and(|f| reserved.iter().any(|r| r.as_str() == f.to_string_lossy()))).cloned(),
+        Setting::Auto | Setting::Balance => nodes.iter().find(|n| !n.file_name().is_some_and(|f| reserved.iter().any(|r| r.as_str() == f.to_string_lossy()))).cloned(),
         Setting::Node(p) => nodes.contains(p).then(|| p.clone()),
     }
 }
@@ -68,6 +71,7 @@ mod tests {
         assert_eq!(parse(Some("")), Setting::Auto);
         assert_eq!(parse(Some(" auto ")), Setting::Auto);
         assert_eq!(parse(Some("off")), Setting::Off);
+        assert_eq!(parse(Some("balance")), Setting::Balance);
         assert_eq!(parse(Some("/dev/dri/renderD129")), Setting::Node("/dev/dri/renderD129".into()));
     }
 
@@ -76,6 +80,7 @@ mod tests {
         let nodes = vec![PathBuf::from("/dev/dri/renderD128"), PathBuf::from("/dev/dri/renderD129")];
         assert_eq!(choose(&Setting::Auto, &nodes, &[]), Some("/dev/dri/renderD128".into()));
         assert_eq!(choose(&Setting::Auto, &[], &[]), None, "no GPU: software");
+        assert_eq!(choose(&Setting::Balance, &nodes, &[]), Some("/dev/dri/renderD128".into()), "not placed: the first node, as auto");
         assert_eq!(choose(&Setting::Off, &nodes, &[]), None);
         assert_eq!(choose(&Setting::Node("/dev/dri/renderD129".into()), &nodes, &[]), Some("/dev/dri/renderD129".into()));
         assert_eq!(choose(&Setting::Node("/dev/dri/renderD130".into()), &nodes, &[]), None, "a node that does not exist is not used");

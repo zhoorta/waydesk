@@ -26,6 +26,7 @@ use std::time::{Duration, Instant};
 use anyhow::{ensure, Context as _, Result};
 use tracing::{info, warn};
 
+use crate::audit::{self, Outcome};
 use crate::auth::{lookup_user, PamPolicy, UserInfo};
 use crate::fdpass;
 use crate::memory::{self, Admission};
@@ -225,6 +226,7 @@ fn registration(mut conn: UnixStream, sessions: &Sessions) {
     let _count = CountGuard { sessions, uid };
     let Ok(sock) = conn.try_clone() else { return };
     let generation = sessions.next_generation.fetch_add(1, Ordering::Relaxed);
+    let registered_at = Instant::now();
     sessions.by_uid.lock().unwrap().insert(uid, Registered { sock, generation });
     sessions.registered.notify_all();
     info!(uid, "session registered");
@@ -235,6 +237,11 @@ fn registration(mut conn: UnixStream, sessions: &Sessions) {
         map.remove(&uid);
     }
     info!(uid, "session ended");
+    let mut e = audit::event("session.end", Outcome::Ok);
+    if let Some(name) = audit::name_of(uid) {
+        e = e.str("user", &name);
+    }
+    e.num("uid", uid.into()).num("seconds", registered_at.elapsed().as_secs()).emit();
 }
 
 /// Gives a registration slot back when the connection ends, however it ends.
@@ -299,11 +306,12 @@ impl std::fmt::Display for Refused {
 impl std::error::Error for Refused {}
 
 /// The running session of the account, or a new one (started and waited for until it registers).
-fn session_for(user: &UserInfo, cfg: &Config, sessions: &Sessions, register_path: &std::path::Path) -> Result<UnixStream> {
+fn session_for(user: &UserInfo, source: &str, cfg: &Config, sessions: &Sessions, register_path: &std::path::Path) -> Result<UnixStream> {
     let gate = sessions.gate(user.uid);
     let _one_at_a_time = gate.lock().unwrap();
     if let Some(s) = sessions.attach(user.uid) {
         info!(user = %user.name, "reconnecting to the running session");
+        audit::event("session.reconnect", Outcome::Ok).str("user", &user.name).num("uid", user.uid.into()).source(source).emit();
         return Ok(s);
     }
     // A new session costs memory the others may need: when the machine cannot take one more, the login is refused here (the
@@ -314,6 +322,7 @@ fn session_for(user: &UserInfo, cfg: &Config, sessions: &Sessions, register_path
             Admission::Open => {}
             Admission::Full { available_mb, needed_mb } => {
                 warn!(user = %user.name, available_mb, needed_mb, running, "session refused: the machine is short of memory");
+                audit::event("session.refused", Outcome::Refused).str("user", &user.name).num("uid", user.uid.into()).str("reason", "memory").source(source).emit();
                 return Err(Refused {
                     reason: proto::REFUSED_MEMORY,
                     message: format!("the server is short of memory ({available_mb} MB available, {needed_mb} MB needed for a new session)"),
@@ -322,6 +331,7 @@ fn session_for(user: &UserInfo, cfg: &Config, sessions: &Sessions, register_path
             }
             Admission::TooManyUsers { users, max } => {
                 warn!(user = %user.name, users, max, "session refused: the limit of active users is reached");
+                audit::event("session.refused", Outcome::Refused).str("user", &user.name).num("uid", user.uid.into()).str("reason", "users_limit").source(source).emit();
                 return Err(Refused { reason: proto::REFUSED_USERS, message: format!("the limit of {max} active users is reached") }.into());
             }
         }
@@ -346,12 +356,17 @@ fn session_for(user: &UserInfo, cfg: &Config, sessions: &Sessions, register_path
         map = sessions.registered.wait_timeout(map, left).unwrap().0;
     }
     drop(map);
-    sessions.attach(user.uid).context("the new session process is already gone")
+    let attached = sessions.attach(user.uid).context("the new session process is already gone")?;
+    audit::event("session.start", Outcome::Ok).str("user", &user.name).num("uid", user.uid.into()).source(source).flag("systemd", cfg.systemd_sessions).emit();
+    Ok(attached)
 }
 
 /// One daemon connection: one client of the daemon.
 fn serve(mut sock: UnixStream, cfg: &Config, policy: &PamPolicy, sessions: &Sessions, register_path: &std::path::Path) {
     let mut who: Option<UserInfo> = None;
+    // Where the client that logged in on this connection comes from, and since when: the daemon holds one connection per client, so the
+    // end of this one is the end of that client's connection (written here, where the daemon cannot forge it).
+    let mut login: Option<(String, Instant)> = None;
     let mut started = false;
     loop {
         let body = match proto::read_frame(&mut sock) {
@@ -373,6 +388,7 @@ fn serve(mut sock: UnixStream, cfg: &Config, policy: &PamPolicy, sessions: &Sess
                     match policy.authenticate(&user, &password, &source) {
                         Some(info) => {
                             who = Some(info);
+                            login = Some((source, Instant::now()));
                             reply(&mut sock, &HelperResp::AuthOk)
                         }
                         None => reply(&mut sock, &HelperResp::AuthFail),
@@ -382,7 +398,7 @@ fn serve(mut sock: UnixStream, cfg: &Config, policy: &PamPolicy, sessions: &Sess
             HelperReq::StartSession => match &who {
                 None => reply(&mut sock, &HelperResp::Error { message: "not logged in".into() }),
                 Some(_) if started => reply(&mut sock, &HelperResp::Error { message: "a session was already handed out on this connection".into() }),
-                Some(user) => match session_for(user, cfg, sessions, register_path) {
+                Some(user) => match session_for(user, login.as_ref().map_or("", |l| l.0.as_str()), cfg, sessions, register_path) {
                     Ok(ours) => {
                         started = true;
                         // The session process holds its end; ours goes to the daemon, and then we let go of it.
@@ -403,5 +419,8 @@ fn serve(mut sock: UnixStream, cfg: &Config, policy: &PamPolicy, sessions: &Sess
             break;
         }
     }
-    // Nothing to clean up here: the session belongs to the account and goes on without this connection.
+    // The session belongs to the account and goes on without this connection.
+    if let (Some(user), Some((source, since))) = (&who, &login) {
+        audit::event("connection.end", Outcome::Ok).str("user", &user.name).num("uid", user.uid.into()).source(source).num("seconds", since.elapsed().as_secs()).emit();
+    }
 }

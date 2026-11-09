@@ -4,7 +4,7 @@
 Each page is `key: value` lines, a line `---`, then Markdown of a small kind: `##` starts a section (`## Title {bar: label}` is accepted and the label ignored), `###` a sub-heading, paragraphs, `-` and `1.` lists, pipe tables, `>` notes, fenced code (```console puts the prompt and comments in
 colour; ```html is passed through). A page that is a file `name.html` has the same front matter (and a `lede:` line) and a body of HTML sections written by hand: the charts and diagrams of the architecture, measurements, security and reference pages. The output goes to site/<slug>/index.html, with the header, footer and stylesheet of the home page, and sitemap.xml lists the home page and the
 pages. The generated files are committed (the site is a folder that is copied as it is), so run this after editing a page and commit both. Deploy with
-`rsync -a --exclude=.DS_Store --exclude=build.py --exclude=pages -e "ssh -i ~/.ssh/id_ed25519_metproof -o IdentitiesOnly=yes" site/ waydesk@2.28.140.203:app/` (no --delete: the apt repository lives in app/apt).
+`rsync -a --exclude=.DS_Store --exclude=build.py --exclude=pages -e "ssh -i ~/.ssh/id_ed25519_metproof -o IdentitiesOnly=yes" site/ waydesk@SITE-HOST:app/` (no --delete: the apt repository lives in app/apt).
 """
 import html
 import json

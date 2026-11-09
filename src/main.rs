@@ -4,6 +4,7 @@
 
 mod allow;
 mod audio;
+mod audit;
 mod auth;
 mod capture;
 mod capture_ext;
@@ -24,6 +25,7 @@ mod encode_nv;
 mod encoder;
 mod fdpass;
 mod gpu;
+mod gpuplace;
 mod gpuroles;
 mod helper;
 mod helperclient;
@@ -527,6 +529,9 @@ async fn main() -> anyhow::Result<()> {
     let mut allow_from: Option<String> = std::env::var("WAYDESK_ALLOW_FROM").ok();
     // The root helper (`--helper`), or the daemon using one (`--auth helper`).
     let mut run_helper = false;
+    // The audit log (docs/AUDIT-DESIGN.md): where the helper writes it, and whether a login that cannot be written down is refused.
+    let mut audit_log = PathBuf::from(audit::DEFAULT_PATH);
+    let mut audit_required = false;
     let mut helper_socket = PathBuf::from("/run/waydesk/helper.sock");
     let mut daemon_user = "waydesk".to_string();
     let mut systemd_sessions = false;
@@ -558,6 +563,8 @@ async fn main() -> anyhow::Result<()> {
                 return Ok(());
             }
             "--helper" => run_helper = true,
+            "--audit-log" => audit_log = PathBuf::from(args.next().context("--audit-log needs a path")?),
+            "--audit-required" => audit_required = true,
             "--systemd-sessions" => systemd_sessions = true,
             "--min-available-mb" => min_available_mb = Some(args.next().context("--min-available-mb needs a number (0 = no check)")?.parse()?),
             "--max-active-users" => max_active_users = args.next().context("--max-active-users needs a number (0 = no limit)")?.parse()?,
@@ -613,6 +620,8 @@ async fn main() -> anyhow::Result<()> {
         worker_args.extend(["--session-hook".to_string(), h.display().to_string()]);
     }
     if run_helper {
+        audit::init(&audit_log, "helper", true, audit_required);
+        audit::event("audit.start", audit::Outcome::Ok).flag("required", audit_required).emit();
         let exe = std::env::current_exe().context("path of this program")?;
         return helper::run(helper::Config { socket: helper_socket, daemon_user, allow_users, require_group, exe, worker_args, workspace, systemd_sessions, min_available_mb, max_active_users });
     }

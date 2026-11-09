@@ -143,7 +143,7 @@ fn choose_device(node: Option<&Path>) -> Option<usize> {
     if let Some(n) = std::env::var("WAYDESK_NVENC_DEVICE").ok().and_then(|v| v.trim().parse::<usize>().ok()) {
         return Some(n);
     }
-    let reserve = crate::gpuroles::reserved_nodes(std::env::var("WAYDESK_GPU_ROLES").ok().as_deref());
+    let reserve = crate::gpuplace::reserved_nodes(std::env::var("WAYDESK_GPU_ROLES").ok().as_deref());
     match cuda_pci_addresses() {
         Ok(list) => pick_device(&list, node.and_then(node_pci).as_deref(), &render_name_of_pci, &reserve),
         Err(_) => Some(0),

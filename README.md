@@ -65,6 +65,7 @@ Early. Tested with FreeRDP and the Windows App on macOS. Not independently revie
 - [Guide](docs/GUIDE.md): the long form of this page: server and desktop packages, memory protection, who may log in, account management, running the daemon by hand
 - [Reference](docs/REFERENCE.md): packages, commands, units, ports and files
 - [Access](docs/ACCESS.md) and [WireGuard](docs/WIREGUARD.md): who can reach the port
+- [Audit log](docs/AUDIT-DESIGN.md) (logins, sessions and administrator actions, exported to syslog) and [GPU placement](docs/GPU-PLACEMENT-DESIGN.md) (balancing sessions across several cards)
 - [Measurements](docs/MEASUREMENTS.md), [Portability](docs/PORTABILITY.md), [Changelog](CHANGELOG.md)
 
 ## Names and licence

@@ -12,13 +12,14 @@
 //!   waydesk-admin status [--json] [--watch [SECONDS]]   (memory, swap, load, the GPUs and how busy they are, whether a new session would be accepted, and what each
 //!                                                account uses and runs: renderer and video encoder; `--watch` repeats it, `--json --watch` prints one line of JSON each time)
 //!   waydesk-admin users limit NAME [show | reset | --memory SIZE] [--swap SIZE] [--cpu-weight N] [--tasks N]
-//!   waydesk-admin users set NAME [--desktop sway|cosmic|plasma|hyprland|default] [--gpu auto|off|renderDN|default]     the compositor and the GPU of one account's sessions (default: the server's setting)
+//!   waydesk-admin users set NAME [--desktop sway|cosmic|plasma|hyprland|default] [--gpu auto|balance|off|renderDN|default]     the compositor and the GPU of one account's sessions (default: the server's setting)
 //!   waydesk-admin config check NAME [--json]     whether the account's own compositor setup will work as a Waydesk session (docs/BRING-YOUR-OWN-CONFIG.md)
 //!   waydesk-admin gpu roles [show | reset | NODE=ROLE ...]     what each GPU is for: render (sessions), inference (a local model) or both (WAYDESK_GPU_ROLES in /etc/default/waydesk)
 //!   waydesk-admin ai [show | endpoint HOST:PORT | endpoint off]     the local inference service `status` reports on (WAYDESK_AI_ENDPOINT in /etc/default/waydesk)
 //!   waydesk-admin access [show | local | lan | vpn | custom ...]     who can reach the RDP port (scripts in /usr/lib/waydesk/admin)
 //!   waydesk-admin cert [status | local-ca | reissue | export-ca | install | self-signed]     the certificate clients check
 //!   waydesk-admin vpn [status | init | add NAME | show NAME | list | remove NAME]     a WireGuard VPN for the port
+//!   waydesk-admin audit [--since 2h|7d|2026-10-29] [--user NAME] [--event PREFIX] [--outcome ok|fail|refused] [--limit N] [--json]     the audit log
 //!
 //! Listing and `status` are open to everybody (the account database and the cgroup files are). Everything else needs root (`sudo`, or `pkexec` from the panel).
 //! The work is done by the system's own tools (useradd, userdel, gpasswd, chpasswd, systemctl, loginctl), started by their
@@ -36,12 +37,18 @@ use std::process::{Command, Stdio};
 use anyhow::{bail, ensure, Context as _, Result};
 use serde_json::json;
 
-#[path = "../configcheck.rs"]
-mod configcheck;
+// Shared with the helper; this program only writes admin lines and reads the log.
+#[allow(dead_code)]
 #[path = "../aistatus.rs"]
 mod aistatus;
+#[path = "../audit.rs"]
+mod audit;
+#[path = "../configcheck.rs"]
+mod configcheck;
 #[path = "../gpuinfo.rs"]
 mod gpuinfo;
+#[path = "../gpuplace.rs"]
+mod gpuplace;
 #[path = "../gpuroles.rs"]
 mod gpuroles;
 #[path = "../serversettings.rs"]
@@ -245,7 +252,13 @@ fn run() -> Result<()> {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     let json_out = take_flag(&mut args, "--json");
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
-    match args.as_slice() {
+    let result = dispatch(&args, json_out);
+    audit_command(&args, result.is_ok());
+    result
+}
+
+fn dispatch(args: &[&str], json_out: bool) -> Result<()> {
+    match args {
         ["users", "list"] => users_list(json_out),
         ["users", "add", name, rest @ ..] => users_add(name, rest, json_out),
         ["users", "remove", name, rest @ ..] => users_remove(name, rest),
@@ -255,10 +268,12 @@ fn run() -> Result<()> {
         ["users", "admin", name, onoff] => set_group(name, ADMIN_GROUP, parse_onoff(onoff)?),
         ["users", "sudo", name, onoff] => users_sudo(name, parse_onoff(onoff)?),
         ["users", "set", name, rest @ ..] => users_set(name, rest),
+        ["gpu", "place", uid] => gpu_place(uid),
         ["config", "check", name] => config_check(name, json_out),
         ["gpu", "roles", rest @ ..] => gpu_roles(rest),
         ["ai", rest @ ..] => ai_command(rest),
         ["sessions", "list"] => sessions_list(json_out),
+        ["audit", rest @ ..] => audit_show(rest, json_out),
         ["status", rest @ ..] => status(json_out, parse_watch(rest)?),
         ["--version"] | ["-V"] => {
             println!("waydesk-admin {}", env!("CARGO_PKG_VERSION"));
@@ -291,9 +306,11 @@ usage: waydesk-admin users list [--json]
        waydesk-admin users admin NAME on|off   (Flatpak installs without a password)
        waydesk-admin users sudo NAME on|off
        waydesk-admin sessions list [--json] | end NAME
+       waydesk-admin audit [--since 2h|7d|2026-10-29] [--user NAME] [--event PREFIX] [--outcome ok|fail|refused] [--limit N] [--json]
        waydesk-admin status [--json] [--watch [SECONDS]]
        waydesk-admin users limit NAME [show | reset | --memory SIZE] [--swap SIZE] [--cpu-weight N] [--tasks N]
-       waydesk-admin users set NAME [--desktop sway|cosmic|plasma|hyprland|default] [--gpu auto|off|renderDN|default]
+       waydesk-admin users set NAME [--desktop sway|cosmic|plasma|hyprland|default] [--gpu auto|balance|off|renderDN|default]
+       waydesk-admin gpu place UID   (run by the session unit for accounts whose GPU is balance)
        waydesk-admin config check NAME [--json]
        waydesk-admin gpu roles [show | reset | NODE=ROLE ...]    (ROLE: render, inference or both)
        waydesk-admin ai [show | endpoint HOST:PORT | endpoint off]
@@ -308,6 +325,9 @@ fn run_admin_script(name: &str, args: &[&str]) -> Result<()> {
         .args(args)
         .status()
         .with_context(|| format!("cannot run /usr/lib/waydesk/admin/{name}"))?;
+    let mut all = vec![name];
+    all.extend_from_slice(args);
+    audit_command(&all, status.success());
     std::process::exit(status.code().unwrap_or(1));
 }
 
@@ -540,8 +560,8 @@ fn users_remove(name: &str, rest: &[&str]) -> Result<()> {
     }
     userdel.push(&a.name);
     run_tool("/usr/sbin/userdel", &userdel)?;
-    // The account's settings belong to its user id, which a new account can get again: they go with it.
-    forget_account_files(a.uid, &[Path::new(configcheck::ACCOUNT_SETTINGS_DIR)]);
+    // The account's settings and its GPU placement belong to its user id, which a new account can get again: they go with it.
+    forget_account_files(a.uid, &[Path::new(configcheck::ACCOUNT_SETTINGS_DIR), Path::new(gpuplace::DIR)]);
     println!("removed {}{}", a.name, if rest.contains(&"--delete-home") { " and its home folder" } else { " (its home folder was kept)" });
     Ok(())
 }
@@ -884,11 +904,11 @@ fn system_line() -> String {
 fn video_cells(v: Option<&sessionstatus::Status>) -> (String, String) {
     let Some(v) = v else { return ("-".into(), "-".into()) };
     // The card's render node (`renderD129`), or `cpu`.
-    let render = v.render.as_deref().map(|r| gpuroles::short_name(r).to_owned()).unwrap_or_else(|| "cpu".to_owned());
+    let render = v.render.as_deref().map(|r| gpuplace::short_name(r).to_owned()).unwrap_or_else(|| "cpu".to_owned());
     let Some(enc) = &v.encoder else { return (render, "-".into()) };
     let mut cell = enc.clone();
     if let Some(n) = &v.encoder_node {
-        cell.push_str(&format!("@{}", gpuroles::short_name(n)));
+        cell.push_str(&format!("@{}", gpuplace::short_name(n)));
     }
     if sessionstatus::is_fresh(v) {
         if let Some(q) = v.qp {
@@ -932,8 +952,8 @@ fn status_once(json_out: bool, compact: bool) -> Result<()> {
     let usage = gather_usage(std::time::Duration::from_millis(1000))?;
     gpuinfo::finish(sampler, &mut gpus);
     let setting = gpu_setting();
-    let roles = gpuroles::effective_roles(server_setting("WAYDESK_GPU_ROLES").as_deref());
-    let role_of = |node: &str| roles.get(gpuroles::short_name(node)).copied();
+    let roles = gpuplace::effective_roles(server_setting("WAYDESK_GPU_ROLES").as_deref());
+    let role_of = |node: &str| roles.get(gpuplace::short_name(node)).copied();
     // A local inference service (WAYDESK_AI_ENDPOINT): the models it holds and the connections each account has open to it.
     let ai_endpoint = server_setting("WAYDESK_AI_ENDPOINT");
     let ai = ai_endpoint.as_deref().map(|ep| {
@@ -941,9 +961,9 @@ fn status_once(json_out: bool, compact: bool) -> Result<()> {
         (ep.to_owned(), aistatus::probe(ep), by_uid)
     });
     let ai_of = |uid: u32| -> Option<usize> { ai.as_ref().map(|(_, _, m)| m.get(&uid).copied().unwrap_or(0)) };
-    // Per card: the accounts whose session draws on it, and the warnings about where sessions draw and encode.
+    // Per card: the accounts whose session draws on it, and the sessions that draw in software although their setting asks for a GPU.
     let on_card = |node: &str| -> Vec<String> {
-        usage.iter().filter(|u| u.session && u.video.as_ref().and_then(|v| v.render.as_deref()).is_some_and(|r| gpuroles::short_name(r) == gpuroles::short_name(node))).map(|u| u.name.clone()).collect()
+        usage.iter().filter(|u| u.session && u.video.as_ref().and_then(|v| v.render.as_deref()).is_some_and(|r| gpuplace::short_name(r) == gpuplace::short_name(node))).map(|u| u.name.clone()).collect()
     };
     let warnings: Vec<String> = usage
         .iter()
@@ -952,8 +972,9 @@ fn status_once(json_out: bool, compact: bool) -> Result<()> {
             let v = u.video.as_ref().filter(|v| sessionstatus::is_fresh(v));
             let render = v.and_then(|v| v.render.as_deref());
             [
-                v.and_then(|v| gpuroles::encoder_card_warning(&u.name, v.render.as_deref(), v.encoder_node.as_deref())),
-                gpuroles::role_warning(&u.name, render, &roles),
+                v.and_then(|v| gpuplace::software_warning(&u.name, &gpu_of(u.uid).0, v.render.as_deref(), gpus.len())),
+                v.and_then(|v| gpuplace::encoder_card_warning(&u.name, v.render.as_deref(), v.encoder_node.as_deref())),
+                gpuplace::role_warning(&u.name, render, &roles),
             ]
         })
         .flatten()
@@ -982,7 +1003,7 @@ fn status_once(json_out: bool, compact: bool) -> Result<()> {
             "node": g.node, "vendor": g.vendor, "model": g.model, "driver": g.driver, "pci": g.pci,
             "busy_percent": g.util.busy.map(round), "encoder_percent": g.util.encoder.map(round),
             "mem_used_mb": g.util.mem_used_mb, "mem_total_mb": g.util.mem_total_mb, "mhz": g.util.mhz, "watts": g.util.watts.map(round),
-            "uuid": g.uuid, "role": role_of(&g.node).map(|r| r.word()), "reserved": role_of(&g.node) == Some(gpuroles::Role::Inference), "sessions": on_card(&g.node),
+            "uuid": g.uuid, "role": role_of(&g.node).map(|r| r.word()), "reserved": role_of(&g.node) == Some(gpuplace::Role::Inference), "sessions": on_card(&g.node),
         })).collect();
         let doc = json!({
             "machine": {
@@ -1025,12 +1046,12 @@ fn status_once(json_out: bool, compact: bool) -> Result<()> {
     } else {
         for (i, g) in gpus.iter().enumerate() {
             println!("{}{}", if i == 0 { "GPU       " } else { "          " }, gpuinfo::describe(g));
-            let note = gpuroles::card_note(role_of(&g.node), &on_card(&g.node), g.uuid.as_deref());
+            let note = gpuplace::card_note(role_of(&g.node), &on_card(&g.node), g.uuid.as_deref());
             println!("            {note}");
         }
         println!("          new sessions use: {setting}");
         let cards: Vec<_> = gpus.iter().map(|g| (g.node.clone(), role_of(&g.node), g.uuid.clone())).collect();
-        if let Some(line) = gpuroles::inference_line(&cards) {
+        if let Some(line) = gpuplace::inference_line(&cards) {
             println!("Inference {line}");
         }
     }
@@ -1113,12 +1134,12 @@ fn users_set(name: &str, opts: &[&str]) -> Result<()> {
     while let Some(flag) = it.next() {
         match *flag {
             "--desktop" => desktop_arg = Some(*it.next().context("--desktop needs sway, cosmic, plasma, hyprland or default")?),
-            "--gpu" => gpu_arg = Some(*it.next().context("--gpu needs auto, off, default or a render node such as renderD129")?),
+            "--gpu" => gpu_arg = Some(*it.next().context("--gpu needs auto, balance, off, default or a render node such as renderD129")?),
             other => bail!("unknown option {other}"),
         }
     }
     if desktop_arg.is_none() && gpu_arg.is_none() {
-        bail!("nothing to set: --desktop sway|hyprland|default and/or --gpu auto|off|renderDN|default");
+        bail!("nothing to set: --desktop sway|hyprland|default and/or --gpu auto|balance|off|renderDN|default");
     }
     let mut settings = account_settings(a.uid);
     if let Some(wanted) = desktop_arg {
@@ -1154,11 +1175,12 @@ fn users_set(name: &str, opts: &[&str]) -> Result<()> {
     let gpu_text = match gpu.as_str() {
         "off" => "no GPU (software rendering)".to_owned(),
         "auto" => "the first usable GPU".to_owned(),
+        "balance" => "the GPU that waydesk-admin gpu place picks when the session starts".to_owned(),
         node => node.to_owned(),
     };
     println!("{}: new sessions use {gpu_text} ({})", a.name, from(gsource));
-    if gpu.starts_with("/dev/dri/") && gpuroles::reserved_nodes(server_setting("WAYDESK_GPU_ROLES").as_deref()).iter().any(|n| n == gpuroles::short_name(&gpu)) {
-        eprintln!("note: {} is kept for inference (WAYDESK_GPU_ROLES); a session pinned there takes video memory a model may need", gpuroles::short_name(&gpu));
+    if gpu.starts_with("/dev/dri/") && gpuplace::reserved_nodes(server_setting("WAYDESK_GPU_ROLES").as_deref()).iter().any(|n| n == gpuplace::short_name(&gpu)) {
+        eprintln!("note: {} is kept for inference (WAYDESK_GPU_ROLES); a session pinned there takes video memory a model may need", gpuplace::short_name(&gpu));
     }
     if now == "hyprland" && (gpuinfo::list().is_empty() || gpu == "off") {
         eprintln!("note: Hyprland has no software renderer and needs a GPU (this server has none, or the account's GPU is off): the session will not start");
@@ -1169,6 +1191,67 @@ fn users_set(name: &str, opts: &[&str]) -> Result<()> {
         _ => {}
     }
     println!("check the account's own configuration with: waydesk-admin config check {}", a.name);
+    Ok(())
+}
+
+// ---- placing a session on a GPU ----
+
+/// `gpu place UID`: run as root by the session unit before the session starts. For an account whose GPU setting is `balance`, picks the card (docs/GPU-PLACEMENT-DESIGN.md)
+/// and writes `/run/waydesk/gpu/UID.env` for the unit to read; for any other account removes that file, so a pin or `off` is never overridden. Always ends well when it
+/// can: the worst case is a session made as it was before (the first node, or software).
+fn gpu_place(uid_text: &str) -> Result<()> {
+    require_root()?;
+    let uid: u32 = uid_text.parse().with_context(|| format!("{uid_text:?} is not a user id"))?;
+    let dir = Path::new(gpuplace::DIR);
+    let claim = dir.join(format!("{uid}.env"));
+    std::fs::create_dir_all(dir).with_context(|| format!("cannot create {}", dir.display()))?;
+    // One placement at a time: the next one counts this one's claim.
+    let lock = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(gpuplace::LOCK).with_context(|| format!("cannot open {}", gpuplace::LOCK))?;
+    {
+        use std::os::fd::AsRawFd as _;
+        ensure!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) } == 0, "cannot lock {}", gpuplace::LOCK);
+    }
+    let (setting, _) = gpu_of(uid);
+    if setting != "balance" {
+        match std::fs::remove_file(&claim) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => bail!("cannot remove {}: {e}", claim.display()),
+        }
+        return Ok(());
+    }
+    let name = audit::name_of(uid).unwrap_or_else(|| uid.to_string());
+    let mut gpus = gpuinfo::list();
+    let sampler = gpuinfo::begin(&gpus);
+    gpuinfo::finish(sampler, &mut gpus);
+    let candidates: Vec<gpuplace::Candidate> = gpus
+        .iter()
+        .map(|g| gpuplace::Candidate {
+            node: g.node.clone(),
+            // On the motherboard's root bus (0000:00:..) it is the processor's own; a card in a slot is discrete.
+            discrete: !g.pci.starts_with("0000:00:"),
+            busy: if g.vendor == "intel" { None } else { g.util.busy },
+            free_vram_mb: g.util.mem_total_mb.zip(g.util.mem_used_mb).map(|(t, u)| t.saturating_sub(u)),
+            usable: std::fs::OpenOptions::new().read(true).write(true).open(&g.node).is_ok(),
+        })
+        .collect();
+    let policy = gpuplace::Policy {
+        reserve: gpuplace::reserved_nodes(server_setting("WAYDESK_GPU_ROLES").as_deref()),
+        weights: server_setting("WAYDESK_GPU_WEIGHTS").map(|v| gpuplace::parse_weights(&v)).unwrap_or_default(),
+        min_free_vram_mb: server_setting("WAYDESK_GPU_MIN_FREE_VRAM_MB").and_then(|v| v.parse().ok()).unwrap_or(0),
+    };
+    let alive = |u: u32| {
+        // `activating` counts: a session that is starting has its claim and no status yet.
+        Command::new("systemctl").args(["show", "-p", "ActiveState", "--value", &format!("waydesk-session@{u}.service")]).output().is_ok_and(|o| matches!(String::from_utf8_lossy(&o.stdout).trim(), "active" | "activating" | "reloading"))
+    };
+    let sessions = gpuplace::read_claims(dir, alive, uid);
+    let decision = gpuplace::decide(&candidates, &sessions, &policy);
+    let tmp = dir.join(format!("{uid}.env.tmp"));
+    std::fs::write(&tmp, gpuplace::render_claim(decision.node.as_deref())).with_context(|| format!("cannot write {}", tmp.display()))?;
+    std::fs::rename(&tmp, &claim).with_context(|| format!("cannot write {}", claim.display()))?;
+    let chosen = decision.node.as_deref().unwrap_or("off (software)");
+    println!("waydesk gpu place: {name} -> {chosen}: {}", decision.reason);
+    audit_emit("gpu.place", true, Some(name), Some(format!("{chosen}: {}", decision.reason)));
     Ok(())
 }
 
@@ -1493,7 +1576,9 @@ mod tests {
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
         let gpu = Status { render: Some("/dev/dri/renderD129".into()), encoder: Some("nvenc".into()), encoder_node: Some("/dev/dri/renderD129".into()), compositor: None, qp: Some(25), fps: Some(17.4), kbps: Some(9000), stats_at: now };
         assert_eq!(video_cells(Some(&gpu)), ("renderD129".to_string(), "nvenc@renderD129 q25 17fps".to_string()));
-        let soft = Status { render: None, encoder: Some("openh264".into()), encoder_node: None, compositor: None, qp: None, fps: Some(9.0), kbps: None, stats_at: now };
+        let hybrid = Status { render: Some("/dev/dri/renderD128".into()), ..gpu.clone() };
+        assert_eq!(video_cells(Some(&hybrid)), ("renderD128".to_string(), "nvenc@renderD129 q25 17fps".to_string()), "drawn on one card, encoded on another");
+        let soft = Status { render: None, encoder: Some("openh264".into()), compositor: None, qp: None, fps: Some(9.0), kbps: None, stats_at: now, ..Default::default() };
         assert_eq!(video_cells(Some(&soft)), ("cpu".to_string(), "openh264 9fps".to_string()));
         let idle = Status { stats_at: now - 600, ..gpu };
         assert_eq!(video_cells(Some(&idle)).1, "nvenc@renderD129", "old statistics are not shown as current");
@@ -1624,5 +1709,192 @@ mod tests {
         assert_eq!(names(only_visible(all.clone(), 1001, true)), vec!["jose", "ana", "rui"]);
         assert_eq!(names(only_visible(all.clone(), 0, false)), vec!["jose", "ana", "rui"], "root");
         assert!(only_visible(all, 33, false).is_empty(), "a system account has no row");
+    }
+}
+
+// ---- the audit log ----
+
+/// Whether the command changes something, and the audit event for it: (event, target, detail). Reading commands have none.
+fn audited(args: &[&str]) -> Option<(&'static str, Option<String>, Option<String>)> {
+    let rest = |r: &[&str]| (!r.is_empty()).then(|| r.join(" "));
+    Some(match args {
+        ["users", "add", name, r @ ..] => ("admin.user.add", Some(name.to_string()), rest(r)),
+        ["users", "remove", name, r @ ..] => ("admin.user.remove", Some(name.to_string()), rest(r)),
+        // What the new password is never appears: it is not an argument, and nothing about it is written.
+        ["users", "passwd", name, ..] => ("admin.user.passwd", Some(name.to_string()), None),
+        ["users", "enable", name] => ("admin.user.enable", Some(name.to_string()), None),
+        ["users", "disable", name, r @ ..] => ("admin.user.disable", Some(name.to_string()), rest(r)),
+        ["users", "admin", name, onoff] => ("admin.group", Some(name.to_string()), Some(format!("{ADMIN_GROUP} {onoff}"))),
+        ["users", "sudo", name, onoff] => ("admin.group", Some(name.to_string()), Some(format!("{} {onoff}", sudo_group()))),
+        ["users", "limit", _, "show"] | ["users", "limit", _] => return None,
+        ["users", "set", name, r @ ..] => ("admin.user.set", Some(name.to_string()), rest(r)),
+        ["users", "limit", name, r @ ..] => ("admin.user.limit", Some(name.to_string()), rest(r)),
+        ["sessions", "end", name] => ("admin.session.end", Some(name.to_string()), None),
+        ["access", r @ ..] if !matches!(r, [] | ["show", ..]) => ("admin.access", None, rest(r)),
+        ["cert", r @ ..] if !matches!(r, [] | ["status", ..] | ["export-ca", ..]) => ("admin.cert", None, rest(r)),
+        ["vpn", r @ ..] if !matches!(r, [] | ["status", ..] | ["show", ..] | ["list", ..]) => ("admin.vpn", None, rest(r)),
+        _ => return None,
+    })
+}
+
+/// Writes the audit line of a command that changes something, whether it worked or not. The actor is the account that asked
+/// (`pkexec` from the panel or a terminal, `sudo`), or `root` when nobody did (a root shell, the package scripts).
+fn audit_command(args: &[&str], worked: bool) {
+    let Some((name, target, detail)) = audited(args) else { return };
+    audit_emit(name, worked, target, detail);
+}
+
+fn audit_emit(name: &'static str, worked: bool, target: Option<String>, detail: Option<String>) {
+    // Only root can write the log, and only root's commands reach this far; anyone else was refused before doing anything.
+    if unsafe { libc::geteuid() } != 0 {
+        return;
+    }
+    audit::init(Path::new(audit::DEFAULT_PATH), "admin", false, false);
+    let (via, uid) = match (std::env::var("PKEXEC_UID"), std::env::var("SUDO_UID")) {
+        (Ok(u), _) => ("pkexec", u.parse::<u32>().ok()),
+        (_, Ok(u)) => ("sudo", u.parse::<u32>().ok()),
+        _ => ("root", Some(0)),
+    };
+    let mut e = audit::event(name, if worked { audit::Outcome::Ok } else { audit::Outcome::Fail }).str("via", via);
+    if let Some(uid) = uid {
+        e = e.num("actor_uid", uid.into()).str("actor", &audit::name_of(uid).unwrap_or_default());
+    }
+    if let Some(t) = &target {
+        e = e.str("target", t);
+    }
+    if let Some(d) = &detail {
+        e = e.str("detail", d);
+    }
+    if !e.emit() {
+        eprintln!("waydesk-admin: warning: could not write the audit log ({})", audit::DEFAULT_PATH);
+    }
+}
+
+/// `waydesk-admin audit`: the audit log, current and rotated files, filtered.
+fn audit_show(rest: &[&str], json_out: bool) -> Result<()> {
+    let (mut since, mut user, mut event, mut outcome, mut limit) = (None::<String>, None::<String>, None::<String>, None::<String>, 200usize);
+    let mut it = rest.iter();
+    while let Some(opt) = it.next() {
+        let mut value = |what: &str| it.next().map(|v| v.to_string()).with_context(|| format!("{opt} needs {what}"));
+        match *opt {
+            "--since" => since = Some(value("a time such as 2h, 7d or 2026-10-29")?),
+            "--user" => user = Some(value("an account name")?),
+            "--event" => event = Some(value("an event name or its beginning, such as login or admin")?),
+            "--outcome" => outcome = Some(value("ok, fail or refused")?),
+            "--limit" => limit = value("a number")?.parse().context("--limit needs a number")?,
+            other => bail!("unknown option {other} for audit"),
+        }
+    }
+    let cutoff = since.as_deref().map(since_to_timestamp).transpose()?;
+    let lines = audit_lines(Path::new(audit::DEFAULT_PATH), cutoff.as_deref())?;
+    let mut shown: Vec<(&str, serde_json::Value)> = Vec::new();
+    for line in &lines {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+        let field = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("");
+        if cutoff.as_deref().is_some_and(|c| field("ts") < c)
+            || user.as_deref().is_some_and(|u| field("user") != u && field("target") != u && field("actor") != u)
+            || event.as_deref().is_some_and(|e| !field("event").starts_with(e))
+            || outcome.as_deref().is_some_and(|o| field("outcome") != o)
+        {
+            continue;
+        }
+        shown.push((line, v));
+    }
+    let skip = shown.len().saturating_sub(limit);
+    for (line, v) in &shown[skip..] {
+        if json_out {
+            println!("{line}");
+            continue;
+        }
+        let f = |k: &str| v.get(k).and_then(|x| x.as_str()).map(str::to_owned).or_else(|| v.get(k).filter(|x| x.is_number()).map(|x| x.to_string())).unwrap_or_default();
+        let who = [f("user"), f("actor")].into_iter().find(|s| !s.is_empty()).unwrap_or_else(|| if v.get("user_invalid").is_some() { format!("(not a name, {} characters)", f("user_len")) } else { "-".into() });
+        let mut detail: Vec<String> = ["reason", "target", "action", "detail", "scope"].iter().map(|k| f(k)).filter(|s| !s.is_empty()).collect();
+        if let Some(s) = v.get("seconds").and_then(|s| s.as_u64()) {
+            detail.push(format!("{s} s"));
+        }
+        let source = [f("source"), f("via")].into_iter().find(|s| !s.is_empty()).unwrap_or_else(|| "-".into());
+        println!("{:<24} {:<18} {:<8} {:<16} {:<15} {}", f("ts"), f("event"), f("outcome"), who, source, detail.join(" "));
+    }
+    if shown.is_empty() && !json_out {
+        eprintln!("no matching audit lines in {}", audit::DEFAULT_PATH);
+    }
+    Ok(())
+}
+
+/// `2h`, `30m`, `7d`, `1w` (ago) or the beginning of a time (`2026-10-29`, `2026-10-29T10:00`), as the text the log's times are compared with.
+fn since_to_timestamp(s: &str) -> Result<String> {
+    if let Some(unit) = s.chars().last().filter(|c| matches!(c, 'm' | 'h' | 'd' | 'w')) {
+        if let Ok(n) = s[..s.len() - 1].parse::<u64>() {
+            let secs = n.saturating_mul(match unit { 'm' => 60, 'h' => 3600, 'd' => 86400, _ => 604800 });
+            let t = std::time::SystemTime::now().checked_sub(std::time::Duration::from_secs(secs)).unwrap_or(std::time::UNIX_EPOCH);
+            return Ok(audit::rfc3339(t));
+        }
+    }
+    ensure!(s.len() >= 4 && s.chars().all(|c| c.is_ascii_digit() || matches!(c, '-' | ':' | 'T' | '.' | 'Z')), "--since: write 30m, 2h, 7d, 1w or a date such as 2026-10-29");
+    Ok(s.to_owned())
+}
+
+/// Every line of the log and of its rotated files, oldest first. A file whose last change is older than `cutoff` is not read.
+fn audit_lines(path: &Path, cutoff: Option<&str>) -> Result<Vec<String>> {
+    let dir = path.parent().context("audit log path")?;
+    let base = path.file_name().and_then(|n| n.to_str()).context("audit log path")?.to_owned();
+    let mut files: Vec<(u32, PathBuf)> = Vec::new();
+    for entry in std::fs::read_dir(dir).with_context(|| format!("reading {} (it needs root or membership of the group adm)", dir.display()))?.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some(tail) = name.strip_prefix(&base) else { continue };
+        // audit.log is the newest (0); audit.log.N and audit.log.N.gz are older the higher N is.
+        let index = match tail.trim_end_matches(".gz").strip_prefix('.') {
+            None if tail.is_empty() => 0,
+            Some(n) => match n.parse() { Ok(n) => n, Err(_) => continue },
+            None => continue,
+        };
+        files.push((index, entry.path()));
+    }
+    files.sort_by(|a, b| b.0.cmp(&a.0));
+    let mut lines = Vec::new();
+    for (_, file) in files {
+        let modified = std::fs::metadata(&file).and_then(|m| m.modified()).ok().map(audit::rfc3339);
+        if let (Some(c), Some(m)) = (cutoff, &modified) {
+            if m.as_str() < c {
+                continue;
+            }
+        }
+        let text = if file.extension().is_some_and(|e| e == "gz") {
+            run_tool("/usr/bin/zcat", &[&file.to_string_lossy()])?
+        } else {
+            std::fs::read_to_string(&file).with_context(|| format!("reading {}", file.display()))?
+        };
+        lines.extend(text.lines().map(str::to_owned));
+    }
+    Ok(lines)
+}
+
+#[cfg(test)]
+mod audit_tests {
+    use super::*;
+
+    #[test]
+    fn only_commands_that_change_something_are_audited() {
+        assert!(audited(&["users", "list"]).is_none());
+        assert!(audited(&["status"]).is_none());
+        assert!(audited(&["users", "limit", "ana", "show"]).is_none());
+        assert!(audited(&["access"]).is_none() && audited(&["access", "show"]).is_none());
+        assert!(audited(&["cert", "status"]).is_none() && audited(&["vpn", "list"]).is_none());
+        assert_eq!(audited(&["users", "add", "ana", "--admin"]).unwrap().0, "admin.user.add");
+        assert_eq!(audited(&["access", "lan", "--allow", "10.0.0.0/8"]).unwrap().0, "admin.access");
+        assert_eq!(audited(&["users", "sudo", "ana", "on"]).unwrap().2.as_deref(), Some("sudo on"));
+    }
+
+    #[test]
+    fn a_password_change_records_nothing_about_the_password() {
+        let (event, target, detail) = audited(&["users", "passwd", "ana", "--stdin"]).unwrap();
+        assert_eq!((event, target.as_deref(), detail), ("admin.user.passwd", Some("ana"), None));
+    }
+
+    #[test]
+    fn since_takes_a_duration_or_a_date() {
+        assert!(since_to_timestamp("2h").unwrap().ends_with('Z'));
+        assert_eq!(since_to_timestamp("2026-10-29").unwrap(), "2026-10-29");
+        assert!(since_to_timestamp("yesterday").is_err() && since_to_timestamp("").is_err());
     }
 }
