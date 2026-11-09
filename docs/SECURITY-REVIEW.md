@@ -204,10 +204,7 @@ login path, the helper and the units again. Nothing here changes the stated depl
 
 ## Open
 
-1. **`config check` runs the account's Hyprland check in the administrator's terminal.** `Hyprland --verify-config` reads the account's own Lua
-   configuration, through `runuser`, which keeps the administrator's controlling terminal. If checking the configuration runs its code, and the kernel
-   still allows TIOCSTI on a terminal (`dev.tty.legacy_tiocsti`), the account could type into the administrator's root shell. Neither condition was
-   confirmed. Starting it with `setsid --wait` (no controlling terminal) would close it.
+1. ~~`config check` runs the account's Hyprland check in the administrator's terminal~~: fixed 2026-11-09, see below.
 2. **GPU roles are placement, not isolation.** The udev rule gives `waydesk-users` every render node, the cards kept for inference included: any account
    can use the model's card (its video memory, its compute), and the local model answers every account on localhost without authentication (said on
    the GPU page). Leaving the inference cards out of the rule would make the role a boundary; what one process can see of another's GPU memory is the
@@ -219,3 +216,4 @@ login path, the helper and the units again. Nothing here changes the stated depl
 ## Added after the pass (2026-11-09)
 
 - **Connections that have not logged in yet are limited per source address** (10; loopback exempt, `src/preauth.rs`). Before, one address could hold all 64 slots for the 30 s login window and keep everyone else out. Two unit tests (one address cannot use every slot, others are unaffected; slots come back once, loopback is exempt); not tried with a live flood.
+- **`config check` runs everything of the account in a session of its own** (`setsid --wait` before `timeout` and `runuser`, `run_as_command` in `waydesk-admin`), so it has no controlling terminal and cannot type into the administrator's shell with TIOCSTI. Checked in a container with a pseudo-terminal: a plain child reaches `/dev/tty`, the same child under `setsid --wait` does not; a unit test fixes the order of the command line.

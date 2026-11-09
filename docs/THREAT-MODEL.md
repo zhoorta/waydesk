@@ -18,6 +18,5 @@ Who we assume is hostile, what each part can and cannot do, and what is known to
 - The helper trusts the daemon's claim of the client's source address, so a compromised daemon can poison the per-address counters (the per-account counter still holds).
 - Passwords are not wiped from memory; daemon and helper are one binary.
 - Many failed logins from many addresses are logged, not stopped. `pam_faillock` in the PAM stack of the service does it, with the trade-off that a stranger can then lock the owner out.
-- `waydesk-admin config check` runs an account's Hyprland check in the administrator's terminal (fifth pass, open item 1).
 - Chromium from Flathub runs with `--password-store=basic`: nothing in a Waydesk session unlocks a keyring, so saved passwords and cookies sit under a fixed key, protected by the home directory's permissions only.
 - No fuzzing of the RDP side, no independent review. Five internal passes are written down in [`docs/SECURITY-REVIEW.md`](https://github.com/zhoorta/waydesk/blob/main/docs/SECURITY-REVIEW.md); an outside review should start at `src/helper.rs`, `src/auth.rs`, `src/link.rs`, `src/proto.rs` and the unit files.

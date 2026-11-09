@@ -1255,15 +1255,25 @@ fn gpu_place(uid_text: &str) -> Result<()> {
     Ok(())
 }
 
+/// The command line that runs a program as the account: in a session of its own (`setsid --wait`) so that it has no controlling terminal (otherwise it
+/// shares the administrator's, and a program the account's configuration makes it run could type into the administrator's root shell with TIOCSTI),
+/// as the account through `runuser`, never as root, at most 20 s. `timeout` is inside the new session so that its process group, which it signals when
+/// the time is up, holds everything that runs.
+fn run_as_command(runuser: &str, a: &Account, home: &str, program: &str, args: &[&str]) -> Vec<String> {
+    let mut v: Vec<String> = ["/usr/bin/setsid", "--wait", "/usr/bin/timeout", "20", runuser, "-u", &a.name, "--", "/usr/bin/env"].into_iter().map(String::from).collect();
+    v.push(format!("HOME={home}"));
+    v.push(format!("XDG_RUNTIME_DIR=/run/user/{}", a.uid));
+    v.push(program.to_owned());
+    v.extend(args.iter().map(|x| (*x).to_owned()));
+    v
+}
+
 /// Runs a program as the account (never as root, so that nothing the account controls is read or run with more rights than its own), at most 20 s.
 fn run_as(a: &Account, home: &str, program: &str, args: &[&str]) -> Result<(bool, String)> {
     let runuser = ["/usr/sbin/runuser", "/usr/bin/runuser"].into_iter().find(|p| Path::new(p).exists()).context("runuser is not installed")?;
-    let out = Command::new("/usr/bin/timeout")
-        .args(["20", runuser, "-u", &a.name, "--", "/usr/bin/env"])
-        .arg(format!("HOME={home}"))
-        .arg(format!("XDG_RUNTIME_DIR=/run/user/{}", a.uid))
-        .arg(program)
-        .args(args)
+    let cmd = run_as_command(runuser, a, home, program, args);
+    let out = Command::new(&cmd[0])
+        .args(&cmd[1..])
         .stdin(Stdio::null())
         .output()
         .context("cannot run runuser")?;
@@ -1540,6 +1550,16 @@ fn users_limit(name: &str, rest: &[&str]) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_program_run_as_an_account_has_no_controlling_terminal_and_a_time_limit_that_reaches_it() {
+        let a = Account { name: "ana".into(), uid: 1001, gid: 1001, shell: "/bin/bash".into() };
+        let c = run_as_command("/usr/sbin/runuser", &a, "/home/ana", "Hyprland", &["--verify-config"]);
+        assert_eq!(&c[..3], ["/usr/bin/setsid", "--wait", "/usr/bin/timeout"], "a session of its own, with timeout inside it so that its group holds everything");
+        let at = |x: &str| c.iter().position(|y| y == x).unwrap();
+        assert!(at("/usr/bin/timeout") < at("/usr/sbin/runuser") && at("/usr/sbin/runuser") < at("Hyprland"));
+        assert_eq!(&c[c.len() - 2..], ["Hyprland", "--verify-config"]);
+    }
+
     use super::*;
 
     #[test]
