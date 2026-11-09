@@ -46,6 +46,7 @@ mod spawn;
 mod tcpinfo;
 #[cfg(feature = "vaapi")]
 mod vpp;
+mod webstream;
 mod worker;
 
 use std::num::{NonZeroU16, NonZeroUsize};
@@ -853,6 +854,10 @@ async fn gateway_loop(listener: tokio::net::TcpListener, common: Arc<Common>, pe
         tokio::task::spawn_local(async move {
             let mut stream = stream;
             match read_gateway_line(&mut stream, &key).await {
+                Ok(a) if a.stream => match common.helper_socket.clone() {
+                    Some(helper) => webstream::serve(stream, a.ip, a.account, helper).await,
+                    None => warn!(%peer, "browser stream refused: it needs the root helper (--auth helper)"),
+                },
                 Ok(a) => serve(stream, std::net::SocketAddr::new(a.ip, 0), common, None, Some(a.account)).await,
                 Err(why) => warn!(%peer, "connection on the gateway port refused: {why}"),
             }

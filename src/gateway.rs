@@ -8,6 +8,9 @@
 //! that account and no other, and records the client's address instead of the gateway's. The key is a secret that only the gateway and the daemon
 //! (both run as the `waydesk` account) can read; a connection without it is refused. The port listens on this machine only.
 //!
+//! A browser stream (src/webstream.rs) starts with the same line and the tag `WAYDESK-STREAM` instead: the connection is then the daemon's own
+//! message protocol for browsers and not RDP.
+//!
 //! This file has no dependencies, so the daemon and the gateway use the same code for writing and reading the line.
 
 use std::net::IpAddr;
@@ -19,6 +22,8 @@ pub const MAX_LINE: usize = 512;
 pub struct Assertion {
     pub account: String,
     pub ip: IpAddr,
+    /// The tag was `WAYDESK-STREAM`: a browser stream, not RDP.
+    pub stream: bool,
 }
 
 /// An account name the line can carry: what Linux accounts are made of in practice, and not a path or an option.
@@ -29,6 +34,11 @@ pub fn valid_account(name: &str) -> bool {
 /// The line for `account` and `ip`, with the newline.
 pub fn line(key: &str, account: &str, ip: IpAddr) -> String {
     format!("WAYDESK-GATEWAY 1 {key} {account} {ip}\n")
+}
+
+/// The line for a browser stream of `account` from `ip`, with the newline.
+pub fn stream_line(key: &str, account: &str, ip: IpAddr) -> String {
+    format!("WAYDESK-STREAM 1 {key} {account} {ip}\n")
 }
 
 /// Compares in time that does not depend on where the texts differ.
@@ -46,7 +56,7 @@ pub fn parse(text: &str, key: &str) -> Result<Assertion, &'static str> {
     let text = text.strip_suffix('\n').ok_or("no end of line")?;
     let fields: Vec<&str> = text.split(' ').collect();
     let [tag, version, given, account, ip] = fields.as_slice() else { return Err("not five fields") };
-    if *tag != "WAYDESK-GATEWAY" || *version != "1" {
+    if !matches!(*tag, "WAYDESK-GATEWAY" | "WAYDESK-STREAM") || *version != "1" {
         return Err("not a gateway line of version 1");
     }
     if !same(given, key) {
@@ -56,7 +66,7 @@ pub fn parse(text: &str, key: &str) -> Result<Assertion, &'static str> {
         return Err("not a usable account name");
     }
     let ip = ip.parse::<IpAddr>().map_err(|_| "not an address")?;
-    Ok(Assertion { account: (*account).to_owned(), ip })
+    Ok(Assertion { account: (*account).to_owned(), ip, stream: *tag == "WAYDESK-STREAM" })
 }
 
 #[cfg(test)]
@@ -70,7 +80,8 @@ mod tests {
         for ip in ["203.0.113.9", "2001:db8::7", "127.0.0.1"] {
             let ip: IpAddr = ip.parse().unwrap();
             let written = line(KEY, "ana.lima", ip);
-            assert_eq!(parse(&written, KEY), Ok(Assertion { account: "ana.lima".into(), ip }));
+            assert_eq!(parse(&written, KEY), Ok(Assertion { account: "ana.lima".into(), ip, stream: false }));
+            assert_eq!(parse(&stream_line(KEY, "ana.lima", ip), KEY), Ok(Assertion { account: "ana.lima".into(), ip, stream: true }));
         }
     }
 
@@ -88,6 +99,7 @@ mod tests {
             format!("WAYDESK-GATEWAY 1 {KEY} ana 203.0.113.9 extra\n"),
             format!("WAYDESK-GATEWAY 1 {KEY}  ana 203.0.113.9\n"),
             format!("GET / HTTP/1.1 {KEY} ana 203.0.113.9\n"),
+            format!("WAYDESK-STREAMS 1 {KEY} ana 203.0.113.9\n"),
             format!("WAYDESK-GATEWAY 1 {KEY} ana not-an-address\n"),
             format!("WAYDESK-GATEWAY 1 {KEY} ../root 203.0.113.9\n"),
             format!("WAYDESK-GATEWAY 1 {KEY} -oProxyCommand 203.0.113.9\n"),
