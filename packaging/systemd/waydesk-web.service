@@ -1,0 +1,37 @@
+[Unit]
+Description=waydesk web gateway (the browser client and its bridge to the RDP daemon)
+Documentation=file:///usr/share/doc/waydesk/web/README.md
+After=network.target waydesk.service
+Wants=waydesk.service
+
+[Service]
+Type=simple
+User=waydesk
+Group=waydesk
+EnvironmentFile=-/etc/default/waydesk
+# Safe as shipped: this machine only (an SSH tunnel reaches it). WAYDESK_WEB_BIND and WAYDESK_WEB_ALLOW_FROM change that.
+ExecStart=/usr/bin/waydesk-web --bind ${WAYDESK_WEB_BIND} --cert /etc/waydesk/cert.pem --key /etc/waydesk/key.pem --target ${WAYDESK_BIND} --root /usr/share/waydesk/web $WAYDESK_WEB_ARGS
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallFilter=@system-service
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

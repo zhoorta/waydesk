@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Waydesk</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main id="login">
+    <form id="form" method="post" action="#">
+      <h1>Waydesk</h1>
+      <label>Account <input id="user" name="username" autocomplete="username" autocapitalize="none" spellcheck="false" required autofocus></label>
+      <label>Password <input id="pass" name="password" type="password" autocomplete="current-password" required></label>
+      <label>Code from your authenticator app <input id="code" name="code" inputmode="numeric" autocomplete="one-time-code" spellcheck="false" placeholder="if you have set one up"></label>
+      <button type="submit" id="go" disabled>Loading…</button>
+      <p id="msg" role="status"></p>
+    </form>
+  </main>
+  <div id="session" hidden>
+    <div id="bar">
+      <button type="button" id="fs">Fullscreen</button>
+      <button type="button" id="cad">Ctrl+Alt+Del</button>
+      <button type="button" id="end">Disconnect</button>
+    </div>
+    <div id="screen"></div>
+  </div>
+  <script type="module" src="app.js"></script>
+</body>
+</html>

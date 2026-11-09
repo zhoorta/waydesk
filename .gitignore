@@ -1,3 +1,4 @@
 packaging/out/
 target/
 packaging/out-unused/
+.DS_Store
