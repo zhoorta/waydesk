@@ -125,7 +125,10 @@ export class Desk {
         this.codec = codec;
         this.decoder = new VideoDecoder({
           output: (f) => {
-            this.ctx.drawImage(f, 0, 0, this.canvas.width, this.canvas.height);
+            if (!this.stats.last) this.stats.last = `display ${f.displayWidth}x${f.displayHeight} coded ${f.codedWidth}x${f.codedHeight} visible ${f.visibleRect ? f.visibleRect.width + 'x' + f.visibleRect.height : '?'}`;
+            // The encoder codes whole blocks of 16 pixels (1296x640 for a 1280x614 desktop) and does not say where the picture ends, so only the
+            // desktop's own pixels are copied: scaling the whole frame would squeeze the padding in as a black band.
+            this.ctx.drawImage(f, 0, 0, this.canvas.width, this.canvas.height, 0, 0, this.canvas.width, this.canvas.height);
             f.close();
             this.stats.frames += 1;
             this.send([7, 1, 0]); // shown: the daemon may send one more

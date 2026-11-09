@@ -201,6 +201,7 @@ function openStream(pass) {
     ended: (message, isError) => end(message, isError),
   });
   current = { el: canvas, desk };
+  if (params.get('debug') === '1') globalThis.__desk = desk; // for looking at the decoder's numbers in the console
   heldPassword = '';
   $('pass2').value = '';
   desk.connect({ width: size.width, height: size.height, scale: size.scale, password: pass });
