@@ -1,0 +1,37 @@
+[package]
+name = "waydesk-web"
+version = "0.5.0"
+edition = "2021"
+description = "Browser access to Waydesk: serves the web client and bridges it (RDCleanPath over WebSocket) to the RDP daemon"
+license = "AGPL-3.0-or-later"
+
+# Its own crate, not part of the daemon's package: the gateway has no use for Wayland, VA-API or NVENC, and the daemon has no use for a web stack.
+[workspace]
+
+[dependencies]
+anyhow = "1.0.104"
+axum = { version = "0.8.9", features = ["ws"] }
+data-encoding = "2.11.1"
+futures-util = "0.3.34"
+getrandom = "0.4.3"
+hmac = "0.13.0"
+hyper = "1.12.0"
+hyper-util = { version = "0.1.21", features = ["tokio", "server", "http1"] }
+ironrdp-rdcleanpath = "0.3.1"
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+sha1 = "0.11.0"
+sha2 = "0.11.1"
+socket2 = { version = "0.6.5", features = ["all"] }
+subtle = "2.6.1"
+tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread", "net", "time", "io-util", "sync", "signal", "fs"] }
+tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring", "tls12"] }
+tower = { version = "0.5.3", features = ["util"] }
+tower-service = "0.3.3"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+
+[dev-dependencies]
+rcgen = "0.14.10"
+tokio-tungstenite = "0.30.0"

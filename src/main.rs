@@ -24,6 +24,7 @@ mod encode_va;
 mod encode_nv;
 mod encoder;
 mod fdpass;
+mod gateway;
 mod gpu;
 mod gpuplace;
 mod gpuroles;
@@ -516,6 +517,10 @@ async fn main() -> anyhow::Result<()> {
     let mut files_mode = std::env::var("WAYDESK_CLIPBOARD_FILES").unwrap_or_default();
     let mut audio = true;
     let mut max_sessions = 64usize;
+    // A second port, on this machine only, for the web gateway (`waydesk-web`): its connections start with a line that names the account the
+    // gateway checked a code for and the client's real address (see gateway.rs). The key is the secret that line has to carry.
+    let mut gateway_bind: Option<String> = None;
+    let mut gateway_key: Option<String> = None;
     // Internal: run as the session process of one connection (started by the daemon, with a socket as fd 3).
     let mut worker = false;
     let mut own_sway = false;
@@ -589,6 +594,13 @@ async fn main() -> anyhow::Result<()> {
             "--no-clipboard" => clipboard = false,
             "--clipboard-files" => files_mode = args.next().context("--clipboard-files needs off, in, out or both")?,
             "--no-audio" => audio = false,
+            "--gateway-bind" => gateway_bind = Some(args.next().context("--gateway-bind needs an address (loopback), for example 127.0.0.1:3390")?),
+            "--gateway-key" => {
+                let path = args.next().context("--gateway-key needs a file")?;
+                let key = std::fs::read_to_string(&path).with_context(|| format!("cannot read the gateway key {path}"))?.trim().to_owned();
+                anyhow::ensure!(key.len() >= 16 && !key.contains(char::is_whitespace), "{path}: the key must be one word of at least 16 characters");
+                gateway_key = Some(key);
+            }
             "--max-sessions" => max_sessions = args.next().context("--max-sessions needs a number")?.parse()?,
             "--bitrate" => bitrate = args.next().context("--bitrate needs a value")?.parse()?,
             "--quality" => max_qp = args.next().context("--quality needs a value (max QP, lower = better)")?.parse()?,
@@ -630,6 +642,8 @@ async fn main() -> anyhow::Result<()> {
     let via_helper = auth_mode == "helper";
     anyhow::ensure!(!via_helper || unsafe { libc::geteuid() } != 0, "--auth helper: the network daemon refuses to run as root (start waydesk-server --helper as root and this as an ordinary service account)");
     let pam = auth_mode == "pam";
+    anyhow::ensure!(gateway_bind.is_some() == gateway_key.is_some(), "--gateway-bind and --gateway-key go together");
+    anyhow::ensure!(gateway_bind.is_none() || pam || via_helper, "--gateway-bind needs --auth pam or helper: the account the gateway names has to be checked against a login");
     let tls_only = tls_only || pam || via_helper;
     let (username, password) = if pam || via_helper {
         (String::new(), String::new())
@@ -689,6 +703,13 @@ async fn main() -> anyhow::Result<()> {
 
     // One RDP server per connection, all on this thread: connections are independent and each owns a session.
     let local = tokio::task::LocalSet::new();
+    if let (Some(bind), Some(key)) = (&gateway_bind, gateway_key) {
+        let gaddr = bind.parse::<std::net::SocketAddr>().context("bad --gateway-bind address")?;
+        anyhow::ensure!(gaddr.ip().is_loopback(), "--gateway-bind must be a loopback address: the key crosses it in the clear");
+        let gl = tokio::net::TcpListener::bind(gaddr).await.with_context(|| format!("cannot listen on {gaddr}"))?;
+        info!(bind = %gaddr, "waydesk-server listening for the web gateway");
+        local.spawn_local(gateway_loop(gl, common.clone(), permits.clone(), Arc::new(key)));
+    }
     local
         .run_until(async move {
             loop {
@@ -722,7 +743,7 @@ async fn main() -> anyhow::Result<()> {
                 limit_stall(&stream, peer);
                 let common = common.clone();
                 tokio::task::spawn_local(async move {
-                    serve(stream, peer, common, slot).await;
+                    serve(stream, peer, common, Some(slot), None).await;
                     drop(permit);
                 });
             }
@@ -810,8 +831,77 @@ impl Drop for AudioLease {
     }
 }
 
-/// Runs one client from accept to disconnect, then removes its session.
-async fn serve(stream: tokio::net::TcpStream, peer: std::net::SocketAddr, common: Arc<Common>, mut pre_slot: preauth::PreAuthSlot) {
+/// The web gateway's port: each connection starts with the line of gateway.rs, which names the account (the only one this connection may log in
+/// as) and the client's address (which stands for the peer from then on, in the logs and in the login check's `source`).
+async fn gateway_loop(listener: tokio::net::TcpListener, common: Arc<Common>, permits: Arc<tokio::sync::Semaphore>, key: Arc<String>) {
+    loop {
+        let (stream, peer) = match listener.accept().await {
+            Ok(v) => v,
+            Err(e) => {
+                warn!("accept failed (gateway port): {e}");
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                continue;
+            }
+        };
+        // The same permits as the main port: the gateway cannot use more of the machine than a direct client could.
+        let Ok(permit) = permits.clone().try_acquire_owned() else {
+            warn!(%peer, "too many connections, refused (gateway port)");
+            continue;
+        };
+        limit_stall(&stream, peer);
+        let (common, key) = (common.clone(), key.clone());
+        tokio::task::spawn_local(async move {
+            let mut stream = stream;
+            match read_gateway_line(&mut stream, &key).await {
+                Ok(a) => serve(stream, std::net::SocketAddr::new(a.ip, 0), common, None, Some(a.account)).await,
+                Err(why) => warn!(%peer, "connection on the gateway port refused: {why}"),
+            }
+            drop(permit);
+        });
+    }
+}
+
+/// Reads the gateway's first line, one byte at a time so that nothing after it is taken from the connection.
+async fn read_gateway_line(stream: &mut tokio::net::TcpStream, key: &str) -> Result<gateway::Assertion, String> {
+    use tokio::io::AsyncReadExt as _;
+    let mut line = Vec::new();
+    let read = async {
+        let mut b = [0u8; 1];
+        while line.len() < gateway::MAX_LINE {
+            stream.read_exact(&mut b).await?;
+            line.push(b[0]);
+            if b[0] == b'\n' {
+                break;
+            }
+        }
+        Ok::<(), std::io::Error>(())
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(5), read).await.map_err(|_| "no line within 5 s".to_string())?.map_err(|e| e.to_string())?;
+    let text = String::from_utf8(line).map_err(|_| "not text".to_string())?;
+    gateway::parse(&text, key).map_err(str::to_string)
+}
+
+/// Lets a connection from the gateway log in as the account the gateway named, and no other.
+struct BoundValidator {
+    inner: Arc<dyn ironrdp_server::CredentialValidator>,
+    account: String,
+}
+
+#[async_trait::async_trait]
+impl ironrdp_server::CredentialValidator for BoundValidator {
+    async fn validate(&self, credentials: &Credentials) -> Result<ironrdp_server::CredentialDecision, ironrdp_server::CredentialValidationError> {
+        if credentials.username != self.account {
+            warn!(named = %self.account, "login refused: the gateway named another account than the one logging in");
+            return Ok(ironrdp_server::CredentialDecision::Reject);
+        }
+        self.inner.validate(credentials).await
+    }
+}
+
+/// Runs one client from accept to disconnect, then removes its session. `bound_account`: the connection comes from the web gateway, which named
+/// this account (see gateway.rs); the login must be for it. `pre_slot`: the pre-login slot of a direct connection (the gateway is trusted
+/// and limits its own clients, so its connections have none).
+async fn serve(stream: tokio::net::TcpStream, peer: std::net::SocketAddr, common: Arc<Common>, mut pre_slot: Option<preauth::PreAuthSlot>, bound_account: Option<String>) {
     let started = std::time::Instant::now();
     let login = Arc::new(Mutex::new(None));
     let helper = match &common.helper_socket {
@@ -846,6 +936,15 @@ async fn serve(stream: tokio::net::TcpStream, peer: std::net::SocketAddr, common
         info!(%peer, "another session has the sound; this one is silent");
     }
 
+    let validator: Option<Arc<dyn ironrdp_server::CredentialValidator>> = match (&common.pam, &helper) {
+        (Some(p), _) => Some(Arc::new(auth::PamValidator::new(p.clone(), login.clone(), peer.ip().to_string()))),
+        (None, Some(h)) => Some(Arc::new(helperclient::HelperValidator::new(h.clone(), peer.ip().to_string(), authed.clone()))),
+        (None, None) => None,
+    };
+    let validator = match (validator, bound_account) {
+        (Some(inner), Some(account)) => Some(Arc::new(BoundValidator { inner, account }) as Arc<dyn ironrdp_server::CredentialValidator>),
+        (v, _) => v,
+    };
     let builder = RdpServer::builder().with_addr(peer);
     let builder = if common.tls_only {
         builder.with_tls(common.acceptor.clone())
@@ -866,11 +965,7 @@ async fn serve(stream: tokio::net::TcpStream, peer: std::net::SocketAddr, common
         })
         .with_honor_client_desktop_size(true)
         .with_replace_on_new_connection(false)
-        .with_credential_validator(match (&common.pam, &helper) {
-            (Some(p), _) => Some(Arc::new(auth::PamValidator::new(p.clone(), login.clone(), peer.ip().to_string())) as Arc<dyn ironrdp_server::CredentialValidator>),
-            (None, Some(h)) => Some(Arc::new(helperclient::HelperValidator::new(h.clone(), peer.ip().to_string(), authed.clone())) as Arc<dyn ironrdp_server::CredentialValidator>),
-            (None, None) => None,
-        })
+        .with_credential_validator(validator)
         .build();
     if common.pam.is_none() && helper.is_none() {
         let (username, password) = common.credentials.clone();
@@ -890,7 +985,9 @@ async fn serve(stream: tokio::net::TcpStream, peer: std::net::SocketAddr, common
             while !logged_in() && tokio::time::Instant::now() < deadline {
                 tokio::time::sleep(std::time::Duration::from_millis(250)).await;
             }
-            pre_slot.release();
+            if let Some(slot) = pre_slot.as_mut() {
+                slot.release();
+            }
             if needs_login && !logged_in() {
                 return;
             }
