@@ -8,6 +8,7 @@ mod bridge;
 mod e2e;
 mod limits;
 mod portal;
+mod stream;
 mod tlsconf;
 mod totp;
 mod web;

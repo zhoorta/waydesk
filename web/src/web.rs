@@ -137,6 +137,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/api/logout", post(logout))
         .route("/api/session", post(session_token).layer(axum::extract::DefaultBodyLimit::max(4096)))
         .route("/ws", get(ws_handler))
+        .route("/stream", get(stream_handler))
         .fallback(get(static_file))
         .layer(middleware::map_response(security_headers))
         .with_state(app)
@@ -347,6 +348,29 @@ async fn ws_handler(State(app): State<Arc<App>>, Extension(ClientAddr(peer)): Ex
     info!(%ip, active = app.sessions.active(), "session requested");
     // The first message is the RDCleanPath request, which a few hundred bytes hold; later ones are RDP packets, which the client keeps small.
     ws.max_message_size(1 << 20).max_frame_size(1 << 20).on_upgrade(move |socket| crate::bridge::run(socket, ip, app, guard))
+}
+
+/// The browser stream: a signed-in browser's WebSocket, bridged to the daemon (see `stream.rs`). The account is the cookie's. A WebSocket carries
+/// no CSRF header, so what keeps another page from opening one in a visitor's name is the `Origin` check and the cookie's `SameSite=Strict`.
+async fn stream_handler(State(app): State<Arc<App>>, Extension(ClientAddr(peer)): Extension<ClientAddr>, Extension(PublicHost(host)): Extension<PublicHost>, headers: HeaderMap, ws: WebSocketUpgrade) -> Response {
+    if !origin_ok(&headers, &host, app.cfg.public_origin.as_deref()) {
+        return text(StatusCode::FORBIDDEN, "wrong origin\n");
+    }
+    let Some((_, signed)) = signed_in(&app, &headers) else { return text(StatusCode::UNAUTHORIZED, "not signed in\n") };
+    if app.cfg.gateway_key.is_none() {
+        return text(StatusCode::SERVICE_UNAVAILABLE, "the browser stream needs --gateway-key\n");
+    }
+    let ip: IpAddr = peer.ip();
+    if !app.ws_rate.hit(ip, Instant::now()) {
+        return text(StatusCode::TOO_MANY_REQUESTS, "too many attempts, wait a minute\n");
+    }
+    let guard = match app.sessions.start(ip) {
+        Ok(g) => g,
+        Err(Refusal::PerAddress) => return text(StatusCode::TOO_MANY_REQUESTS, "too many sessions from this address\n"),
+        Err(Refusal::Total) => return text(StatusCode::SERVICE_UNAVAILABLE, "the server is full\n"),
+    };
+    info!(%ip, account = signed.account, active = app.sessions.active(), "stream requested");
+    ws.max_message_size(crate::stream::MAX_FROM_BROWSER).max_frame_size(crate::stream::MAX_FROM_BROWSER).on_upgrade(move |socket| crate::stream::run(socket, ip, signed.account, app, guard))
 }
 
 /// `root` joined with a path from a URL, only if it stays inside `root` and names no hidden file.

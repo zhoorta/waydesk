@@ -123,7 +123,28 @@ async fn start(name: &str, opts: Opts) -> Env {
                     while s.read_exact(&mut b).await.is_ok() && b[0] != b'\n' {
                         line.push(b[0]);
                     }
-                    seen.lock().unwrap().push(String::from_utf8_lossy(&line).into_owned());
+                    let line = String::from_utf8_lossy(&line).into_owned();
+                    let stream = line.starts_with("WAYDESK-STREAM");
+                    seen.lock().unwrap().push(line);
+                    if stream {
+                        // The browser stream: framed messages (u32 length, body); each is answered with its bytes reversed, and a body of one 0xff ends it.
+                        loop {
+                            let mut len = [0u8; 4];
+                            if s.read_exact(&mut len).await.is_err() {
+                                return;
+                            }
+                            let mut body = vec![0u8; u32::from_le_bytes(len) as usize];
+                            if s.read_exact(&mut body).await.is_err() || body == [0xff] {
+                                return;
+                            }
+                            body.reverse();
+                            let mut out = (body.len() as u32).to_le_bytes().to_vec();
+                            out.extend_from_slice(&body);
+                            if s.write_all(&out).await.is_err() {
+                                return;
+                            }
+                        }
+                    }
                 }
                 if read_tpkt(&mut s).await.is_err() || s.write_all(&X224_CONFIRM).await.is_err() {
                     return;
@@ -654,4 +675,69 @@ async fn without_a_helper_nobody_signs_in() {
     assert_eq!(status, 503);
     assert!(browser.is_none());
     std::mem::forget(down); // the directory belongs to `env`
+}
+
+/// A WebSocket to the stream route, with the browser's cookie.
+async fn stream_ws(env: &Env, cookie: Option<&str>, origin: Option<&str>) -> Result<Ws, tokio_tungstenite::tungstenite::Error> {
+    let mut req = format!("wss://{}/stream", env.host()).into_client_request().unwrap();
+    if let Some(c) = cookie {
+        req.headers_mut().insert("Cookie", c.parse().unwrap());
+    }
+    if let Some(o) = origin {
+        req.headers_mut().insert("Origin", o.parse().unwrap());
+    }
+    tokio_tungstenite::client_async(req, env.tls().await).await.map(|(s, _)| s)
+}
+
+#[tokio::test]
+async fn a_signed_in_browser_streams_through_to_the_daemon_as_its_account() {
+    let env = start("stream", Opts { gateway_key: Some("a-long-enough-gateway-key"), ..Opts::default() }).await;
+    let b = env.browser("ana").await;
+    let origin = env.origin();
+    let mut ws = stream_ws(&env, Some(&b.cookie), Some(&origin)).await.unwrap();
+    ws.send(Message::Binary(vec![1, 2, 3].into())).await.unwrap();
+    loop {
+        match ws.next().await.unwrap().unwrap() {
+            Message::Binary(got) => {
+                assert_eq!(got.as_ref(), [3, 2, 1], "a message goes to the daemon and the answer comes back whole");
+                break;
+            }
+            Message::Ping(_) | Message::Pong(_) => {}
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+    // The daemon is told the account of the cookie and the client's address, with the key.
+    assert_eq!(env.preambles.lock().unwrap().as_slice(), ["WAYDESK-STREAM 1 a-long-enough-gateway-key ana 127.0.0.1"]);
+}
+
+#[tokio::test]
+async fn the_stream_needs_a_cookie_this_origin_a_key_and_small_messages() {
+    let env = start("stream-refusals", Opts { gateway_key: Some("a-long-enough-gateway-key"), ..Opts::default() }).await;
+    let b = env.browser("ana").await;
+    let origin = env.origin();
+    assert!(stream_ws(&env, None, Some(&origin)).await.is_err(), "no cookie");
+    let forged = format!("{}={}", crate::portal::COOKIE, "0".repeat(64));
+    assert!(stream_ws(&env, Some(&forged), Some(&origin)).await.is_err(), "a cookie nobody was given");
+    assert!(stream_ws(&env, Some(&b.cookie), Some("https://evil.example")).await.is_err(), "another page");
+    assert!(stream_ws(&env, Some(&b.cookie), None).await.is_err(), "no Origin");
+    assert_eq!(env.daemon_connections.load(Ordering::SeqCst), 0, "nothing of that reached the daemon");
+
+    // A message bigger than any browser message is not passed on: the stream ends.
+    let mut ws = stream_ws(&env, Some(&b.cookie), Some(&origin)).await.unwrap();
+    ws.send(Message::Binary(vec![7u8; crate::stream::MAX_FROM_BROWSER + 1].into())).await.unwrap();
+    let ended = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            match ws.next().await {
+                None | Some(Err(_)) | Some(Ok(Message::Close(_))) => return,
+                _ => {}
+            }
+        }
+    })
+    .await;
+    assert!(ended.is_ok(), "the stream ended");
+
+    // Without the key the daemon cannot be told who this is: no stream at all.
+    let env = start("stream-nokey", Opts::default()).await;
+    let b = env.browser("ana").await;
+    assert!(stream_ws(&env, Some(&b.cookie), Some(&env.origin())).await.is_err());
 }
