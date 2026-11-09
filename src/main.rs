@@ -30,6 +30,7 @@ mod helperclient;
 mod input;
 mod link;
 mod memory;
+mod preauth;
 mod proto;
 #[cfg(any(feature = "vaapi", feature = "nvenc"))]
 mod qp;
@@ -673,6 +674,8 @@ async fn main() -> anyhow::Result<()> {
     }
     let refusals = Arc::new(allow::RefusalLog::new());
     let permits = Arc::new(tokio::sync::Semaphore::new(max_sessions));
+    let preauth = preauth::PreAuthLimiter::new();
+    let refused_pre = Arc::new(allow::RefusalLog::new());
     info!(%bind, max_sessions, allowed = %allow_from.as_deref().unwrap_or(if addr.ip().is_loopback() { "any (loopback)" } else { "private" }), "waydesk-server listening");
 
     // One RDP server per connection, all on this thread: connections are independent and each owns a session.
@@ -700,10 +703,17 @@ async fn main() -> anyhow::Result<()> {
                     warn!(%peer, "too many connections, refused");
                     continue;
                 };
+                // One address cannot hold every permit with connections that never log in.
+                let Some(slot) = preauth.enter(peer.ip(), preauth::MAX_PRE_LOGIN_PER_SOURCE) else {
+                    if let Some(more) = refused_pre.note() {
+                        warn!(%peer, also_refused = more, "connection refused: {} connections from this address are waiting to log in", preauth::MAX_PRE_LOGIN_PER_SOURCE);
+                    }
+                    continue;
+                };
                 limit_stall(&stream, peer);
                 let common = common.clone();
                 tokio::task::spawn_local(async move {
-                    serve(stream, peer, common).await;
+                    serve(stream, peer, common, slot).await;
                     drop(permit);
                 });
             }
@@ -792,7 +802,7 @@ impl Drop for AudioLease {
 }
 
 /// Runs one client from accept to disconnect, then removes its session.
-async fn serve(stream: tokio::net::TcpStream, peer: std::net::SocketAddr, common: Arc<Common>) {
+async fn serve(stream: tokio::net::TcpStream, peer: std::net::SocketAddr, common: Arc<Common>, mut pre_slot: preauth::PreAuthSlot) {
     let started = std::time::Instant::now();
     let login = Arc::new(Mutex::new(None));
     let helper = match &common.helper_socket {
@@ -863,9 +873,16 @@ async fn serve(stream: tokio::net::TcpStream, peer: std::net::SocketAddr, common
     let needs_login = common.pam.is_some() || helper.is_some();
     let login_deadline = {
         let (authed, login) = (authed.clone(), login.clone());
+        let pre_slot = &mut pre_slot;
         async move {
-            tokio::time::sleep(PRE_LOGIN_TIMEOUT).await;
-            if needs_login && !authed.load(Ordering::Acquire) && login.lock().unwrap().is_none() {
+            let logged_in = || authed.load(Ordering::Acquire) || login.lock().unwrap().is_some();
+            let deadline = tokio::time::Instant::now() + PRE_LOGIN_TIMEOUT;
+            // The address's pre-login slot is given back as soon as the login is accepted.
+            while !logged_in() && tokio::time::Instant::now() < deadline {
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            }
+            pre_slot.release();
+            if needs_login && !logged_in() {
                 return;
             }
             std::future::pending::<()>().await
