@@ -6,7 +6,12 @@ import * as rdp from './iron-remote-desktop-rdp.js';
 const { Backend, init, enableCredssp } = rdp;
 
 const $ = (id) => document.getElementById(id);
-const say = (text, error = false) => { $('msg').textContent = text; $('msg').className = error ? 'error' : ''; };
+// Messages go to the card that is showing: the sign-in form, or "My desktop".
+const say = (text, error = false) => {
+  const el = $('desk').hidden ? $('msg') : $('deskmsg');
+  el.textContent = text;
+  el.className = error ? 'error' : '';
+};
 
 await init('warn');
 // H.264 through the browser's own decoder, when this client build has it and the browser can decode it (?h264=0 turns it off, for comparing).
@@ -15,9 +20,13 @@ document.documentElement.dataset.h264 = String(useH264);
 // Set when the browser's decoder gives up in a session (see the decoder's options below): the next connection does without H.264.
 let decoderFailure = '';
 $('go').disabled = false;
-$('go').textContent = 'Connect';
+$('go').textContent = 'Sign in';
 
 let current = null; // { el, ui }
+// Who is signed in (the server's cookie says it; the page keeps the CSRF token, and the password only until the desktop is open: the RDP login
+// inside the connection needs it, so the person is not asked twice).
+let me = null; // { account, csrf }
+let heldPassword = '';
 
 // The desktop is asked for in device pixels, and told the scale: on a Retina screen (a ratio of 2) the server makes a picture twice as wide and
 // high and scales its interface by 200 %, so each of its pixels is one of the screen's, not a blurred pair. But four times the pixels is four times
@@ -48,10 +57,19 @@ function screenSize() {
   return { width: even(r.width, 640), height: even(r.height, 480), scale: Math.round(ratio * 100) };
 }
 
-function showSession(on) {
-  $('login').hidden = on;
-  $('session').hidden = !on;
+// One of three views: the sign-in form, "My desktop", the desktop itself.
+function show(view) {
+  $('login').hidden = view !== 'login';
+  $('desk').hidden = view !== 'desk';
+  $('session').hidden = view !== 'session';
+  if (view === 'desk') {
+    $('who').textContent = 'Signed in as ' + me.account + '.';
+    $('askpass').hidden = heldPassword !== '';
+    $((heldPassword ? 'open' : 'pass2')).focus();
+  }
+  if (view === 'login') $('user').focus();
 }
+const showSession = (on) => show(on ? 'session' : (me ? 'desk' : 'login'));
 
 function end(message, isError = false) {
   if (decoderFailure || /H\.264/.test(message)) {
@@ -70,28 +88,39 @@ function end(message, isError = false) {
   if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
   showSession(false);
   $('go').disabled = false;
+  $('open').disabled = false;
   $('pass').value = '';
   $('code').value = '';
   say(message, isError);
-  $('user').focus();
 }
 
-async function token(user, code) {
-  const r = await fetch('/api/session', {
+const answer = async (r) => {
+  if (r.status === 401) {
+    let why = 'Sign-in refused. Check the account, the password and the code.';
+    try { why = (await r.json()).error || why; } catch { /* the plain text will do */ }
+    const e = new Error(why);
+    e.signedOut = true;
+    throw e;
+  }
+  if (r.status === 429) throw new Error('Too many attempts from this address. Wait a minute and try again.');
+  if (r.status === 503) throw new Error('The server is busy or cannot check passwords now. Try again in a moment.');
+  if (!r.ok) throw new Error('The server refused the request (' + r.status + ').');
+  return r.json();
+};
+
+async function signIn(username, password, code) {
+  const r = await fetch('/api/login', {
     method: 'POST',
     cache: 'no-store',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ username: user, code }),
+    body: JSON.stringify({ username, password, code }),
   });
-  if (r.status === 401) {
-    let why = 'Sign-in refused. Check the account and the code.';
-    try { why = (await r.json()).error || why; } catch { /* the plain text will do */ }
-    throw new Error(why);
-  }
-  if (r.status === 429) throw new Error('Too many attempts from this address. Wait a minute and try again.');
-  if (r.status === 503) throw new Error('The server is busy. Try again in a moment.');
-  if (!r.ok) throw new Error('The gateway refused the request (' + r.status + ').');
-  return (await r.json()).token;
+  return answer(r);
+}
+
+async function token() {
+  const r = await fetch('/api/session', { method: 'POST', cache: 'no-store', headers: { 'X-CSRF-Token': me.csrf } });
+  return (await answer(r)).token;
 }
 
 // What the client says when the daemon refuses the login ("The server denied the connection"), and when it cannot be reached.
@@ -105,19 +134,57 @@ function friendly(text) {
 
 function describe(err) {
   const text = (err && (err.message || (typeof err.backtrace === 'function' && err.backtrace()))) || String(err);
-  if (/Too many|busy|refused the request|Sign-in refused/.test(text)) return text;
+  if (/Too many|busy|refused the request|Sign-in refused|cannot check/.test(text)) return text;
   return friendly(text);
 }
 
 $('form').addEventListener('submit', async (e) => {
   e.preventDefault();
   $('go').disabled = true;
+  say('Signing in…');
+  try {
+    me = await signIn($('user').value.trim(), $('pass').value, $('code').value.replace(/\s+/g, ''));
+    heldPassword = $('pass').value;
+    $('pass').value = '';
+    $('code').value = '';
+    say('');
+    show('desk');
+    openDesktop();
+  } catch (err) {
+    me = null;
+    heldPassword = '';
+    $('pass').value = '';
+    say(describe(err), true);
+  }
+  $('go').disabled = false;
+});
+
+$('deskform').addEventListener('submit', (e) => {
+  e.preventDefault();
+  openDesktop();
+});
+
+$('signout').addEventListener('click', async () => {
+  try { await fetch('/api/logout', { method: 'POST', cache: 'no-store', headers: { 'X-CSRF-Token': me.csrf } }); } catch { /* the cookie ends by itself */ }
+  me = null;
+  heldPassword = '';
+  show('login');
+  say('Signed out.');
+});
+
+async function openDesktop() {
+  const pass = heldPassword || $('pass2').value;
+  if (!pass) {
+    $('askpass').hidden = false;
+    $('pass2').focus();
+    return;
+  }
+  $('open').disabled = true;
   say('Connecting…');
-  const user = $('user').value.trim();
-  const pass = $('pass').value;
+  const user = me.account;
   let el;
   try {
-    const t = await token(user, $('code').value.replace(/\s+/g, ''));
+    const t = await token();
     showSession(true); // the canvas needs a size before it is created
     el = document.createElement('iron-remote-desktop');
     el.module = Backend; // the component takes it when it is created
@@ -147,7 +214,8 @@ $('form').addEventListener('submit', async (e) => {
     }
     const config = builder.build();
     current = { el, ui };
-    $('pass').value = '';
+    heldPassword = '';
+    $('pass2').value = '';
     const info = await ui.connect(config);
     say('');
     const started = Date.now();
@@ -163,9 +231,17 @@ $('form').addEventListener('submit', async (e) => {
     }, (err) => end(describe(err), true));
   } catch (err) {
     if (!current && el) el.remove();
+    if (err && err.signedOut) {
+      // The sign-in ended (idle or too long): back to the form.
+      me = null;
+      heldPassword = '';
+      end('Your sign-in ended. Sign in again.', true);
+      return;
+    }
     end(describe(err), true);
   }
-});
+}
+
 
 $('end').addEventListener('click', () => end('Disconnected.'));
 $('cad').addEventListener('click', () => current && current.ui.ctrlAltDel());
@@ -212,3 +288,12 @@ function resizeSoon() {
 }
 window.addEventListener('resize', resizeSoon);
 document.addEventListener('fullscreenchange', resizeSoon);
+
+// A page that is opened again (or reloaded) while the sign-in still stands goes straight to "My desktop".
+try {
+  const r = await fetch('/api/me', { cache: 'no-store' });
+  if (r.ok) {
+    me = await r.json();
+    show('desk');
+  }
+} catch { /* the form is there */ }

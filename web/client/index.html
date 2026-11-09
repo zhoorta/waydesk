@@ -18,6 +18,16 @@
       <p id="msg" role="status"></p>
     </form>
   </main>
+  <main id="desk" hidden>
+    <form id="deskform" method="post" action="#">
+      <h1>My desktop</h1>
+      <p id="who"></p>
+      <label id="askpass" hidden>Password again <input id="pass2" type="password" autocomplete="current-password"></label>
+      <button type="submit" id="open">Open desktop</button>
+      <button type="button" id="signout" class="quiet">Sign out</button>
+      <p id="deskmsg" role="status"></p>
+    </form>
+  </main>
   <div id="session" hidden>
     <div id="bar">
       <button type="button" id="fs">Fullscreen</button>

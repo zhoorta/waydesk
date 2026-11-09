@@ -7,6 +7,18 @@ into the RDP connection, and the daemon checks them through PAM, as for any RDP 
 connection to the daemon, so the RDP packets, the login among them, pass through its memory in the clear: it does not look at them, keep them or log
 them, but it is a machine that has to be trusted as much as the daemon. Run it on the same machine as the daemon (the default).
 
+## Sign-in (the portal's first step)
+
+People sign in to the site first, then open their desktop. The sign-in is the account's password, checked by the daemon's **root helper** (the same
+check, delay and lockout as RDP, so the web cannot be used to guess faster), plus the authenticator code when one is asked for. The gateway runs as the
+daemon's account (`waydesk`) because only that account can open the helper's socket (`--helper-socket`, default `/run/waydesk/helper.sock`); it keeps
+no password. A good sign-in sets a cookie (`__Host-waydesk`: `Secure`, `HttpOnly`, `SameSite=Strict`, random, kept in memory only, so a restart signs
+everybody out) that ends after 30 minutes without a request (`--idle-minutes`) or 8 hours at most; every request that changes anything repeats a CSRF
+token in a header. The password is checked before the code, so a wrong password never spends a code; a refusal says only "check the account, the
+password and the code", and takes as long (about 4 s) whatever was wrong, so the time does not tell a right password from a wrong one.
+Until the browser stream replaces RDP in the page, the RDP login inside the connection asks for the password again: the page keeps it in its memory
+from the sign-in to the connection so that the person types it once.
+
 ## Safe as shipped
 
 - Listens on `127.0.0.1:8443` only: reach it with `ssh -N -L 8443:127.0.0.1:8443 ACCOUNT@SERVER` and open `https://localhost:8443/`.

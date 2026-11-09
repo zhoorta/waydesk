@@ -15,6 +15,7 @@ use axum::Router;
 use tracing::{info, warn};
 
 use crate::limits::{RateLimiter, Refusal, Sessions, Tokens};
+use crate::portal::{self, Authenticator, Portal, Signed};
 use crate::totp::{CodeCheck, Guesses, Store};
 
 /// Whether a one-time code from an authenticator app is asked for before a session may start.
@@ -53,6 +54,14 @@ pub struct Config {
     /// The key that tells the daemon a connection comes from this gateway, so that it can believe the account and the client address that the
     /// gateway names (see `bridge.rs`). Without it the gateway connects as any client would.
     pub gateway_key: Option<String>,
+    /// How long a failed sign-in takes whatever the reason (the helper's answer for a wrong password takes about this long, so a refusal that comes
+    /// later from the code is no quicker, and the timing does not tell a right password from a wrong one).
+    pub fail_delay: Duration,
+    /// How long a signed-in browser may be silent, and how long a sign-in lasts at most.
+    pub idle: Duration,
+    pub absolute: Duration,
+    /// The daemon's root helper, which checks the passwords.
+    pub helper_socket: PathBuf,
 }
 
 pub struct App {
@@ -64,11 +73,15 @@ pub struct App {
     pub daemon_tls: Arc<rustls::ClientConfig>,
     pub store: Store,
     pub guesses: Guesses,
+    pub portal: Portal,
+    pub auth: Arc<dyn Authenticator>,
 }
 
 impl App {
-    pub fn new(cfg: Config, daemon_tls: Arc<rustls::ClientConfig>) -> Arc<Self> {
+    pub fn new(cfg: Config, daemon_tls: Arc<rustls::ClientConfig>, auth: Arc<dyn Authenticator>) -> Arc<Self> {
         Arc::new(Self {
+            portal: Portal::new(cfg.idle, cfg.absolute, 4096, 5),
+            auth,
             tokens: Tokens::new(Duration::from_secs(30)),
             token_rate: RateLimiter::new(cfg.rate_per_minute, Duration::from_secs(60)),
             ws_rate: RateLimiter::new(cfg.rate_per_minute.saturating_mul(3), Duration::from_secs(60)),
@@ -119,6 +132,9 @@ pub fn client_ip(peer: IpAddr, forwarded_for: Option<&str>, trusted: &crate::all
 pub fn router(app: Arc<App>) -> Router {
     Router::new()
         .route("/healthz", get(|| async { "ok\n" }))
+        .route("/api/login", post(login).layer(axum::extract::DefaultBodyLimit::max(4096)))
+        .route("/api/me", get(me))
+        .route("/api/logout", post(logout))
         .route("/api/session", post(session_token).layer(axum::extract::DefaultBodyLimit::max(4096)))
         .route("/ws", get(ws_handler))
         .fallback(get(static_file))
@@ -158,8 +174,9 @@ fn text(status: StatusCode, body: &'static str) -> Response {
 }
 
 #[derive(serde::Deserialize)]
-struct SessionRequest {
+struct LoginRequest {
     username: String,
+    password: String,
     #[serde(default)]
     code: String,
 }
@@ -168,55 +185,147 @@ fn json(status: StatusCode, body: String) -> Response {
     (status, [(header::CONTENT_TYPE, "application/json"), (header::CACHE_CONTROL, "no-store")], body).into_response()
 }
 
-/// The same answer whatever was wrong (the account, the code, a limit), so that it does not say which accounts exist or have an authenticator.
+/// The same answer whatever was wrong (the account, the password, the code, a limit), so that it does not say which accounts exist or have an authenticator.
 fn refused() -> Response {
-    json(StatusCode::UNAUTHORIZED, "{\"error\":\"Sign-in refused. Check the account and the code.\"}\n".into())
+    json(StatusCode::UNAUTHORIZED, "{\"error\":\"Sign-in refused. Check the account, the password and the code.\"}\n".into())
 }
 
-async fn session_token(State(app): State<Arc<App>>, Extension(ClientAddr(peer)): Extension<ClientAddr>, Extension(PublicHost(host)): Extension<PublicHost>, headers: HeaderMap, body: axum::body::Bytes) -> Response {
+fn signed_json(signed: &Signed) -> String {
+    format!("{{\"account\":{},\"csrf\":\"{}\"}}\n", serde_json::Value::from(signed.account.as_str()), signed.csrf)
+}
+
+/// Who the request's cookie stands for.
+fn signed_in(app: &App, headers: &HeaderMap) -> Option<(String, Signed)> {
+    let id = portal::cookie_value(headers.get(header::COOKIE)?.to_str().ok()?)?;
+    let signed = app.portal.get(id, Instant::now())?;
+    Some((id.to_owned(), signed))
+}
+
+/// A request that changes something: from a page of this site (`Origin`), by a signed-in browser, repeating that browser's CSRF token.
+fn changing(app: &App, headers: &HeaderMap, host: &str) -> Result<(String, Signed), Response> {
+    if !origin_ok(headers, host, app.cfg.public_origin.as_deref()) {
+        return Err(text(StatusCode::FORBIDDEN, "wrong origin\n"));
+    }
+    let Some((id, signed)) = signed_in(app, headers) else { return Err(text(StatusCode::UNAUTHORIZED, "not signed in\n")) };
+    let sent = headers.get(portal::CSRF_HEADER).and_then(|v| v.to_str().ok()).unwrap_or("");
+    if !portal::same_token(sent, &signed.csrf) {
+        return Err(text(StatusCode::FORBIDDEN, "wrong csrf token\n"));
+    }
+    Ok((id, signed))
+}
+
+async fn login(State(app): State<Arc<App>>, Extension(ClientAddr(peer)): Extension<ClientAddr>, Extension(PublicHost(host)): Extension<PublicHost>, headers: HeaderMap, body: axum::body::Bytes) -> Response {
     if !origin_ok(&headers, &host, app.cfg.public_origin.as_deref()) {
         return text(StatusCode::FORBIDDEN, "wrong origin\n");
     }
     let ip = peer.ip();
     let now = Instant::now();
     if !app.token_rate.hit(ip, now) {
+        warn!(%ip, "too many sign-in attempts from this address");
+        return text(StatusCode::TOO_MANY_REQUESTS, "too many attempts, wait a minute\n");
+    }
+    let Ok(req) = serde_json::from_slice::<LoginRequest>(&body) else { return text(StatusCode::BAD_REQUEST, "bad request\n") };
+    let account = req.username.trim().to_owned();
+    if !crate::totp::valid_account(&account) || req.password.is_empty() || req.password.len() > 512 {
+        warn!(%ip, "sign-in with an account name or password that cannot be one");
+        tokio::time::sleep(app.cfg.fail_delay).await;
+        return refused();
+    }
+    // The password first: the helper counts a wrong one against the account and the address (the lockout RDP has), and a wrong password never gets
+    // to spend a code of the person's authenticator.
+    let source = ip.to_string();
+    let auth = app.auth.clone();
+    let (acct, pw, src) = (account.clone(), req.password, source);
+    let checked = tokio::task::spawn_blocking(move || auth.check(&acct, &pw, &src)).await;
+    match checked {
+        Ok(Ok(true)) => {}
+        Ok(Ok(false)) => {
+            warn!(%ip, account, "sign-in refused: wrong password");
+            return refused();
+        }
+        Ok(Err(why)) => {
+            warn!(%ip, "sign-in: the password could not be checked: {why}");
+            return text(StatusCode::SERVICE_UNAVAILABLE, "cannot check passwords now\n");
+        }
+        Err(_) => return text(StatusCode::SERVICE_UNAVAILABLE, "cannot check passwords now\n"),
+    }
+    if let Some(why) = second_factor(&app, ip, &account, &req.code, now) {
+        warn!(%ip, account, "sign-in refused: {why}");
+        tokio::time::sleep(app.cfg.fail_delay).await;
+        return refused();
+    }
+    let Some((id, signed)) = app.portal.sign_in(&account, ip, Instant::now()) else { return text(StatusCode::SERVICE_UNAVAILABLE, "busy\n") };
+    info!(%ip, account, "signed in");
+    let mut res = json(StatusCode::OK, signed_json(&signed));
+    if let Ok(v) = HeaderValue::from_str(&portal::set_cookie(Some(&id))) {
+        res.headers_mut().insert(header::SET_COOKIE, v);
+    }
+    res
+}
+
+/// Checks the code of the account's authenticator when one is asked for; `Some(reason)` is a refusal.
+fn second_factor(app: &App, ip: IpAddr, account: &str, code: &str, now: Instant) -> Option<&'static str> {
+    if app.cfg.totp == TotpMode::Off {
+        return None;
+    }
+    if !app.store.exists(account) {
+        return (app.cfg.totp == TotpMode::Required).then_some("no authenticator and one is required");
+    }
+    if app.guesses.blocked(ip, account, now) {
+        return Some("too many wrong codes");
+    }
+    let unix = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    match app.store.check_and_use(account, code, unix) {
+        CodeCheck::Good => {
+            app.guesses.succeeded(ip, account);
+            None
+        }
+        CodeCheck::GoodRecovery(left) => {
+            app.guesses.succeeded(ip, account);
+            warn!(%ip, account, left, "a recovery code was used");
+            None
+        }
+        CodeCheck::Wrong | CodeCheck::NoAuthenticator => {
+            app.guesses.failed(ip, account, now);
+            Some("wrong code")
+        }
+    }
+}
+
+async fn me(State(app): State<Arc<App>>, headers: HeaderMap) -> Response {
+    match signed_in(&app, &headers) {
+        Some((_, signed)) => json(StatusCode::OK, signed_json(&signed)),
+        None => text(StatusCode::UNAUTHORIZED, "not signed in\n"),
+    }
+}
+
+async fn logout(State(app): State<Arc<App>>, Extension(PublicHost(host)): Extension<PublicHost>, headers: HeaderMap) -> Response {
+    let (id, signed) = match changing(&app, &headers, &host) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    app.portal.sign_out(&id);
+    info!(account = signed.account, "signed out");
+    let mut res = json(StatusCode::OK, "{}\n".into());
+    if let Ok(v) = HeaderValue::from_str(&portal::set_cookie(None)) {
+        res.headers_mut().insert(header::SET_COOKIE, v);
+    }
+    res
+}
+
+/// A one-time token for opening the signed-in account's desktop (see `bridge.rs`).
+async fn session_token(State(app): State<Arc<App>>, Extension(ClientAddr(peer)): Extension<ClientAddr>, Extension(PublicHost(host)): Extension<PublicHost>, headers: HeaderMap) -> Response {
+    let (_, signed) = match changing(&app, &headers, &host) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    let ip = peer.ip();
+    let now = Instant::now();
+    if !app.token_rate.hit(ip, now) {
         warn!(%ip, "too many session requests from this address");
         return text(StatusCode::TOO_MANY_REQUESTS, "too many attempts, wait a minute\n");
     }
-    let Ok(req) = serde_json::from_slice::<SessionRequest>(&body) else { return text(StatusCode::BAD_REQUEST, "bad request\n") };
-    let account = req.username.trim();
-    if !crate::totp::valid_account(account) {
-        warn!(%ip, "session request for an account name that is not valid");
-        return refused();
-    }
-    if app.cfg.totp != TotpMode::Off {
-        let enrolled = app.store.exists(account);
-        if !enrolled {
-            if app.cfg.totp == TotpMode::Required {
-                warn!(%ip, account, "no session: this account has no authenticator and one is required");
-                return refused();
-            }
-        } else {
-            if app.guesses.blocked(ip, account, now) {
-                warn!(%ip, account, "no session: too many wrong codes");
-                return refused();
-            }
-            let unix = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
-            match app.store.check_and_use(account, &req.code, unix) {
-                CodeCheck::Good => app.guesses.succeeded(ip, account),
-                CodeCheck::GoodRecovery(left) => {
-                    app.guesses.succeeded(ip, account);
-                    warn!(%ip, account, left, "a recovery code was used");
-                }
-                CodeCheck::Wrong | CodeCheck::NoAuthenticator => {
-                    app.guesses.failed(ip, account, now);
-                    warn!(%ip, account, "wrong code");
-                    return refused();
-                }
-            }
-        }
-    }
-    match app.tokens.issue(ip, account, now) {
+    match app.tokens.issue(ip, &signed.account, now) {
         Some(t) => json(StatusCode::OK, format!("{{\"token\":\"{t}\",\"expires_in\":{}}}\n", app.tokens.ttl().as_secs())),
         None => text(StatusCode::SERVICE_UNAVAILABLE, "busy\n"),
     }

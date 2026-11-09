@@ -1,8 +1,8 @@
 [Unit]
 Description=waydesk web gateway (the browser client and its bridge to the RDP daemon)
 Documentation=file:///usr/share/doc/waydesk/web/README.md
-After=network.target waydesk.service
-Wants=waydesk.service
+After=network.target waydesk.service waydesk-helper.service
+Wants=waydesk.service waydesk-helper.service
 
 [Service]
 Type=simple
@@ -25,7 +25,8 @@ ProtectKernelTunables=yes
 ProtectControlGroups=yes
 ProtectClock=yes
 ProtectHostname=yes
-RestrictAddressFamilies=AF_INET AF_INET6
+# AF_UNIX: the root helper's socket (/run/waydesk/helper.sock), which checks the passwords at sign-in.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 RestrictNamespaces=yes
 RestrictRealtime=yes
 LockPersonality=yes

@@ -7,6 +7,7 @@ mod bridge;
 #[cfg(test)]
 mod e2e;
 mod limits;
+mod portal;
 mod tlsconf;
 mod totp;
 mod web;
@@ -31,9 +32,10 @@ const USAGE: &str = "usage: waydesk-web [--bind ADDR:PORT] [--cert FILE] [--key 
                    [--rate-per-minute N] [--max-per-ip N] [--max-total N]
                    [--plain-http] [--trusted-proxy LIST] [--public-origin https://HOST]
                    [--totp off|optional|required] [--totp-dir DIR] [--gateway-key FILE]
+                   [--helper-socket FILE] [--idle-minutes N]
 set up codes: waydesk-web totp add ACCOUNT | recovery ACCOUNT | remove ACCOUNT | list
 behind a reverse proxy: --plain-http --trusted-proxy 127.0.0.1 --public-origin https://waydesk.example.com (docs: web/README.md)
-defaults: --bind 127.0.0.1:8443 --cert /etc/waydesk/cert.pem --key /etc/waydesk/key.pem --target 127.0.0.1:3389 --root /usr/share/waydesk/web
+defaults: --helper-socket /run/waydesk/helper.sock (only the daemon's account can open it: run as that account) --idle-minutes 30 --bind 127.0.0.1:8443 --cert /etc/waydesk/cert.pem --key /etc/waydesk/key.pem --target 127.0.0.1:3389 --root /usr/share/waydesk/web
           --rate-per-minute 10 --max-per-ip 3 --max-total 64";
 
 fn parse_args(args: impl Iterator<Item = String>) -> Result<Config> {
@@ -53,6 +55,10 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Config> {
         totp: web::TotpMode::Off,
         totp_dir: "/etc/waydesk/totp".into(),
         gateway_key: None,
+        fail_delay: Duration::from_secs(4),
+        idle: Duration::from_secs(30 * 60),
+        absolute: Duration::from_secs(8 * 3600),
+        helper_socket: "/run/waydesk/helper.sock".into(),
     };
     let mut args = args;
     while let Some(a) = args.next() {
@@ -75,6 +81,8 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Config> {
                     other => bail!("--totp is off, optional or required, not {other:?}"),
                 }
             }
+            "--helper-socket" => cfg.helper_socket = PathBuf::from(value("--helper-socket")?),
+            "--idle-minutes" => cfg.idle = Duration::from_secs(60 * value("--idle-minutes")?.parse::<u64>().context("bad --idle-minutes")?.max(1)),
             "--totp-dir" => cfg.totp_dir = PathBuf::from(value("--totp-dir")?),
             "--gateway-key" => {
                 let path = value("--gateway-key")?;
@@ -240,7 +248,8 @@ async fn main() -> Result<()> {
     }
     let listener = TcpListener::bind(cfg.bind).await.with_context(|| format!("cannot listen on {}", cfg.bind))?;
     info!(totp = ?cfg.totp, gateway_key = cfg.gateway_key.is_some(), bind = %cfg.bind, target = %cfg.target, root = %cfg.root.display(), allowed = %cfg.allow_from.as_deref().unwrap_or(if cfg.bind.ip().is_loopback() { "any (loopback)" } else { "private" }), "waydesk-web listening");
-    let app = App::new(cfg, daemon_tls);
+    let auth = Arc::new(portal::HelperAuth { socket: cfg.helper_socket.clone() });
+    let app = App::new(cfg, daemon_tls, auth);
     tokio::select! {
         () = serve(listener, app, server_tls, allow) => {}
         _ = tokio::signal::ctrl_c() => {}

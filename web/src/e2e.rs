@@ -20,6 +20,22 @@ use crate::web::{App, Config};
 const X224_REQUEST: [u8; 11] = [3, 0, 0, 11, 6, 0xE0, 0, 0, 0, 0, 0];
 const X224_CONFIRM: [u8; 11] = [3, 0, 0, 11, 6, 0xD0, 0, 0, 0x12, 0x34, 0];
 
+/// Stands in for the root helper: the password of an account is `pw-` and its name, and nobody named `locked` gets in.
+struct FakeAuth;
+
+impl crate::portal::Authenticator for FakeAuth {
+    fn check(&self, account: &str, password: &str, _source: &str) -> Result<bool, String> {
+        Ok(account != "locked" && password == format!("pw-{account}"))
+    }
+}
+
+/// What a signed-in browser holds.
+#[derive(Clone)]
+struct Browser {
+    cookie: String,
+    csrf: String,
+}
+
 struct Opts {
     rate: usize,
     per_ip: usize,
@@ -139,8 +155,12 @@ async fn start(name: &str, opts: Opts) -> Env {
         totp: opts.totp,
         totp_dir: dir.join("totp"),
         gateway_key: opts.gateway_key.map(str::to_string),
+        fail_delay: std::time::Duration::ZERO,
+        idle: std::time::Duration::from_secs(1800),
+        absolute: std::time::Duration::from_secs(8 * 3600),
+        helper_socket: PathBuf::new(),
     };
-    let app = App::new(cfg, tlsconf::daemon_client_config(files.clone()).unwrap());
+    let app = App::new(cfg, tlsconf::daemon_client_config(files.clone()).unwrap(), Arc::new(FakeAuth));
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let gateway = listener.local_addr().unwrap();
     let allow = Arc::new(match opts.allow_from {
@@ -154,6 +174,14 @@ async fn start(name: &str, opts: Opts) -> Env {
 impl Drop for Env {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// The body a test request carries: the sign-in of `ana` for the sign-in path, nothing for the others.
+fn body_for(method: &str, path: &str) -> &'static str {
+    match (method, path) {
+        ("POST", "/api/login") => r#"{"username":"ana","password":"pw-ana","code":""}"#,
+        _ => "",
     }
 }
 
@@ -174,7 +202,7 @@ impl Env {
         for (k, v) in extra {
             req += &format!("{k}: {v}\r\n");
         }
-        let body = if method == "POST" { r#"{"username":"ana","code":""}"# } else { "" };
+        let body = body_for(method, path);
         req += &format!("Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}", body.len());
         tcp.write_all(req.as_bytes()).await.unwrap();
         let mut out = Vec::new();
@@ -194,7 +222,7 @@ impl Env {
         for (k, v) in extra {
             req += &format!("{k}: {v}\r\n");
         }
-        let body = if method == "POST" { r#"{"username":"ana","code":""}"# } else { "" };
+        let body = body_for(method, path);
         req += &format!("Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}", body.len());
         tls.write_all(req.as_bytes()).await.unwrap();
         let mut out = Vec::new();
@@ -210,12 +238,14 @@ impl Env {
         (status, text)
     }
 
-    /// Asks for a token for `account` with `code`, as the page does.
-    async fn token_for(&self, account: &str, code: &str) -> (u16, Option<String>) {
-        let origin = format!("https://{}", self.host());
+    /// One request with a body over TLS; returns the status and the whole response text.
+    async fn send(&self, method: &str, path: &str, headers: &[(&str, &str)], body: &str) -> (u16, String) {
         let mut tls = self.tls().await;
-        let body = format!("{{\"username\":\"{account}\",\"code\":\"{code}\"}}");
-        let req = format!("POST /api/session HTTP/1.1\r\nHost: {}\r\nOrigin: {origin}\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}", self.host(), body.len());
+        let mut req = format!("{method} {path} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n", self.host());
+        for (k, v) in headers {
+            req += &format!("{k}: {v}\r\n");
+        }
+        req += &format!("Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}", body.len());
         tls.write_all(req.as_bytes()).await.unwrap();
         let mut out = Vec::new();
         let mut buf = [0u8; 4096];
@@ -226,19 +256,45 @@ impl Env {
             out.extend_from_slice(&buf[..n]);
         }
         let text = String::from_utf8_lossy(&out).into_owned();
-        let status = text.split_whitespace().nth(1).and_then(|s| s.parse().ok()).unwrap_or(0);
-        let token = text.find("\"token\":\"").map(|at| text[at + 9..at + 41].to_string());
+        (text.split_whitespace().nth(1).and_then(|s| s.parse().ok()).unwrap_or(0), text)
+    }
+
+    fn origin(&self) -> String {
+        format!("https://{}", self.host())
+    }
+
+    /// Signs in as the page does; returns the status and, on success, what the browser keeps.
+    async fn sign_in(&self, account: &str, password: &str, code: &str) -> (u16, Option<Browser>) {
+        let body = format!("{{\"username\":\"{account}\",\"password\":\"{password}\",\"code\":\"{code}\"}}");
+        let (status, text) = self.send("POST", "/api/login", &[("Origin", &self.origin())], &body).await;
+        let cookie = text.lines().find_map(|l| l.strip_prefix("set-cookie: ").or_else(|| l.strip_prefix("Set-Cookie: "))).map(|c| c.split(';').next().unwrap().to_string());
+        let csrf = text.find("\"csrf\":\"").map(|at| text[at + 8..at + 40].to_string());
+        (status, cookie.zip(csrf).map(|(cookie, csrf)| Browser { cookie, csrf }))
+    }
+
+    /// A browser signed in as `account` (the password is the stand-in's).
+    async fn browser(&self, account: &str) -> Browser {
+        self.sign_in(account, &format!("pw-{account}"), "").await.1.expect("signed in")
+    }
+
+    /// The token request of a signed-in browser.
+    async fn session_for(&self, b: &Browser) -> (u16, Option<String>) {
+        let (status, body) = self.send("POST", "/api/session", &[("Origin", &self.origin()), ("Cookie", &b.cookie), ("X-CSRF-Token", &b.csrf)], "").await;
+        let token = body.find("\"token\":\"").map(|at| body[at + 9..at + 41].to_string());
         (status, token)
     }
 
-    async fn token(&self) -> Option<String> {
-        let origin = format!("https://{}", self.host());
-        let (status, body) = self.http("POST", "/api/session", &[("Origin", &origin)]).await;
-        if status != 200 {
-            return None;
+    /// Signs in as `account` with `code` (and the right password), then asks for a token, as the page does.
+    async fn token_for(&self, account: &str, code: &str) -> (u16, Option<String>) {
+        match self.sign_in(account, &format!("pw-{account}"), code).await {
+            (200, Some(b)) => self.session_for(&b).await,
+            (status, _) => (status, None),
         }
-        let at = body.find("\"token\":\"")? + 9;
-        Some(body[at..at + 32].to_string())
+    }
+
+    async fn token(&self) -> Option<String> {
+        let b = self.browser("ana").await;
+        self.session_for(&b).await.1
     }
 
     async fn ws(&self, origin: Option<&str>) -> Result<tokio_tungstenite::WebSocketStream<tokio_rustls::client::TlsStream<TcpStream>>, tokio_tungstenite::tungstenite::Error> {
@@ -315,23 +371,24 @@ async fn a_token_works_once_and_a_wrong_one_never_reaches_the_daemon() {
 #[tokio::test]
 async fn a_request_from_another_page_is_refused() {
     let env = start("origin", Opts::default()).await;
-    let (status, _) = env.http("POST", "/api/session", &[("Origin", "https://evil.example")]).await;
-    assert_eq!(status, 403);
-    let (status, _) = env.http("POST", "/api/session", &[]).await;
-    assert_eq!(status, 403, "no Origin at all");
+    let b = env.browser("ana").await;
+    for path in ["/api/login", "/api/session", "/api/logout"] {
+        let (status, _) = env.http("POST", path, &[("Origin", "https://evil.example"), ("Cookie", &b.cookie), ("X-CSRF-Token", &b.csrf)]).await;
+        assert_eq!(status, 403, "{path}");
+        let (status, _) = env.http("POST", path, &[("Cookie", &b.cookie), ("X-CSRF-Token", &b.csrf)]).await;
+        assert_eq!(status, 403, "{path}: no Origin at all");
+    }
     assert!(env.ws(Some("https://evil.example")).await.is_err(), "the WebSocket handshake is refused");
     assert!(env.ws(None).await.is_err());
 }
 
 #[tokio::test]
-async fn tokens_are_limited_per_address() {
+async fn sign_ins_are_limited_per_address() {
     let env = start("rate", Opts { rate: 3, ..Opts::default() }).await;
     for _ in 0..3 {
-        assert!(env.token().await.is_some());
+        assert_eq!(env.sign_in("ana", "wrong", "").await.0, 401);
     }
-    let origin = format!("https://{}", env.host());
-    let (status, _) = env.http("POST", "/api/session", &[("Origin", &origin)]).await;
-    assert_eq!(status, 429);
+    assert_eq!(env.sign_in("ana", "pw-ana", "").await.0, 429, "even the right password, until the minute is over");
 }
 
 #[tokio::test]
@@ -377,26 +434,26 @@ async fn the_web_client_is_served_from_its_directory_only() {
 async fn behind_a_proxy_clients_are_counted_by_their_forwarded_address_and_the_origin_follows_the_forwarded_host() {
     let env = start("proxy-rate", Opts { proxy: true, rate: 2, ..Opts::default() }).await;
     let a = [("X-Forwarded-For", "203.0.113.9"), ("X-Forwarded-Host", "waydesk.example"), ("Origin", "https://waydesk.example")];
-    assert_eq!(env.plain("POST", "/api/session", &a).await.0, 200);
-    assert_eq!(env.plain("POST", "/api/session", &a).await.0, 200);
-    assert_eq!(env.plain("POST", "/api/session", &a).await.0, 429, "the third from the same client");
+    assert_eq!(env.plain("POST", "/api/login", &a).await.0, 200);
+    assert_eq!(env.plain("POST", "/api/login", &a).await.0, 200);
+    assert_eq!(env.plain("POST", "/api/login", &a).await.0, 429, "the third from the same client");
     let b = [("X-Forwarded-For", "203.0.113.10"), ("X-Forwarded-Host", "waydesk.example"), ("Origin", "https://waydesk.example")];
-    assert_eq!(env.plain("POST", "/api/session", &b).await.0, 200, "another client has its own count, though the proxy is the same");
+    assert_eq!(env.plain("POST", "/api/login", &b).await.0, 200, "another client has its own count, though the proxy is the same");
     let wrong = [("X-Forwarded-For", "203.0.113.11"), ("X-Forwarded-Host", "waydesk.example"), ("Origin", "https://evil.example")];
-    assert_eq!(env.plain("POST", "/api/session", &wrong).await.0, 403);
+    assert_eq!(env.plain("POST", "/api/login", &wrong).await.0, 403);
     // The forwarded host wins over the Host the proxy set.
     let host_origin = format!("https://{}", env.gateway);
     let own = [("X-Forwarded-For", "203.0.113.12"), ("X-Forwarded-Host", "waydesk.example"), ("Origin", host_origin.as_str())];
-    assert_eq!(env.plain("POST", "/api/session", &own).await.0, 403);
+    assert_eq!(env.plain("POST", "/api/login", &own).await.0, 403);
 }
 
 #[tokio::test]
 async fn behind_a_proxy_the_allowed_list_is_about_the_forwarded_client() {
     let env = start("proxy-allow", Opts { proxy: true, allow_from: Some("203.0.113.0/24"), ..Opts::default() }).await;
     let ok = [("X-Forwarded-For", "203.0.113.5"), ("X-Forwarded-Host", "waydesk.example"), ("Origin", "https://waydesk.example")];
-    assert_eq!(env.plain("POST", "/api/session", &ok).await.0, 200);
+    assert_eq!(env.plain("POST", "/api/login", &ok).await.0, 200);
     let elsewhere = [("X-Forwarded-For", "198.51.100.7"), ("X-Forwarded-Host", "waydesk.example"), ("Origin", "https://waydesk.example")];
-    assert_eq!(env.plain("POST", "/api/session", &elsewhere).await.0, 403);
+    assert_eq!(env.plain("POST", "/api/login", &elsewhere).await.0, 403);
     assert_eq!(env.plain("GET", "/", &[("X-Forwarded-For", "198.51.100.7")]).await.0, 403, "not even the page");
     assert_eq!(env.plain("GET", "/", &[("X-Forwarded-For", "203.0.113.5")]).await.0, 200);
 }
@@ -408,23 +465,23 @@ async fn forwarded_headers_from_an_address_that_is_not_a_trusted_proxy_are_ignor
     let host_origin = format!("https://{}", env.gateway);
     for (i, who) in ["203.0.113.1", "203.0.113.2"].iter().enumerate() {
         let h = [("X-Forwarded-For", *who), ("X-Forwarded-Host", "waydesk.example"), ("Origin", host_origin.as_str())];
-        assert_eq!(env.plain("POST", "/api/session", &h).await.0, 200, "try {i}: its own Host and Origin match");
+        assert_eq!(env.plain("POST", "/api/login", &h).await.0, 200, "try {i}: its own Host and Origin match");
     }
     let third = [("X-Forwarded-For", "203.0.113.3"), ("X-Forwarded-Host", "waydesk.example"), ("Origin", host_origin.as_str())];
-    assert_eq!(env.plain("POST", "/api/session", &third).await.0, 429, "different claimed addresses, one real one");
+    assert_eq!(env.plain("POST", "/api/login", &third).await.0, 429, "different claimed addresses, one real one");
     // The host it claims for itself is not believed either: this origin is not the gateway's own.
     let claimed = [("X-Forwarded-For", "203.0.113.4"), ("X-Forwarded-Host", "waydesk.example"), ("Origin", "https://waydesk.example")];
-    assert_eq!(env.plain("POST", "/api/session", &claimed).await.0, 403);
+    assert_eq!(env.plain("POST", "/api/login", &claimed).await.0, 403);
 }
 
 #[tokio::test]
 async fn a_public_origin_is_the_only_origin_behind_a_proxy() {
     let env = start("proxy-origin", Opts { proxy: true, public_origin: Some("https://waydesk.example.com"), ..Opts::default() }).await;
     let ok = [("Origin", "https://waydesk.example.com"), ("X-Forwarded-For", "203.0.113.5")];
-    assert_eq!(env.plain("POST", "/api/session", &ok).await.0, 200, "whatever Host the proxy sends");
+    assert_eq!(env.plain("POST", "/api/login", &ok).await.0, 200, "whatever Host the proxy sends");
     let host_origin = format!("https://{}", env.gateway);
     let own_host = [("Origin", host_origin.as_str()), ("X-Forwarded-For", "203.0.113.5")];
-    assert_eq!(env.plain("POST", "/api/session", &own_host).await.0, 403);
+    assert_eq!(env.plain("POST", "/api/login", &own_host).await.0, 403);
 }
 
 fn unix_now() -> u64 {
@@ -483,4 +540,118 @@ async fn without_codes_the_gateway_asks_none() {
     let env = start("totp-off", Opts::default()).await;
     assert_eq!(env.token_for("anyone", "").await.0, 200);
     assert_eq!(env.token_for("not a name", "").await.0, 401);
+}
+
+#[tokio::test]
+async fn a_token_needs_a_signed_in_browser_that_repeats_its_csrf_token() {
+    let env = start("csrf", Opts::default()).await;
+    let b = env.browser("ana").await;
+    let origin = env.origin();
+    assert_eq!(env.http("POST", "/api/session", &[("Origin", &origin)]).await.0, 401, "no cookie");
+    assert_eq!(env.http("POST", "/api/session", &[("Origin", &origin), ("Cookie", &b.cookie)]).await.0, 403, "no csrf token");
+    assert_eq!(env.http("POST", "/api/session", &[("Origin", &origin), ("Cookie", &b.cookie), ("X-CSRF-Token", &"0".repeat(32))]).await.0, 403, "another csrf token");
+    let forged = format!("{}={}", crate::portal::COOKIE, "0".repeat(64));
+    assert_eq!(env.http("POST", "/api/session", &[("Origin", &origin), ("Cookie", &forged), ("X-CSRF-Token", &b.csrf)]).await.0, 401, "a cookie nobody was given");
+    // Another browser's csrf token does not go with this cookie.
+    let other = env.browser("bob").await;
+    assert_eq!(env.http("POST", "/api/session", &[("Origin", &origin), ("Cookie", &b.cookie), ("X-CSRF-Token", &other.csrf)]).await.0, 403);
+    assert_eq!(env.session_for(&b).await.0, 200);
+}
+
+#[tokio::test]
+async fn the_sign_in_sets_a_protected_cookie_and_signing_out_ends_it() {
+    let env = start("cookie", Opts::default()).await;
+    let body = r#"{"username":"ana","password":"pw-ana","code":""}"#;
+    let (status, text) = env.send("POST", "/api/login", &[("Origin", &env.origin())], body).await;
+    assert_eq!(status, 200);
+    let lower = text.to_ascii_lowercase();
+    let set = lower.lines().find(|l| l.starts_with("set-cookie:")).expect("a cookie");
+    for part in ["__host-waydesk=", "path=/", "secure", "httponly", "samesite=strict"] {
+        assert!(set.contains(part), "{set}");
+    }
+    assert!(!set.contains("domain"), "{set}");
+    assert!(lower.contains("cache-control: no-store"));
+
+    let b = env.browser("ana").await;
+    let (status, me) = env.http("GET", "/api/me", &[("Cookie", &b.cookie)]).await;
+    assert_eq!(status, 200);
+    assert!(me.contains("\"account\":\"ana\"") && me.contains(&b.csrf), "{me}");
+    assert_eq!(env.http("GET", "/api/me", &[]).await.0, 401);
+
+    let origin = env.origin();
+    assert_eq!(env.http("POST", "/api/logout", &[("Origin", &origin), ("Cookie", &b.cookie)]).await.0, 403, "signing out needs the csrf token too");
+    let (status, out) = env.http("POST", "/api/logout", &[("Origin", &origin), ("Cookie", &b.cookie), ("X-CSRF-Token", &b.csrf)]).await;
+    assert_eq!(status, 200);
+    assert!(out.to_ascii_lowercase().contains("max-age=0"), "the cookie is removed in the browser too");
+    assert_eq!(env.http("GET", "/api/me", &[("Cookie", &b.cookie)]).await.0, 401, "and on the server");
+    assert_eq!(env.session_for(&b).await.0, 401);
+}
+
+#[tokio::test]
+async fn a_wrong_password_never_reaches_the_code_and_every_refusal_reads_the_same() {
+    let env = start("order", Opts { totp: crate::web::TotpMode::Required, gateway_key: Some("a-long-enough-gateway-key"), ..Opts::default() }).await;
+    let store = crate::totp::Store::new(&env.dir.join("totp"));
+    let (record, _) = store.enroll("ana").unwrap();
+    let code = crate::totp::code_at(&record.secret, unix_now());
+
+    // A wrong password with the right code: refused, and the code is not used up.
+    let (status, wrong_password) = env.send("POST", "/api/login", &[("Origin", &env.origin())], &format!("{{\"username\":\"ana\",\"password\":\"nope\",\"code\":\"{code}\"}}")).await;
+    assert_eq!(status, 401);
+    let (status, wrong_code) = env.send("POST", "/api/login", &[("Origin", &env.origin())], r#"{"username":"ana","password":"pw-ana","code":"000000"}"#).await;
+    assert_eq!(status, 401);
+    let (status, no_account) = env.send("POST", "/api/login", &[("Origin", &env.origin())], r#"{"username":"nobody","password":"pw-nobody","code":"123456"}"#).await;
+    assert_eq!(status, 401);
+    let (status, locked) = env.send("POST", "/api/login", &[("Origin", &env.origin())], &format!("{{\"username\":\"locked\",\"password\":\"pw-locked\",\"code\":\"{code}\"}}")).await;
+    assert_eq!(status, 401);
+    let body = |t: &str| t.split("\r\n\r\n").nth(1).unwrap().to_string();
+    assert_eq!(body(&wrong_password), body(&wrong_code));
+    assert_eq!(body(&wrong_password), body(&no_account));
+    assert_eq!(body(&wrong_password), body(&locked));
+    assert!(!wrong_password.to_ascii_lowercase().contains("set-cookie"));
+
+    assert_eq!(env.sign_in("ana", "pw-ana", &code).await.0, 200, "the code was still good: a wrong password does not spend it");
+}
+
+#[tokio::test]
+async fn without_a_helper_nobody_signs_in() {
+    struct Down;
+    impl crate::portal::Authenticator for Down {
+        fn check(&self, _: &str, _: &str, _: &str) -> Result<bool, String> {
+            Err("no helper".into())
+        }
+    }
+    // Same gateway, a checker that cannot answer: the answer is "unavailable", not a sign-in.
+    let env = start("down", Opts::default()).await;
+    let dir = env.dir.clone();
+    let (cert, key) = (dir.join("gw-cert.pem"), dir.join("gw-key.pem"));
+    let cfg = Config {
+        bind: "127.0.0.1:0".parse().unwrap(),
+        cert,
+        key,
+        target: "127.0.0.1:1".into(),
+        root: dir.join("web"),
+        allow_from: None,
+        rate_per_minute: 100,
+        max_per_ip: 10,
+        max_total: 64,
+        plain_http: false,
+        trusted_proxies: None,
+        public_origin: None,
+        totp: crate::web::TotpMode::Off,
+        totp_dir: dir.join("totp2"),
+        gateway_key: None,
+        fail_delay: std::time::Duration::ZERO,
+        idle: std::time::Duration::from_secs(1800),
+        absolute: std::time::Duration::from_secs(8 * 3600),
+        helper_socket: PathBuf::new(),
+    };
+    let app = App::new(cfg, tlsconf::daemon_client_config(env.files.clone()).unwrap(), Arc::new(Down));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(crate::serve(listener, app, tlsconf::server_config(env.files.clone()).unwrap(), Arc::new(crate::allow::Allow::any())));
+    let down = Env { gateway: addr, dir: dir.clone(), files: env.files.clone(), daemon_connections: env.daemon_connections.clone(), preambles: env.preambles.clone() };
+    let (status, browser) = down.sign_in("ana", "pw-ana", "").await;
+    assert_eq!(status, 503);
+    assert!(browser.is_none());
+    std::mem::forget(down); // the directory belongs to `env`
 }

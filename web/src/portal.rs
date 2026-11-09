@@ -1,0 +1,290 @@
+//! The portal's sign-in: who is signed in (cookie sessions kept in memory) and how a password is checked (through the root helper).
+//!
+//! A person signs in once, with the account's password and the code of their authenticator; the password is checked by the root helper, which is
+//! also what the RDP daemon asks, so the lockout and the delay after a failed login are shared with RDP and cannot be bypassed from the web. The
+//! portal keeps no password: it passes it on and forgets it. What it keeps is a random cookie value that stands for "this account signed in from
+//! this address", with a CSRF token that every request that changes anything has to repeat in a header.
+
+use std::collections::HashMap;
+use std::net::IpAddr;
+use std::os::unix::net::UnixStream;
+use std::path::PathBuf;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
+#[path = "../../src/proto.rs"]
+#[allow(dead_code)] // the daemon uses all of it, this crate the helper's login only
+mod proto;
+use proto::{HelperReq, HelperResp};
+
+/// The name of the cookie. `__Host-` makes the browser accept it only with `Secure`, `Path=/` and no `Domain`, so a subdomain or a plain-HTTP page
+/// cannot plant or overwrite it.
+pub const COOKIE: &str = "__Host-waydesk";
+/// The header that repeats the CSRF token.
+pub const CSRF_HEADER: &str = "x-csrf-token";
+
+/// Checks an account's password.
+pub trait Authenticator: Send + Sync {
+    /// `Ok(true)`: the password is right. `Ok(false)`: it is not (or the account may not log in). `Err`: the check could not be made.
+    fn check(&self, account: &str, password: &str, source: &str) -> Result<bool, String>;
+}
+
+/// The root helper of the daemon (`waydesk-server --helper`). Its socket opens only for the daemon's account, so the portal runs as that account.
+pub struct HelperAuth {
+    pub socket: PathBuf,
+}
+
+impl Authenticator for HelperAuth {
+    fn check(&self, account: &str, password: &str, source: &str) -> Result<bool, String> {
+        let mut sock = UnixStream::connect(&self.socket).map_err(|e| format!("cannot reach the helper at {}: {e}", self.socket.display()))?;
+        // A failed login takes the helper a few seconds on purpose; anything longer than that is a helper that does not answer.
+        let limit = Some(Duration::from_secs(30));
+        let _ = sock.set_read_timeout(limit);
+        let _ = sock.set_write_timeout(limit);
+        let req = HelperReq::Authenticate { user: account.to_owned(), password: password.to_owned(), source: source.to_owned() };
+        proto::write_frame(&mut sock, &req.encode()).map_err(|e| e.to_string())?;
+        let body = proto::read_frame(&mut sock).map_err(|e| e.to_string())?.ok_or("the helper closed the connection")?;
+        let answer = HelperResp::decode(&body).map_err(|e| e.to_string())?;
+        // One login per connection: say goodbye so that the helper does not wait for more.
+        let _ = proto::write_frame(&mut sock, &HelperReq::Bye.encode());
+        match answer {
+            HelperResp::AuthOk => Ok(true),
+            HelperResp::AuthFail => Ok(false),
+            HelperResp::Error { message } => Err(format!("helper: {message}")),
+            other => Err(format!("unexpected answer to a login: {other:?}")),
+        }
+    }
+}
+
+/// What a signed-in browser holds.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Signed {
+    pub account: String,
+    pub ip: IpAddr,
+    pub csrf: String,
+}
+
+struct Entry {
+    signed: Signed,
+    created: Instant,
+    last: Instant,
+}
+
+/// The signed-in browsers: at most `max` in all and `per_account` for one account, each ended after `idle` without a request or `absolute` after
+/// signing in. The oldest idle one makes room when the table is full, so a flood of sign-ins cannot lock everybody else out, but one account cannot
+/// push others out either (its own limit is lower).
+pub struct Portal {
+    idle: Duration,
+    absolute: Duration,
+    max: usize,
+    per_account: usize,
+    entries: Mutex<HashMap<String, Entry>>,
+}
+
+fn random_hex(bytes: usize) -> Option<String> {
+    let mut raw = vec![0u8; bytes];
+    getrandom::fill(&mut raw).ok()?;
+    Some(raw.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+impl Portal {
+    pub fn new(idle: Duration, absolute: Duration, max: usize, per_account: usize) -> Self {
+        Self { idle, absolute, max, per_account, entries: Mutex::new(HashMap::new()) }
+    }
+
+    /// The value of the cookie.
+    pub fn sign_in(&self, account: &str, ip: IpAddr, now: Instant) -> Option<(String, Signed)> {
+        let id = random_hex(32)?;
+        let signed = Signed { account: account.to_owned(), ip, csrf: random_hex(16)? };
+        let mut map = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        self.expire(&mut map, now);
+        // The account's oldest sign-in goes when it has too many.
+        let mine: Vec<(&String, Instant)> = map.iter().filter(|(_, e)| e.signed.account == account).map(|(k, e)| (k, e.last)).collect();
+        if mine.len() >= self.per_account {
+            let oldest = mine.iter().min_by_key(|(_, t)| *t).map(|(k, _)| (*k).clone());
+            if let Some(k) = oldest {
+                map.remove(&k);
+            }
+        }
+        if map.len() >= self.max {
+            return None;
+        }
+        map.insert(id.clone(), Entry { signed: signed.clone(), created: now, last: now });
+        Some((id, signed))
+    }
+
+    /// Who the cookie stands for, if it is still good. A request counts as activity.
+    pub fn get(&self, id: &str, now: Instant) -> Option<Signed> {
+        let mut map = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        let e = map.get_mut(id)?;
+        if now.duration_since(e.last) >= self.idle || now.duration_since(e.created) >= self.absolute {
+            map.remove(id);
+            return None;
+        }
+        e.last = now;
+        Some(e.signed.clone())
+    }
+
+    pub fn sign_out(&self, id: &str) {
+        self.entries.lock().unwrap_or_else(|e| e.into_inner()).remove(id);
+    }
+
+    pub fn count(&self) -> usize {
+        self.entries.lock().unwrap_or_else(|e| e.into_inner()).len()
+    }
+
+    fn expire(&self, map: &mut HashMap<String, Entry>, now: Instant) {
+        let (idle, absolute) = (self.idle, self.absolute);
+        map.retain(|_, e| now.duration_since(e.last) < idle && now.duration_since(e.created) < absolute);
+    }
+}
+
+/// The cookie's value in a `Cookie` header, if there is exactly one cookie of our name.
+pub fn cookie_value(header: &str) -> Option<&str> {
+    let mut found = None;
+    for part in header.split(';') {
+        let part = part.trim();
+        if let Some(v) = part.strip_prefix(COOKIE).and_then(|r| r.strip_prefix('=')) {
+            if found.is_some() {
+                return None; // two cookies of this name: not believed
+            }
+            found = Some(v);
+        }
+    }
+    found.filter(|v| v.len() == 64 && v.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
+/// The `Set-Cookie` value that stores a sign-in (or, with an empty value, removes it).
+pub fn set_cookie(value: Option<&str>) -> String {
+    match value {
+        Some(v) => format!("{COOKIE}={v}; Path=/; Secure; HttpOnly; SameSite=Strict"),
+        None => format!("{COOKIE}=; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=0"),
+    }
+}
+
+/// Whether two tokens are equal, in time that does not depend on where they differ.
+pub fn same_token(a: &str, b: &str) -> bool {
+    use subtle::ConstantTimeEq as _;
+    a.len() == b.len() && a.as_bytes().ct_eq(b.as_bytes()).into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const IP: IpAddr = IpAddr::V4(std::net::Ipv4Addr::new(203, 0, 113, 9));
+
+    fn portal() -> Portal {
+        Portal::new(Duration::from_secs(1800), Duration::from_secs(8 * 3600), 4, 2)
+    }
+
+    #[test]
+    fn a_cookie_stands_for_the_account_that_signed_in() {
+        let p = portal();
+        let now = Instant::now();
+        let (id, signed) = p.sign_in("ana", IP, now).unwrap();
+        assert_eq!(id.len(), 64);
+        assert_eq!(p.get(&id, now).unwrap(), signed);
+        assert!(p.get(&"0".repeat(64), now).is_none(), "a value nobody was given");
+        p.sign_out(&id);
+        assert!(p.get(&id, now).is_none());
+    }
+
+    #[test]
+    fn idle_and_absolute_limits_end_a_sign_in() {
+        let p = portal();
+        let t0 = Instant::now();
+        let (id, _) = p.sign_in("ana", IP, t0).unwrap();
+        // Activity keeps it alive past the idle limit counted from the sign-in...
+        assert!(p.get(&id, t0 + Duration::from_secs(1500)).is_some());
+        assert!(p.get(&id, t0 + Duration::from_secs(3000)).is_some());
+        // ...but 30 minutes of silence ends it,
+        assert!(p.get(&id, t0 + Duration::from_secs(3000 + 1800)).is_none());
+        // and eight hours end it whatever the activity.
+        let (id, _) = p.sign_in("ana", IP, t0).unwrap();
+        let mut t = t0;
+        while t < t0 + Duration::from_secs(8 * 3600 - 600) {
+            t += Duration::from_secs(600);
+            assert!(p.get(&id, t).is_some());
+        }
+        assert!(p.get(&id, t0 + Duration::from_secs(8 * 3600)).is_none());
+    }
+
+    #[test]
+    fn an_account_keeps_its_newest_sign_ins_and_cannot_fill_the_table() {
+        let p = portal();
+        let t = Instant::now();
+        let (a, _) = p.sign_in("ana", IP, t).unwrap();
+        let (b, _) = p.sign_in("ana", IP, t + Duration::from_secs(1)).unwrap();
+        let (c, _) = p.sign_in("ana", IP, t + Duration::from_secs(2)).unwrap();
+        assert!(p.get(&a, t + Duration::from_secs(3)).is_none(), "the oldest of three goes");
+        assert!(p.get(&b, t + Duration::from_secs(3)).is_some());
+        assert!(p.get(&c, t + Duration::from_secs(3)).is_some());
+        // The table holds 4: two more accounts fill it, and a fifth sign-in is refused instead of throwing others out.
+        assert!(p.sign_in("bob", IP, t).is_some());
+        assert!(p.sign_in("eve", IP, t).is_some());
+        assert!(p.sign_in("zed", IP, t).is_none());
+        assert_eq!(p.count(), 4);
+    }
+
+    #[test]
+    fn the_cookie_header_is_read_strictly() {
+        let id = "ab".repeat(32);
+        assert_eq!(cookie_value(&format!("{COOKIE}={id}")), Some(id.as_str()));
+        assert_eq!(cookie_value(&format!("theme=dark; {COOKIE}={id}; other=1")), Some(id.as_str()));
+        assert_eq!(cookie_value(&format!("{COOKIE}={id}; {COOKIE}={id}")), None, "two of our cookie");
+        assert_eq!(cookie_value(&format!("{COOKIE}=short")), None);
+        assert_eq!(cookie_value(&format!("{COOKIE}={}", "zz".repeat(32))), None, "not hex");
+        assert_eq!(cookie_value(&format!("x{COOKIE}={id}")), None, "another name that ends with ours");
+        assert_eq!(cookie_value(""), None);
+    }
+
+    #[test]
+    fn the_cookie_is_set_with_every_protection() {
+        let c = set_cookie(Some("v"));
+        for part in ["__Host-waydesk=v", "Path=/", "Secure", "HttpOnly", "SameSite=Strict"] {
+            assert!(c.contains(part), "{c}");
+        }
+        assert!(!c.contains("Domain"), "a __Host- cookie must not name a domain");
+        assert!(set_cookie(None).contains("Max-Age=0"));
+    }
+
+    #[test]
+    fn tokens_are_compared_whole() {
+        assert!(same_token("abc", "abc"));
+        assert!(!same_token("abc", "abd"));
+        assert!(!same_token("abc", "abcd"));
+        assert!(!same_token("", "a"));
+    }
+
+    #[test]
+    fn the_helper_is_asked_with_its_own_protocol() {
+        use std::os::unix::net::UnixListener;
+        let dir = std::env::temp_dir().join(format!("waydesk-portal-helper-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("helper.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let server = std::thread::spawn(move || {
+            let mut seen = Vec::new();
+            for _ in 0..2 {
+                let (mut s, _) = listener.accept().unwrap();
+                let req = HelperReq::decode(&proto::read_frame(&mut s).unwrap().unwrap()).unwrap();
+                let answer = match &req {
+                    HelperReq::Authenticate { password, .. } if password == "right" => HelperResp::AuthOk,
+                    _ => HelperResp::AuthFail,
+                };
+                proto::write_frame(&mut s, &answer.encode()).unwrap();
+                seen.push(req);
+            }
+            seen
+        });
+        let auth = HelperAuth { socket: path.clone() };
+        assert_eq!(auth.check("ana", "right", "203.0.113.9"), Ok(true));
+        assert_eq!(auth.check("ana", "wrong", "203.0.113.9"), Ok(false));
+        let seen = server.join().unwrap();
+        assert_eq!(seen[0], HelperReq::Authenticate { user: "ana".into(), password: "right".into(), source: "203.0.113.9".into() });
+        assert!(HelperAuth { socket: dir.join("none.sock") }.check("ana", "x", "y").is_err(), "no helper there");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
