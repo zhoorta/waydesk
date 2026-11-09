@@ -20,3 +20,4 @@ button.quiet { background: #2c3140; }
 #screen { flex: 1; min-height: 0; }
 #session:fullscreen #bar { display: none; }
 iron-remote-desktop { display: block; width: 100%; height: 100%; }
+#screen canvas { display: block; width: 100%; height: 100%; object-fit: contain; background: #000; outline: none; touch-action: none; }

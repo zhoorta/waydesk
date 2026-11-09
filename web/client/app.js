@@ -1,10 +1,10 @@
 // The Waydesk web client: a login form, then the remote desktop in the page. The RDP login is made inside the connection by the client
 // (the page sends the password only into it); the gateway hands out a one-time token for starting the session.
-import { ConfigBuilder } from './iron-remote-desktop.js';
-import * as rdp from './iron-remote-desktop-rdp.js';
+import { Desk, supported as streamSupported } from './desk.js';
 
-const { Backend, init, enableCredssp } = rdp;
-
+// The desktop is the daemon's own browser stream (desk.js): H.264 to the browser's decoder, input back. `?rdp=1` uses the RDP client instead
+// (the IronRDP browser client, loaded only then), to compare the two or where the browser cannot decode H.264.
+const params = new URLSearchParams(location.search);
 const $ = (id) => document.getElementById(id);
 // Messages go to the card that is showing: the sign-in form, or "My desktop".
 const say = (text, error = false) => {
@@ -12,17 +12,29 @@ const say = (text, error = false) => {
   el.textContent = text;
   el.className = error ? 'error' : '';
 };
-
-await init('warn');
-// H.264 through the browser's own decoder, when this client build has it and the browser can decode it (?h264=0 turns it off, for comparing).
-let useH264 = typeof rdp.h264Supported === 'function' && new URLSearchParams(location.search).get('h264') !== '0' && (await rdp.h264Supported());
-document.documentElement.dataset.h264 = String(useH264);
-// Set when the browser's decoder gives up in a session (see the decoder's options below): the next connection does without H.264.
+let useStream = params.get('rdp') !== '1' && (await streamSupported()); // false too in a browser without a video decoder for H.264 (WebCodecs)
+let ConfigBuilder, rdp, Backend, init, enableCredssp;
+let useH264 = false;
 let decoderFailure = '';
+// Set when there is neither: the browser cannot decode the stream and this install has no RDP client to fall back on.
+let nothingToShow = false;
+if (!useStream) {
+  try {
+    ({ ConfigBuilder } = await import('./iron-remote-desktop.js'));
+    rdp = await import('./iron-remote-desktop-rdp.js');
+    ({ Backend, init, enableCredssp } = rdp);
+    await init('warn');
+    // H.264 through the browser's own decoder, when this client build has it and the browser can decode it (?h264=0 turns it off, for comparing).
+    useH264 = typeof rdp.h264Supported === 'function' && params.get('h264') !== '0' && (await rdp.h264Supported());
+    document.documentElement.dataset.h264 = String(useH264);
+  } catch {
+    nothingToShow = true;
+  }
+}
 $('go').disabled = false;
 $('go').textContent = 'Sign in';
 
-let current = null; // { el, ui }
+let current = null; // { el, ui } (RDP) or { el, desk } (stream)
 // Who is signed in (the server's cookie says it; the page keeps the CSRF token, and the password only until the desktop is open: the RDP login
 // inside the connection needs it, so the person is not asked twice).
 let me = null; // { account, csrf }
@@ -81,7 +93,7 @@ function end(message, isError = false) {
     decoderFailure = '';
   }
   if (current) {
-    try { current.ui.shutdown(); } catch { /* already gone */ }
+    try { if (current.ui) current.ui.shutdown(); else current.desk.detachInput(); } catch { /* already gone */ }
     current.el.remove();
     current = null;
   }
@@ -172,6 +184,28 @@ $('signout').addEventListener('click', async () => {
   say('Signed out.');
 });
 
+// The stream: the canvas is made first (it needs the page's size to ask for a desktop of that size), then the connection starts with the
+// password, which the daemon checks through the root helper.
+function openStream(pass) {
+  showSession(true);
+  const canvas = document.createElement('canvas');
+  $('screen').append(canvas);
+  const size = screenSize();
+  const desk = new Desk(canvas, {
+    ready: () => {
+      say('');
+      lastSize = `${size.width}x${size.height}@${size.scale}`;
+      sentSinceConnect = 2;
+      setTimeout(sendSize, 1000);
+    },
+    ended: (message, isError) => end(message, isError),
+  });
+  current = { el: canvas, desk };
+  heldPassword = '';
+  $('pass2').value = '';
+  desk.connect({ width: size.width, height: size.height, scale: size.scale, password: pass });
+}
+
 async function openDesktop() {
   const pass = heldPassword || $('pass2').value;
   if (!pass) {
@@ -179,8 +213,13 @@ async function openDesktop() {
     $('pass2').focus();
     return;
   }
+  if (nothingToShow) {
+    say('This browser cannot show the desktop (it has no H.264 video decoder). Use a current Chrome, Edge, Firefox or Safari.', true);
+    return;
+  }
   $('open').disabled = true;
   say('Connecting…');
+  if (useStream) return openStream(pass);
   const user = me.account;
   let el;
   try {
@@ -243,8 +282,8 @@ async function openDesktop() {
 }
 
 
-$('end').addEventListener('click', () => end('Disconnected.'));
-$('cad').addEventListener('click', () => current && current.ui.ctrlAltDel());
+$('end').addEventListener('click', () => (current && current.desk ? current.desk.disconnect() : end('Disconnected.')));
+$('cad').addEventListener('click', () => current && (current.desk ? current.desk.ctrlAltDel() : current.ui.ctrlAltDel()));
 $('fs').addEventListener('click', async () => {
   await $('session').requestFullscreen();
   // In fullscreen the browser lets a page take keys such as Alt+Tab and Ctrl+W (Chromium).
@@ -258,7 +297,7 @@ document.addEventListener('fullscreenchange', () => {
 // for the fit itself (1 is ScreenScale.Fit): at once when the window changes, and again after the server has made the new picture.
 const FIT = 1;
 function refit() {
-  try { if (current) current.ui.setScale(FIT); } catch { /* the session is going away */ }
+  try { if (current && current.ui) current.ui.setScale(FIT); } catch { /* the session is going away */ }
 }
 
 // Tells the server the size and scale of the page now, unless it is what the server was told last (each request makes the server set its screen up
@@ -276,7 +315,7 @@ function sendSize() {
   }
   lastSize = now;
   sentSinceConnect += 1;
-  try { current.ui.resize(width, height, scale); } catch { /* the session is going away */ }
+  try { if (current.desk) current.desk.resize(width, height, scale); else current.ui.resize(width, height, scale); } catch { /* the session is going away */ }
   for (const ms of [500, 1500]) setTimeout(refit, ms);
 }
 

@@ -19,6 +19,16 @@ password and the code", and takes as long (about 4 s) whatever was wrong, so the
 Until the browser stream replaces RDP in the page, the RDP login inside the connection asks for the password again: the page keeps it in its memory
 from the sign-in to the connection so that the person types it once.
 
+## The browser stream (the desktop without RDP)
+
+The page shows the desktop from the daemon's own browser stream (`src/webstream.rs`, `client/desk.js`): H.264 pictures go to the browser's decoder
+(WebCodecs) and onto a canvas, and keys, mouse and the window size go back as small messages. The gateway only bridges them: `/stream` is a WebSocket
+for a signed-in browser (the account is the cookie's, the `Origin` has to be this site's, and the cookie is `SameSite=Strict`), passed on to the
+daemon's **gateway port** with the line `WAYDESK-STREAM 1 KEY ACCOUNT IP`. It needs `--gateway-key FILE` here and `--gateway-bind 127.0.0.1:3390
+--gateway-key FILE` on the daemon (`--target 127.0.0.1:3390` here), and the daemon with `--auth helper`. The password is sent in the first message
+and checked by the daemon through the root helper (same lockout as RDP). `?rdp=1` loads the IronRDP client instead, for comparing; a browser without
+an H.264 decoder falls back to it when this install has it.
+
 ## Safe as shipped
 
 - Listens on `127.0.0.1:8443` only: reach it with `ssh -N -L 8443:127.0.0.1:8443 ACCOUNT@SERVER` and open `https://localhost:8443/`.
