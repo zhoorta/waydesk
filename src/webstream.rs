@@ -557,6 +557,11 @@ where
                     Event::Resized(w, h) => {
                         size = (w, h);
                         write_message(wr, &ToBrowser::Resized { width: w, height: h }).await?;
+                        // A resize starts the session again from zero credits (the frames in flight died with the old size) and nothing else grants
+                        // new ones: without this a picture that then stays still is never sent. The browser starts its decoder again too, so what
+                        // it was sent before is no longer owed an acknowledgement.
+                        sent_unacked = 0;
+                        link.send(Down::Credit { frames: WINDOW });
                         link.send(Down::RequestFull);
                     }
                     Event::Cursor(name) => write_message(wr, &ToBrowser::Cursor(name)).await?,

@@ -54,7 +54,7 @@ export class Desk {
     this.pressed = new Set();
     this.buttons = new Set();
     this.pending = null; // the latest pointer position, sent once per animation frame
-    this.stats = { frames: 0, bytes: 0, decodeMs: 0 };
+    this.stats = { frames: 0, bytes: 0, received: 0, keys: 0, dropped: 0, resets: 0 };
     this.listeners = [];
   }
 
@@ -74,6 +74,7 @@ export class Desk {
   }
 
   message(m) {
+    if (m[0] === 3) { this.stats.received += 1; if (m[1] === 1) this.stats.keys += 1; }
     switch (m[0]) {
       case 1: // Ready
         this.ready = true;
@@ -109,6 +110,7 @@ export class Desk {
   }
 
   resetDecoder() {
+    this.stats.resets += 1;
     if (this.decoder && this.decoder.state !== 'closed') { try { this.decoder.close(); } catch { /* gone */ } }
     this.decoder = null;
     this.codec = '';
@@ -141,6 +143,7 @@ export class Desk {
       if (this.decoder) this.needKey = false;
     }
     if (!this.decoder || this.needKey) {
+      this.stats.dropped += 1;
       this.send([7, 1, 0]); // nothing to show yet; give the credit back so the daemon keeps sending
       return;
     }
