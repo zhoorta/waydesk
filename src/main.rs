@@ -44,6 +44,7 @@ mod sessionclip;
 mod sessionfiles;
 mod spawn;
 mod tcpinfo;
+mod tickets;
 #[cfg(feature = "vaapi")]
 mod vpp;
 mod webstream;
@@ -855,7 +856,7 @@ async fn gateway_loop(listener: tokio::net::TcpListener, common: Arc<Common>, pe
             let mut stream = stream;
             match read_gateway_line(&mut stream, &key).await {
                 Ok(a) if a.stream => match common.helper_socket.clone() {
-                    Some(helper) => webstream::serve(stream, a.ip, a.account, helper).await,
+                    Some(helper) => webstream::serve(stream, a.ip, a.account, a.ticket.unwrap_or_default(), helper).await,
                     None => warn!(%peer, "browser stream refused: it needs the root helper (--auth helper)"),
                 },
                 Ok(a) => serve(stream, std::net::SocketAddr::new(a.ip, 0), common, None, Some(a.account)).await,

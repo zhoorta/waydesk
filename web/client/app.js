@@ -76,8 +76,10 @@ function show(view) {
   $('session').hidden = view !== 'session';
   if (view === 'desk') {
     $('who').textContent = 'Signed in as ' + me.account + '.';
-    $('askpass').hidden = heldPassword !== '';
-    $((heldPassword ? 'open' : 'pass2')).focus();
+    // The stream needs no password: the server holds a ticket for this sign-in. Only the RDP fallback asks for it.
+    const askPassword = !useStream && heldPassword === '';
+    $('askpass').hidden = !askPassword;
+    $(askPassword ? 'pass2' : 'open').focus();
   }
   if (view === 'login') $('user').focus();
 }
@@ -156,7 +158,7 @@ $('form').addEventListener('submit', async (e) => {
   say('Signing in…');
   try {
     me = await signIn($('user').value.trim(), $('pass').value, $('code').value.replace(/\s+/g, ''));
-    heldPassword = $('pass').value;
+    heldPassword = useStream ? '' : $('pass').value;
     $('pass').value = '';
     $('code').value = '';
     say('');
@@ -184,9 +186,9 @@ $('signout').addEventListener('click', async () => {
   say('Signed out.');
 });
 
-// The stream: the canvas is made first (it needs the page's size to ask for a desktop of that size), then the connection starts with the
-// password, which the daemon checks through the root helper.
-function openStream(pass) {
+// The stream: the canvas is made first (it needs the page's size to ask for a desktop of that size), then the connection starts; the server
+// logs it in with the ticket of this sign-in, so no password is typed or sent again.
+function openStream() {
   showSession(true);
   const canvas = document.createElement('canvas');
   $('screen').append(canvas);
@@ -204,12 +206,12 @@ function openStream(pass) {
   if (params.get('debug') === '1') globalThis.__desk = desk; // for looking at the decoder's numbers in the console
   heldPassword = '';
   $('pass2').value = '';
-  desk.connect({ width: size.width, height: size.height, scale: size.scale, password: pass });
+  desk.connect({ width: size.width, height: size.height, scale: size.scale });
 }
 
 async function openDesktop() {
   const pass = heldPassword || $('pass2').value;
-  if (!pass) {
+  if (!pass && !useStream) {
     $('askpass').hidden = false;
     $('pass2').focus();
     return;
@@ -220,7 +222,7 @@ async function openDesktop() {
   }
   $('open').disabled = true;
   say('Connecting…');
-  if (useStream) return openStream(pass);
+  if (useStream) return openStream();
   const user = me.account;
   let el;
   try {

@@ -506,6 +506,12 @@ pub enum HelperReq {
     /// the session socket as a file descriptor (see `fdpass`). Nothing else is asked for: what runs, with which
     /// arguments, is the helper's own configuration, never the daemon's.
     StartSession,
+    /// A ticket for the account that authenticated on this connection (see `tickets.rs`).
+    IssueTicket,
+    /// Log in as `user`, the account of a ticket (made for this `source`), instead of with a password.
+    Redeem { ticket: String, user: String, source: String },
+    /// The ticket is no longer wanted.
+    RevokeTicket { ticket: String },
     Bye,
 }
 
@@ -519,6 +525,7 @@ pub enum HelperResp {
     Error { message: String },
     /// The machine will not take a new session now; `reason` is one of the `REFUSED_*` values, `message` is for the log.
     Refused { reason: u8, message: String },
+    Ticket { ticket: String },
 }
 
 /// Why a new session was refused (`HelperResp::Refused`).
@@ -536,6 +543,17 @@ impl HelperReq {
                 o.str(source);
             }
             HelperReq::StartSession => o.u8(2),
+            HelperReq::IssueTicket => o.u8(3),
+            HelperReq::Redeem { ticket, user, source } => {
+                o.u8(4);
+                o.str(ticket);
+                o.str(user);
+                o.str(source);
+            }
+            HelperReq::RevokeTicket { ticket } => {
+                o.u8(5);
+                o.str(ticket);
+            }
             HelperReq::Bye => o.u8(255),
         }
         o.0
@@ -546,6 +564,9 @@ impl HelperReq {
         let msg = match i.u8()? {
             1 => HelperReq::Authenticate { user: i.str()?, password: i.str()?, source: i.str()? },
             2 => HelperReq::StartSession,
+            3 => HelperReq::IssueTicket,
+            4 => HelperReq::Redeem { ticket: i.str()?, user: i.str()?, source: i.str()? },
+            5 => HelperReq::RevokeTicket { ticket: i.str()? },
             255 => HelperReq::Bye,
             t => return Err(ProtoError::UnknownTag(t)),
         };
@@ -571,6 +592,10 @@ impl HelperResp {
                 o.u8(*reason);
                 o.str(&message.chars().take(200).collect::<String>());
             }
+            HelperResp::Ticket { ticket } => {
+                o.u8(6);
+                o.str(ticket);
+            }
         }
         o.0
     }
@@ -583,6 +608,7 @@ impl HelperResp {
             3 => HelperResp::Started,
             4 => HelperResp::Error { message: i.str()? },
             5 => HelperResp::Refused { reason: i.u8()?, message: i.str()? },
+            6 => HelperResp::Ticket { ticket: i.str()? },
             t => return Err(ProtoError::UnknownTag(t)),
         };
         i.finish()?;
@@ -773,6 +799,9 @@ mod tests {
         let reqs = [
             HelperReq::Authenticate { user: "alice".into(), password: "pä ss".into(), source: "10.0.0.1".into() },
             HelperReq::StartSession,
+            HelperReq::IssueTicket,
+            HelperReq::Redeem { ticket: "ab".repeat(32), user: "alice".into(), source: "10.0.0.1".into() },
+            HelperReq::RevokeTicket { ticket: "ab".repeat(32) },
             HelperReq::Bye,
         ];
         for r in reqs {
@@ -782,7 +811,7 @@ mod tests {
                 assert!(HelperReq::decode(&b[..cut]).is_err());
             }
         }
-        for r in [HelperResp::AuthOk, HelperResp::AuthFail, HelperResp::Started, HelperResp::Error { message: "no".into() }, HelperResp::Refused { reason: REFUSED_MEMORY, message: "full".into() }] {
+        for r in [HelperResp::AuthOk, HelperResp::AuthFail, HelperResp::Started, HelperResp::Error { message: "no".into() }, HelperResp::Refused { reason: REFUSED_MEMORY, message: "full".into() }, HelperResp::Ticket { ticket: "cd".repeat(32) }] {
             assert_eq!(HelperResp::decode(&r.encode()).unwrap(), r);
         }
         // a string longer than allowed

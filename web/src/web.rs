@@ -237,10 +237,10 @@ async fn login(State(app): State<Arc<App>>, Extension(ClientAddr(peer)): Extensi
     let source = ip.to_string();
     let auth = app.auth.clone();
     let (acct, pw, src) = (account.clone(), req.password, source);
-    let checked = tokio::task::spawn_blocking(move || auth.check(&acct, &pw, &src)).await;
-    match checked {
-        Ok(Ok(true)) => {}
-        Ok(Ok(false)) => {
+    let checked = tokio::task::spawn_blocking(move || auth.login(&acct, &pw, &src)).await;
+    let ticket = match checked {
+        Ok(Ok(Some(t))) => t,
+        Ok(Ok(None)) => {
             warn!(%ip, account, "sign-in refused: wrong password");
             return refused();
         }
@@ -249,13 +249,17 @@ async fn login(State(app): State<Arc<App>>, Extension(ClientAddr(peer)): Extensi
             return text(StatusCode::SERVICE_UNAVAILABLE, "cannot check passwords now\n");
         }
         Err(_) => return text(StatusCode::SERVICE_UNAVAILABLE, "cannot check passwords now\n"),
-    }
+    };
     if let Some(why) = second_factor(&app, ip, &account, &req.code, now) {
         warn!(%ip, account, "sign-in refused: {why}");
+        revoke(&app, ticket);
         tokio::time::sleep(app.cfg.fail_delay).await;
         return refused();
     }
-    let Some((id, signed)) = app.portal.sign_in(&account, ip, Instant::now()) else { return text(StatusCode::SERVICE_UNAVAILABLE, "busy\n") };
+    let Some((id, signed)) = app.portal.sign_in(&account, ip, ticket.clone(), Instant::now()) else {
+        revoke(&app, ticket);
+        return text(StatusCode::SERVICE_UNAVAILABLE, "busy\n");
+    };
     info!(%ip, account, "signed in");
     let mut res = json(StatusCode::OK, signed_json(&signed));
     if let Ok(v) = HeaderValue::from_str(&portal::set_cookie(Some(&id))) {
@@ -300,12 +304,20 @@ async fn me(State(app): State<Arc<App>>, headers: HeaderMap) -> Response {
     }
 }
 
+/// Tells the helper that a ticket is no longer wanted (in the background: the helper is a local socket, but a slow one must not hold a request).
+fn revoke(app: &Arc<App>, ticket: String) {
+    let auth = app.auth.clone();
+    tokio::task::spawn_blocking(move || auth.revoke(&ticket));
+}
+
 async fn logout(State(app): State<Arc<App>>, Extension(PublicHost(host)): Extension<PublicHost>, headers: HeaderMap) -> Response {
     let (id, signed) = match changing(&app, &headers, &host) {
         Ok(v) => v,
         Err(r) => return r,
     };
-    app.portal.sign_out(&id);
+    if let Some(ticket) = app.portal.sign_out(&id) {
+        revoke(&app, ticket);
+    }
     info!(account = signed.account, "signed out");
     let mut res = json(StatusCode::OK, "{}\n".into());
     if let Ok(v) = HeaderValue::from_str(&portal::set_cookie(None)) {
@@ -356,7 +368,8 @@ async fn stream_handler(State(app): State<Arc<App>>, Extension(ClientAddr(peer))
     if !origin_ok(&headers, &host, app.cfg.public_origin.as_deref()) {
         return text(StatusCode::FORBIDDEN, "wrong origin\n");
     }
-    let Some((_, signed)) = signed_in(&app, &headers) else { return text(StatusCode::UNAUTHORIZED, "not signed in\n") };
+    let Some((id, signed)) = signed_in(&app, &headers) else { return text(StatusCode::UNAUTHORIZED, "not signed in\n") };
+    let Some(ticket) = app.portal.ticket(&id) else { return text(StatusCode::UNAUTHORIZED, "not signed in\n") };
     if app.cfg.gateway_key.is_none() {
         return text(StatusCode::SERVICE_UNAVAILABLE, "the browser stream needs --gateway-key\n");
     }
@@ -370,7 +383,7 @@ async fn stream_handler(State(app): State<Arc<App>>, Extension(ClientAddr(peer))
         Err(Refusal::Total) => return text(StatusCode::SERVICE_UNAVAILABLE, "the server is full\n"),
     };
     info!(%ip, account = signed.account, active = app.sessions.active(), "stream requested");
-    ws.max_message_size(crate::stream::MAX_CLIPBOARD_FROM_BROWSER).max_frame_size(crate::stream::MAX_CLIPBOARD_FROM_BROWSER).on_upgrade(move |socket| crate::stream::run(socket, ip, signed.account, app, guard))
+    ws.max_message_size(crate::stream::MAX_CLIPBOARD_FROM_BROWSER).max_frame_size(crate::stream::MAX_CLIPBOARD_FROM_BROWSER).on_upgrade(move |socket| crate::stream::run(socket, ip, signed.account, ticket, app, guard))
 }
 
 /// `root` joined with a path from a URL, only if it stays inside `root` and names no hidden file.

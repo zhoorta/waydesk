@@ -27,6 +27,15 @@ pub const CSRF_HEADER: &str = "x-csrf-token";
 pub trait Authenticator: Send + Sync {
     /// `Ok(true)`: the password is right. `Ok(false)`: it is not (or the account may not log in). `Err`: the check could not be made.
     fn check(&self, account: &str, password: &str, source: &str) -> Result<bool, String>;
+
+    /// Like `check`; when the password is right, the helper's ticket for this sign-in, which the portal keeps instead of the password and the daemon
+    /// redeems when the browser opens a stream. (The default is for stand-ins that have no helper: a ticket of zeros.)
+    fn login(&self, account: &str, password: &str, source: &str) -> Result<Option<String>, String> {
+        Ok(self.check(account, password, source)?.then(|| "0".repeat(64)))
+    }
+
+    /// The ticket is no longer wanted (the person signed out).
+    fn revoke(&self, _ticket: &str) {}
 }
 
 /// The root helper of the daemon (`waydesk-server --helper`). Its socket opens only for the daemon's account, so the portal runs as that account.
@@ -34,24 +43,57 @@ pub struct HelperAuth {
     pub socket: PathBuf,
 }
 
-impl Authenticator for HelperAuth {
-    fn check(&self, account: &str, password: &str, source: &str) -> Result<bool, String> {
-        let mut sock = UnixStream::connect(&self.socket).map_err(|e| format!("cannot reach the helper at {}: {e}", self.socket.display()))?;
+impl HelperAuth {
+    fn connect(&self) -> Result<UnixStream, String> {
+        let sock = UnixStream::connect(&self.socket).map_err(|e| format!("cannot reach the helper at {}: {e}", self.socket.display()))?;
         // A failed login takes the helper a few seconds on purpose; anything longer than that is a helper that does not answer.
         let limit = Some(Duration::from_secs(30));
         let _ = sock.set_read_timeout(limit);
         let _ = sock.set_write_timeout(limit);
+        Ok(sock)
+    }
+
+    fn ask(sock: &mut UnixStream, req: &HelperReq) -> Result<HelperResp, String> {
+        proto::write_frame(sock, &req.encode()).map_err(|e| e.to_string())?;
+        let body = proto::read_frame(sock).map_err(|e| e.to_string())?.ok_or("the helper closed the connection")?;
+        HelperResp::decode(&body).map_err(|e| e.to_string())
+    }
+
+    /// The password check, and with `want_ticket` the ticket on the same connection (the ticket is the helper's proof of this very login).
+    fn run(&self, account: &str, password: &str, source: &str, want_ticket: bool) -> Result<Option<String>, String> {
+        let mut sock = self.connect()?;
         let req = HelperReq::Authenticate { user: account.to_owned(), password: password.to_owned(), source: source.to_owned() };
-        proto::write_frame(&mut sock, &req.encode()).map_err(|e| e.to_string())?;
-        let body = proto::read_frame(&mut sock).map_err(|e| e.to_string())?.ok_or("the helper closed the connection")?;
-        let answer = HelperResp::decode(&body).map_err(|e| e.to_string())?;
-        // One login per connection: say goodbye so that the helper does not wait for more.
-        let _ = proto::write_frame(&mut sock, &HelperReq::Bye.encode());
-        match answer {
-            HelperResp::AuthOk => Ok(true),
-            HelperResp::AuthFail => Ok(false),
+        let answer = Self::ask(&mut sock, &req)?;
+        let result = match answer {
+            HelperResp::AuthOk if want_ticket => match Self::ask(&mut sock, &HelperReq::IssueTicket)? {
+                HelperResp::Ticket { ticket } => Ok(Some(ticket)),
+                HelperResp::Error { message } => Err(format!("helper: {message}")),
+                other => Err(format!("unexpected answer to a ticket request: {other:?}")),
+            },
+            HelperResp::AuthOk => Ok(Some(String::new())),
+            HelperResp::AuthFail => Ok(None),
             HelperResp::Error { message } => Err(format!("helper: {message}")),
             other => Err(format!("unexpected answer to a login: {other:?}")),
+        };
+        // One login per connection: say goodbye so that the helper does not wait for more.
+        let _ = proto::write_frame(&mut sock, &HelperReq::Bye.encode());
+        result
+    }
+}
+
+impl Authenticator for HelperAuth {
+    fn check(&self, account: &str, password: &str, source: &str) -> Result<bool, String> {
+        Ok(self.run(account, password, source, false)?.is_some())
+    }
+
+    fn login(&self, account: &str, password: &str, source: &str) -> Result<Option<String>, String> {
+        self.run(account, password, source, true)
+    }
+
+    fn revoke(&self, ticket: &str) {
+        if let Ok(mut sock) = self.connect() {
+            let _ = Self::ask(&mut sock, &HelperReq::RevokeTicket { ticket: ticket.to_owned() });
+            let _ = proto::write_frame(&mut sock, &HelperReq::Bye.encode());
         }
     }
 }
@@ -66,6 +108,8 @@ pub struct Signed {
 
 struct Entry {
     signed: Signed,
+    /// The helper's ticket for this sign-in; it stays here, never in the cookie or the page.
+    ticket: String,
     created: Instant,
     last: Instant,
 }
@@ -93,7 +137,7 @@ impl Portal {
     }
 
     /// The value of the cookie.
-    pub fn sign_in(&self, account: &str, ip: IpAddr, now: Instant) -> Option<(String, Signed)> {
+    pub fn sign_in(&self, account: &str, ip: IpAddr, ticket: String, now: Instant) -> Option<(String, Signed)> {
         let id = random_hex(32)?;
         let signed = Signed { account: account.to_owned(), ip, csrf: random_hex(16)? };
         let mut map = self.entries.lock().unwrap_or_else(|e| e.into_inner());
@@ -109,7 +153,7 @@ impl Portal {
         if map.len() >= self.max {
             return None;
         }
-        map.insert(id.clone(), Entry { signed: signed.clone(), created: now, last: now });
+        map.insert(id.clone(), Entry { signed: signed.clone(), ticket, created: now, last: now });
         Some((id, signed))
     }
 
@@ -125,8 +169,14 @@ impl Portal {
         Some(e.signed.clone())
     }
 
-    pub fn sign_out(&self, id: &str) {
-        self.entries.lock().unwrap_or_else(|e| e.into_inner()).remove(id);
+    /// Ends the sign-in; its ticket, to be revoked at the helper.
+    pub fn sign_out(&self, id: &str) -> Option<String> {
+        self.entries.lock().unwrap_or_else(|e| e.into_inner()).remove(id).map(|e| e.ticket)
+    }
+
+    /// The helper's ticket of a live sign-in.
+    pub fn ticket(&self, id: &str) -> Option<String> {
+        self.entries.lock().unwrap_or_else(|e| e.into_inner()).get(id).map(|e| e.ticket.clone())
     }
 
     pub fn count(&self) -> usize {
@@ -182,11 +232,11 @@ mod tests {
     fn a_cookie_stands_for_the_account_that_signed_in() {
         let p = portal();
         let now = Instant::now();
-        let (id, signed) = p.sign_in("ana", IP, now).unwrap();
+        let (id, signed) = p.sign_in("ana", IP, String::new(), now).unwrap();
         assert_eq!(id.len(), 64);
         assert_eq!(p.get(&id, now).unwrap(), signed);
         assert!(p.get(&"0".repeat(64), now).is_none(), "a value nobody was given");
-        p.sign_out(&id);
+        assert_eq!(p.sign_out(&id), Some(String::new()));
         assert!(p.get(&id, now).is_none());
     }
 
@@ -194,14 +244,14 @@ mod tests {
     fn idle_and_absolute_limits_end_a_sign_in() {
         let p = portal();
         let t0 = Instant::now();
-        let (id, _) = p.sign_in("ana", IP, t0).unwrap();
+        let (id, _) = p.sign_in("ana", IP, String::new(), t0).unwrap();
         // Activity keeps it alive past the idle limit counted from the sign-in...
         assert!(p.get(&id, t0 + Duration::from_secs(1500)).is_some());
         assert!(p.get(&id, t0 + Duration::from_secs(3000)).is_some());
         // ...but 30 minutes of silence ends it,
         assert!(p.get(&id, t0 + Duration::from_secs(3000 + 1800)).is_none());
         // and eight hours end it whatever the activity.
-        let (id, _) = p.sign_in("ana", IP, t0).unwrap();
+        let (id, _) = p.sign_in("ana", IP, String::new(), t0).unwrap();
         let mut t = t0;
         while t < t0 + Duration::from_secs(8 * 3600 - 600) {
             t += Duration::from_secs(600);
@@ -214,16 +264,16 @@ mod tests {
     fn an_account_keeps_its_newest_sign_ins_and_cannot_fill_the_table() {
         let p = portal();
         let t = Instant::now();
-        let (a, _) = p.sign_in("ana", IP, t).unwrap();
-        let (b, _) = p.sign_in("ana", IP, t + Duration::from_secs(1)).unwrap();
-        let (c, _) = p.sign_in("ana", IP, t + Duration::from_secs(2)).unwrap();
+        let (a, _) = p.sign_in("ana", IP, String::new(), t).unwrap();
+        let (b, _) = p.sign_in("ana", IP, String::new(), t + Duration::from_secs(1)).unwrap();
+        let (c, _) = p.sign_in("ana", IP, String::new(), t + Duration::from_secs(2)).unwrap();
         assert!(p.get(&a, t + Duration::from_secs(3)).is_none(), "the oldest of three goes");
         assert!(p.get(&b, t + Duration::from_secs(3)).is_some());
         assert!(p.get(&c, t + Duration::from_secs(3)).is_some());
         // The table holds 4: two more accounts fill it, and a fifth sign-in is refused instead of throwing others out.
-        assert!(p.sign_in("bob", IP, t).is_some());
-        assert!(p.sign_in("eve", IP, t).is_some());
-        assert!(p.sign_in("zed", IP, t).is_none());
+        assert!(p.sign_in("bob", IP, String::new(), t).is_some());
+        assert!(p.sign_in("eve", IP, String::new(), t).is_some());
+        assert!(p.sign_in("zed", IP, String::new(), t).is_none());
         assert_eq!(p.count(), 4);
     }
 
@@ -255,6 +305,56 @@ mod tests {
         assert!(!same_token("abc", "abd"));
         assert!(!same_token("abc", "abcd"));
         assert!(!same_token("", "a"));
+    }
+
+    #[test]
+    fn a_login_gets_a_ticket_on_the_connection_of_its_password_check_and_only_then() {
+        use std::os::unix::net::UnixListener;
+        let dir = std::env::temp_dir().join(format!("waydesk-portal-ticket-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("helper.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let server = std::thread::spawn(move || {
+            let mut seen = Vec::new();
+            for _ in 0..3 {
+                let (mut s, _) = listener.accept().unwrap();
+                loop {
+                    let Some(body) = proto::read_frame(&mut s).unwrap() else { break };
+                    let req = HelperReq::decode(&body).unwrap();
+                    let answer = match &req {
+                        HelperReq::Authenticate { password, .. } if password == "right" => HelperResp::AuthOk,
+                        HelperReq::Authenticate { .. } => HelperResp::AuthFail,
+                        HelperReq::IssueTicket => HelperResp::Ticket { ticket: "ab".repeat(32) },
+                        HelperReq::RevokeTicket { .. } => HelperResp::AuthOk,
+                        _ => break,
+                    };
+                    seen.push(req);
+                    proto::write_frame(&mut s, &answer.encode()).unwrap();
+                }
+            }
+            seen
+        });
+        let auth = HelperAuth { socket: path.clone() };
+        assert_eq!(auth.login("ana", "right", "203.0.113.9"), Ok(Some("ab".repeat(32))));
+        assert_eq!(auth.login("ana", "wrong", "203.0.113.9"), Ok(None), "no ticket for a wrong password");
+        auth.revoke(&"ab".repeat(32));
+        let seen = server.join().unwrap();
+        assert_eq!(seen.len(), 4);
+        assert_eq!(seen[1], HelperReq::IssueTicket, "asked on the connection that checked the password");
+        assert_eq!(seen[3], HelperReq::RevokeTicket { ticket: "ab".repeat(32) });
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_ticket_stays_in_the_portal() {
+        let p = portal();
+        let (id, signed) = p.sign_in("ana", IP, "t".repeat(64), Instant::now()).unwrap();
+        assert_eq!(p.ticket(&id), Some("t".repeat(64)));
+        assert!(!format!("{signed:?}").contains("tttt"), "what the browser is given has no ticket");
+        assert!(p.ticket(&"0".repeat(64)).is_none());
+        assert_eq!(p.sign_out(&id), Some("t".repeat(64)), "sign-out hands it back to be revoked");
+        assert!(p.ticket(&id).is_none());
     }
 
     #[test]

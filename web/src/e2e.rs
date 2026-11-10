@@ -707,7 +707,7 @@ async fn a_signed_in_browser_streams_through_to_the_daemon_as_its_account() {
         }
     }
     // The daemon is told the account of the cookie and the client's address, with the key.
-    assert_eq!(env.preambles.lock().unwrap().as_slice(), ["WAYDESK-STREAM 1 a-long-enough-gateway-key ana 127.0.0.1"]);
+    assert_eq!(env.preambles.lock().unwrap().as_slice(), ["WAYDESK-STREAM 1 a-long-enough-gateway-key ana 127.0.0.1 0000000000000000000000000000000000000000000000000000000000000000"]);
 }
 
 #[tokio::test]

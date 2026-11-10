@@ -2,9 +2,9 @@
 // (WebCodecs); keys, mouse and the window size go back as small messages. No dependencies.
 //
 // Messages are binary WebSocket messages, little endian, first byte the tag.
-//   browser -> daemon: 1 Start(w16 h16 scale16 password) 2 Resize(w16 h16 scale16) 3 Key(code, down) 4 Move(x32 y32) 5 Button(n, down)
+//   browser -> daemon: 1 Start(w16 h16 scale16) 2 Resize(w16 h16 scale16) 3 Key(code, down) 4 Move(x32 y32) 5 Button(n, down)
 //                      6 Wheel(f32 f32) 7 Ack(n16) 8 RequestFull 9 Clipboard(UTF-8 text, the rest) 255 Bye        (strings: u16 length + UTF-8)
-//   daemon -> browser: 1 Ready(w16 h16) 2 Resized(w16 h16) 3 Frame(key8 ts32 annexb...) 4 Cursor(name) 5 Error(code8 text) 6 Clipboard(UTF-8 text)
+//   daemon -> browser: 1 Ready(w16 h16) 2 Resized(w16 h16) 3 Frame(key8 ts32 annexb...) 4 Cursor(name) 5 Error(code8 text) 6 Clipboard(UTF-8 text) 7 CursorImage(hotx16 hoty16 w16 h16 BGRA premultiplied)
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();
@@ -60,12 +60,12 @@ export class Desk {
     this.hold = null; // while the clipboard is read for a paste, the keys wait behind it
   }
 
-  connect({ width, height, scale, password }) {
+  connect({ width, height, scale }) {
     const url = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/stream';
     const ws = new WebSocket(url);
     ws.binaryType = 'arraybuffer';
     this.ws = ws;
-    ws.onopen = () => this.send([1, ...u16(width), ...u16(height), ...u16(scale), ...str(password)]);
+    ws.onopen = () => this.send([1, ...u16(width), ...u16(height), ...u16(scale)]);
     ws.onmessage = (e) => this.message(new Uint8Array(e.data));
     ws.onclose = () => this.end(this.ready ? 'Session ended.' : 'Could not connect.', !this.ready);
     ws.onerror = () => {};
@@ -96,6 +96,9 @@ export class Desk {
         this.canvas.style.cursor = CURSOR.test(name) ? (name === 'default' ? 'default' : name) : 'default';
         break;
       }
+      case 7: // CursorImage: a pointer an application drew itself
+        this.cursorImage(m);
+        break;
       case 6: { // Clipboard: the desktop copied text
         const text = dec.decode(m.subarray(1));
         this.clip = text;
@@ -108,6 +111,25 @@ export class Desk {
       default:
         break;
     }
+  }
+
+  cursorImage(m) {
+    const hx = m[1] | (m[2] << 8), hy = m[3] | (m[4] << 8), w = m[5] | (m[6] << 8), h = m[7] | (m[8] << 8);
+    const px = m.subarray(9);
+    if (w < 1 || h < 1 || w > 32 || h > 32 || px.length !== w * h * 4) { this.canvas.style.cursor = 'default'; return; }
+    // BGRA premultiplied -> RGBA straight, for ImageData
+    const out = new Uint8ClampedArray(w * h * 4);
+    for (let i = 0; i < out.length; i += 4) {
+      const a = px[i + 3];
+      const un = (c) => (a === 255 ? c : a === 0 ? 0 : Math.min(255, Math.round((c * 255) / a)));
+      out[i] = un(px[i + 2]); out[i + 1] = un(px[i + 1]); out[i + 2] = un(px[i]); out[i + 3] = a;
+    }
+    try {
+      const c = document.createElement('canvas');
+      c.width = w; c.height = h;
+      c.getContext('2d').putImageData(new ImageData(out, w, h), 0, 0);
+      this.canvas.style.cursor = `url(${c.toDataURL('image/png')}) ${Math.min(hx, w - 1)} ${Math.min(hy, h - 1)}, default`;
+    } catch { this.canvas.style.cursor = 'default'; }
   }
 
   size(w, h) {

@@ -56,6 +56,17 @@ impl HelperConn {
         }
     }
 
+    /// Logs in with a ticket the portal got for this address; `false` when it is not good (any more).
+    pub fn redeem(&self, ticket: &str, user: &str, source: &str) -> Result<bool> {
+        let mut sock = self.sock.lock().unwrap();
+        match self.call(&mut sock, &HelperReq::Redeem { ticket: ticket.to_owned(), user: user.to_owned(), source: source.to_owned() })? {
+            HelperResp::AuthOk => Ok(true),
+            HelperResp::AuthFail => Ok(false),
+            HelperResp::Error { message } => bail!("helper: {message}"),
+            other => bail!("unexpected answer to a ticket: {other:?}"),
+        }
+    }
+
     /// Starts the session of the account that logged in on this connection; returns our end of its socket.
     pub fn start_session(&self) -> Result<UnixStream> {
         let mut sock = self.sock.lock().unwrap();

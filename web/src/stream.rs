@@ -27,16 +27,16 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const PING_EVERY: Duration = Duration::from_secs(30);
 const SILENCE_LIMIT: Duration = Duration::from_secs(120);
 
-pub async fn run(mut ws: WebSocket, ip: IpAddr, account: String, app: Arc<App>, _guard: SessionGuard) {
+pub async fn run(mut ws: WebSocket, ip: IpAddr, account: String, ticket: String, app: Arc<App>, _guard: SessionGuard) {
     let started = Instant::now();
-    match session(&mut ws, ip, &account, &app).await {
+    match session(&mut ws, ip, &account, &ticket, &app).await {
         Ok((from_browser, to_browser)) => info!(%ip, account, seconds = started.elapsed().as_secs(), from_browser, to_browser, "stream ended"),
         Err(e) => info!(%ip, account, seconds = started.elapsed().as_secs(), "stream ended: {e}"),
     }
     let _ = ws.send(Message::Close(None)).await;
 }
 
-async fn session(ws: &mut WebSocket, ip: IpAddr, account: &str, app: &App) -> Result<(u64, u64), String> {
+async fn session(ws: &mut WebSocket, ip: IpAddr, account: &str, ticket: &str, app: &App) -> Result<(u64, u64), String> {
     let Some(key) = &app.cfg.gateway_key else { return Err("no gateway key".into()) };
     let tcp = match tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(&app.cfg.target)).await {
         Ok(Ok(s)) => s,
@@ -44,7 +44,7 @@ async fn session(ws: &mut WebSocket, ip: IpAddr, account: &str, app: &App) -> Re
     };
     let _ = tcp.set_nodelay(true);
     let (mut rd, mut wr) = tcp.into_split();
-    wr.write_all(crate::daemon_gateway::stream_line(key, account, ip).as_bytes()).await.map_err(|e| format!("cannot talk to the daemon: {e}"))?;
+    wr.write_all(crate::daemon_gateway::stream_line(key, account, ip, ticket).as_bytes()).await.map_err(|e| format!("cannot talk to the daemon: {e}"))?;
 
     // The daemon's messages are read in a task of its own: a read of a whole message is not something to cut short in a select.
     let (tx, mut from_daemon) = tokio::sync::mpsc::channel::<Vec<u8>>(8);

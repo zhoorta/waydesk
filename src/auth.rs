@@ -238,6 +238,11 @@ impl PamPolicy {
         self.candidate_why(name).ok()
     }
 
+    /// Whether the account may still log in (a ticket made earlier is checked again with this).
+    pub fn still_allowed(&self, name: &str) -> Option<UserInfo> {
+        self.candidate_why(name).ok()
+    }
+
     /// Like `candidate`; when the account may not log in, the reason, for the audit log only (the client is told nothing).
     fn candidate_why(&self, name: &str) -> Result<UserInfo, &'static str> {
         let info = lookup_user(name).ok_or("unknown_user")?;

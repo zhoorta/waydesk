@@ -155,6 +155,8 @@ pub fn run(cfg: Config) -> Result<()> {
     }
 
     let cfg = Arc::new(cfg);
+    // A ticket lives as long as the portal's longest sign-in (8 hours).
+    let tickets = Arc::new(crate::tickets::Tickets::new(Duration::from_secs(8 * 3600)));
     let active = Arc::new(AtomicUsize::new(0));
     for conn in listener.incoming() {
         let sock = match conn {
@@ -176,9 +178,9 @@ pub fn run(cfg: Config) -> Result<()> {
             warn!("too many connections, refused");
             continue;
         }
-        let (cfg, policy, sessions, active, register_path) = (cfg.clone(), policy.clone(), sessions.clone(), active.clone(), register_path.clone());
+        let (cfg, policy, sessions, active, register_path, tickets) = (cfg.clone(), policy.clone(), sessions.clone(), active.clone(), register_path.clone(), tickets.clone());
         std::thread::spawn(move || {
-            serve(sock, &cfg, &policy, &sessions, &register_path);
+            serve(sock, &cfg, &policy, &sessions, &tickets, &register_path);
             active.fetch_sub(1, Ordering::AcqRel);
         });
     }
@@ -372,7 +374,7 @@ fn session_for(user: &UserInfo, source: &str, cfg: &Config, sessions: &Sessions,
 }
 
 /// One daemon connection: one client of the daemon.
-fn serve(mut sock: UnixStream, cfg: &Config, policy: &PamPolicy, sessions: &Sessions, register_path: &std::path::Path) {
+fn serve(mut sock: UnixStream, cfg: &Config, policy: &PamPolicy, sessions: &Sessions, tickets: &crate::tickets::Tickets, register_path: &std::path::Path) {
     let mut who: Option<UserInfo> = None;
     // Where the client that logged in on this connection comes from, and since when: the daemon holds one connection per client, so the
     // end of this one is the end of that client's connection (written here, where the daemon cannot forge it).
@@ -423,6 +425,36 @@ fn serve(mut sock: UnixStream, cfg: &Config, policy: &PamPolicy, sessions: &Sess
                     }
                 },
             },
+            HelperReq::IssueTicket => match (&who, &login) {
+                (Some(user), Some((source, _))) => match tickets.issue(user, source, Instant::now()) {
+                    Some(ticket) => reply(&mut sock, &HelperResp::Ticket { ticket }),
+                    None => reply(&mut sock, &HelperResp::Error { message: "no ticket can be made now".into() }),
+                },
+                _ => reply(&mut sock, &HelperResp::Error { message: "not logged in".into() }),
+            },
+            HelperReq::Redeem { ticket, user, source } => {
+                if who.is_some() {
+                    reply(&mut sock, &HelperResp::Error { message: "already logged in on this connection".into() })
+                } else {
+                    // The account must still be one that may log in (its group, its shell), as at the password check.
+                    match tickets.redeem(&ticket, &source, Instant::now()).filter(|u| u.name == user).and_then(|u| policy.still_allowed(&u.name)) {
+                        Some(info) => {
+                            audit::event("login.ticket", Outcome::Ok).typed_name(&info.name).num("uid", info.uid.into()).source(&source).emit();
+                            who = Some(info);
+                            login = Some((source, Instant::now()));
+                            reply(&mut sock, &HelperResp::AuthOk)
+                        }
+                        None => {
+                            audit::event("login.ticket", Outcome::Fail).str("reason", "bad_ticket").source(&source).emit();
+                            reply(&mut sock, &HelperResp::AuthFail)
+                        }
+                    }
+                }
+            }
+            HelperReq::RevokeTicket { ticket } => {
+                tickets.revoke(&ticket);
+                reply(&mut sock, &HelperResp::AuthOk)
+            }
             HelperReq::Bye => false,
         };
         if !ok {

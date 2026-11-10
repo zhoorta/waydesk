@@ -4,8 +4,9 @@
 //!
 //! The portal bridges a WebSocket to the daemon's gateway port and passes each message in a frame of `u32 length (little endian)` + message; it
 //! does not look inside. A connection starts with the portal's line (see gateway.rs, tag `WAYDESK-STREAM`), which names the account and the
-//! client's address; the first message of the browser is `Start`, which carries the password. The daemon checks it through the root helper (the
-//! same delay and lockout as RDP, and only for the account the portal named), starts or finds the account's session and pumps.
+//! client's address and carries the helper's ticket for that account's sign-in (see tickets.rs); the first message of the browser is `Start`, the
+//! size. The daemon redeems the ticket at the root helper (only for the account the portal named, from the address it was made for; no password
+//! passes here), starts or finds the account's session and pumps.
 //!
 //! Everything the browser sends is untrusted: sizes and rates are checked here, key names are looked up in a table and never passed on as text.
 
@@ -22,14 +23,12 @@ use crate::helperclient::{HelperConn, SessionRefused};
 use crate::link::{Event, Link};
 use crate::proto::{Down, FrameKind};
 
-/// The longest message the browser may send (the password is the longest part).
+/// The longest message the browser may send, but for clipboard text.
 pub const MAX_TO_SERVER: usize = 2048;
 /// The one message that may be longer: clipboard text (the tag and up to the session's limit of text).
 pub const MAX_CLIPBOARD_MESSAGE: usize = 1 + crate::proto::MAX_CLIPBOARD;
 /// The most clipboard texts the browser may send in a second.
 const MAX_CLIPBOARDS_PER_SECOND: u32 = 5;
-/// The longest password.
-const MAX_PASSWORD: usize = 512;
 /// How long the browser has to send `Start`.
 const START_TIMEOUT: Duration = Duration::from_secs(10);
 /// Frames the browser may be behind by: the session is allowed this many frames not yet acknowledged.
@@ -45,7 +44,7 @@ pub const ERR_SERVER: u8 = 3;
 /// Browser to daemon.
 #[derive(Debug, PartialEq)]
 pub enum ToServer {
-    Start { width: u16, height: u16, scale_percent: u16, password: String },
+    Start { width: u16, height: u16, scale_percent: u16 },
     Resize { width: u16, height: u16, scale_percent: u16 },
     /// A key by its DOM `KeyboardEvent.code` (the physical key).
     Key { code: String, pressed: bool },
@@ -72,6 +71,8 @@ pub enum ToBrowser {
     Cursor(String),
     /// Text the desktop's clipboard holds now.
     Clipboard(String),
+    /// A pointer picture an application drew: 32 bit BGRA, premultiplied alpha, rows from the top, at most 32 x 32 (the link checked).
+    CursorImage { hot_x: u16, hot_y: u16, width: u16, height: u16, data: Vec<u8> },
     Error { code: u8, message: String },
 }
 
@@ -119,7 +120,7 @@ impl ToServer {
         }
         let mut i = In(buf);
         let msg = match i.u8()? {
-            1 => ToServer::Start { width: i.u16()?, height: i.u16()?, scale_percent: i.u16()?, password: i.str(MAX_PASSWORD)? },
+            1 => ToServer::Start { width: i.u16()?, height: i.u16()?, scale_percent: i.u16()? },
             2 => ToServer::Resize { width: i.u16()?, height: i.u16()?, scale_percent: i.u16()? },
             3 => ToServer::Key { code: i.str(32)?, pressed: i.u8()? != 0 },
             4 => ToServer::Move { x: i.u32()?, y: i.u32()? },
@@ -147,12 +148,11 @@ impl ToServer {
             o.extend_from_slice(s.as_bytes());
         };
         match self {
-            ToServer::Start { width, height, scale_percent, password } => {
+            ToServer::Start { width, height, scale_percent } => {
                 o.push(1);
                 for v in [width, height, scale_percent] {
                     o.extend_from_slice(&v.to_le_bytes());
                 }
-                str(&mut o, password);
             }
             ToServer::Resize { width, height, scale_percent } => {
                 o.push(2);
@@ -214,6 +214,13 @@ impl ToBrowser {
             ToBrowser::Clipboard(text) => {
                 o.push(6);
                 o.extend_from_slice(text.as_bytes());
+            }
+            ToBrowser::CursorImage { hot_x, hot_y, width, height, data } => {
+                o.push(7);
+                for v in [hot_x, hot_y, width, height] {
+                    o.extend_from_slice(&v.to_le_bytes());
+                }
+                o.extend_from_slice(data);
             }
             ToBrowser::Error { code, message } => {
                 o.push(5);
@@ -419,10 +426,10 @@ async fn write_message<W: tokio::io::AsyncWrite + Unpin>(w: &mut W, msg: &ToBrow
 }
 
 /// One browser, from its `Start` to the end of its connection. `stream` is past the portal's line already.
-pub async fn serve(stream: tokio::net::TcpStream, ip: IpAddr, account: String, helper_socket: PathBuf) {
+pub async fn serve(stream: tokio::net::TcpStream, ip: IpAddr, account: String, ticket: String, helper_socket: PathBuf) {
     let started = Instant::now();
     let (rd, mut wr) = stream.into_split();
-    match run(rd, &mut wr, ip, &account, &helper_socket).await {
+    match run(rd, &mut wr, ip, &account, &ticket, &helper_socket).await {
         Ok(()) => info!(%ip, account, seconds = started.elapsed().as_secs(), "browser stream ended"),
         Err(e) => {
             info!(%ip, account, seconds = started.elapsed().as_secs(), "browser stream ended: {e:#}");
@@ -431,14 +438,14 @@ pub async fn serve(stream: tokio::net::TcpStream, ip: IpAddr, account: String, h
     }
 }
 
-async fn run<R, W>(mut rd: R, wr: &mut W, ip: IpAddr, account: &str, helper_socket: &std::path::Path) -> Result<()>
+async fn run<R, W>(mut rd: R, wr: &mut W, ip: IpAddr, account: &str, ticket: &str, helper_socket: &std::path::Path) -> Result<()>
 where
     R: tokio::io::AsyncRead + Unpin + Send + 'static,
     W: tokio::io::AsyncWrite + Unpin,
 {
-    // 1. Start: the size, and the password for the account the portal named.
+    // 1. Start: the size.
     let first = tokio::time::timeout(START_TIMEOUT, read_message(&mut rd)).await.context("no Start in time")??.context("closed before Start")?;
-    let Some(ToServer::Start { width, height, scale_percent, password }) = ToServer::decode(&first) else { bail!("the first message is not Start") };
+    let Some(ToServer::Start { width, height, scale_percent }) = ToServer::decode(&first) else { bail!("the first message is not Start") };
     let (width, height) = crate::session::clamp_size(width, height);
     let scale = scale_percent.clamp(100, 500);
 
@@ -449,9 +456,9 @@ where
         other => bail!("cannot reach the helper: {:?}", other.map(|r| r.err())),
     };
     let (h, user, source) = (helper.clone(), account.to_owned(), ip.to_string());
-    let ok = tokio::task::spawn_blocking(move || h.authenticate(&user, &password, &source)).await.context("login task")??;
+    let ok = tokio::task::spawn_blocking({ let ticket = ticket.to_owned(); move || h.redeem(&ticket, &user, &source) }).await.context("login task")??;
     if !ok {
-        let _ = write_message(wr, &ToBrowser::Error { code: ERR_LOGIN, message: "Sign-in refused. Check the account and the password.".into() }).await;
+        let _ = write_message(wr, &ToBrowser::Error { code: ERR_LOGIN, message: "Sign-in has ended. Sign in again.".into() }).await;
         bail!("login refused");
     }
 
@@ -604,7 +611,7 @@ where
                         link.send(Down::RequestFull);
                     }
                     Event::Cursor(name) => write_message(wr, &ToBrowser::Cursor(name)).await?,
-                    Event::CursorImage { .. } => {}
+                    Event::CursorImage { hot_x, hot_y, width, height, data } => write_message(wr, &ToBrowser::CursorImage { hot_x, hot_y, width, height, data }).await?,
                 }
             }
             () = resize_due => {
@@ -626,7 +633,7 @@ mod tests {
     #[test]
     fn what_the_browser_writes_the_daemon_reads() {
         let all = [
-            ToServer::Start { width: 1680, height: 1050, scale_percent: 100, password: "pässwörd".into() },
+            ToServer::Start { width: 1680, height: 1050, scale_percent: 100 },
             ToServer::Resize { width: 800, height: 600, scale_percent: 200 },
             ToServer::Key { code: "KeyA".into(), pressed: true },
             ToServer::Move { x: 10, y: 20 },
@@ -658,8 +665,9 @@ mod tests {
         bad_utf8.clear();
         let nan = [6u8, 0, 0, 0xc0, 0x7f, 0, 0, 0, 0];
         assert_eq!(ToServer::decode(&nan), None, "a wheel that is not a number");
-        let huge_password = ToServer::Start { width: 1, height: 1, scale_percent: 100, password: "x".repeat(513) }.encode();
-        assert_eq!(ToServer::decode(&huge_password), None);
+        let mut long_start = ToServer::Start { width: 1, height: 1, scale_percent: 100 }.encode();
+        long_start.push(0);
+        assert_eq!(ToServer::decode(&long_start), None, "bytes after Start");
         assert_eq!(ToServer::decode(&vec![8; MAX_TO_SERVER + 1]), None, "a message that is too long");
         assert_eq!(ToServer::decode(&[9]), None, "empty clipboard text");
         assert_eq!(ToServer::decode(&[9, 0xff, 0xfe]), None, "clipboard text that is not UTF-8");
@@ -712,6 +720,13 @@ mod tests {
         assert_eq!(credits_back(100, 0), 0, "nothing was sent: nothing to give back");
         assert_eq!(credits_back(1, 1), 1);
         assert_eq!(credits_back(0, 5), 0);
+    }
+
+    #[test]
+    fn a_pointer_picture_has_its_header_and_its_pixels() {
+        let m = ToBrowser::CursorImage { hot_x: 1, hot_y: 2, width: 2, height: 1, data: vec![9; 8] }.encode();
+        assert_eq!(&m[..9], &[7, 1, 0, 2, 0, 2, 0, 1, 0]);
+        assert_eq!(m.len(), 17);
     }
 
     #[tokio::test]
