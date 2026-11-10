@@ -95,8 +95,8 @@ struct Sent {
 /// delay of the path (see `sample`). On a link that cannot carry what the encoder makes that is not enough, because the frames then wait in
 /// the queue for seconds: while acknowledgements arrive with frames queued behind them the delivery rate is measured, and then no credit is
 /// given while more than `QUEUE_SECONDS` of it is in flight, and the encoder is asked for a bitrate that fits (`bitrate_for`).
-struct Flow {
-    window: u32,
+pub(crate) struct Flow {
+    pub(crate) window: u32,
     issued: u32,
     sent: VecDeque<Sent>,
     inflight_bytes: u64,
@@ -127,7 +127,7 @@ impl Default for Flow {
 }
 
 impl Flow {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let window = fixed_window().map_or(MIN_WINDOW + 1, u32::from);
         Self {
             window,
@@ -148,14 +148,14 @@ impl Flow {
         }
     }
 
-    fn reset(&mut self) {
+    pub(crate) fn reset(&mut self) {
         self.issued = self.window;
         self.sent.clear();
         self.inflight_bytes = 0;
         self.last_bitrate = 0;
     }
 
-    fn frame_sent(&mut self, id: u32, size: usize) {
+    pub(crate) fn frame_sent(&mut self, id: u32, size: usize) {
         if self.sent.len() >= 128 {
             if let Some(old) = self.sent.pop_front() {
                 self.inflight_bytes = self.inflight_bytes.saturating_sub(u64::from(old.size));
@@ -168,7 +168,7 @@ impl Flow {
 
     /// A frame was acknowledged: what the flow control learns from it, how many credits to hand out, and a new bitrate for the encoder if
     /// it should change.
-    fn frame_acked(&mut self, id: u32, max_bitrate: u32, link: Option<Link>) -> (u16, Option<u32>) {
+    pub(crate) fn frame_acked(&mut self, id: u32, max_bitrate: u32, link: Option<Link>) -> (u16, Option<u32>) {
         let now = Instant::now();
         // The frames before it that were never acknowledged are gone.
         let mut found = None;

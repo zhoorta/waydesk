@@ -31,8 +31,6 @@ pub const MAX_CLIPBOARD_MESSAGE: usize = 1 + crate::proto::MAX_CLIPBOARD;
 const MAX_CLIPBOARDS_PER_SECOND: u32 = 5;
 /// How long the browser has to send `Start`.
 const START_TIMEOUT: Duration = Duration::from_secs(10);
-/// Frames the browser may be behind by: the session is allowed this many frames not yet acknowledged.
-const WINDOW: u16 = 4;
 /// More messages than this in a second is not a person: the connection is closed.
 const MAX_MESSAGES_PER_SECOND: u32 = 5000;
 
@@ -426,10 +424,14 @@ async fn write_message<W: tokio::io::AsyncWrite + Unpin>(w: &mut W, msg: &ToBrow
 }
 
 /// One browser, from its `Start` to the end of its connection. `stream` is past the portal's line already.
-pub async fn serve(stream: tokio::net::TcpStream, ip: IpAddr, account: String, ticket: String, helper_socket: PathBuf) {
+pub async fn serve(stream: tokio::net::TcpStream, ip: IpAddr, account: String, ticket: String, helper_socket: PathBuf, max_bitrate: u32) {
+    use std::os::fd::AsRawFd as _;
     let started = Instant::now();
+    // The socket to the portal: when the browser's link is slow the portal reads slowly and this socket's send queue fills, which is how the
+    // link's capacity is seen (see `Flow`). The halves below keep the socket open as long as `run` lasts.
+    let fd = stream.as_raw_fd();
     let (rd, mut wr) = stream.into_split();
-    match run(rd, &mut wr, ip, &account, &ticket, &helper_socket).await {
+    match run(rd, &mut wr, ip, &account, &ticket, &helper_socket, Some(fd), max_bitrate).await {
         Ok(()) => info!(%ip, account, seconds = started.elapsed().as_secs(), "browser stream ended"),
         Err(e) => {
             info!(%ip, account, seconds = started.elapsed().as_secs(), "browser stream ended: {e:#}");
@@ -438,7 +440,8 @@ pub async fn serve(stream: tokio::net::TcpStream, ip: IpAddr, account: String, t
     }
 }
 
-async fn run<R, W>(mut rd: R, wr: &mut W, ip: IpAddr, account: &str, ticket: &str, helper_socket: &std::path::Path) -> Result<()>
+#[allow(clippy::too_many_arguments)]
+async fn run<R, W>(mut rd: R, wr: &mut W, ip: IpAddr, account: &str, ticket: &str, helper_socket: &std::path::Path, fd: Option<std::os::fd::RawFd>, max_bitrate: u32) -> Result<()>
 where
     R: tokio::io::AsyncRead + Unpin + Send + 'static,
     W: tokio::io::AsyncWrite + Unpin,
@@ -482,7 +485,6 @@ where
     if scale != 100 {
         link.send(Down::Resize { width: size.0, height: size.1, scale_percent: scale });
     }
-    link.send(Down::Credit { frames: WINDOW });
     link.send(Down::RequestFull);
     // The desktop's clipboard text comes back to the browser (the link has already bounded its size and speed).
     let (clip_tx, clip_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
@@ -491,7 +493,7 @@ where
     }));
     link.send(Down::ClipboardOn);
 
-    let result = pump(rd, wr, &link, clip_rx).await;
+    let result = pump(rd, wr, &link, clip_rx, fd, max_bitrate).await;
     link.shutdown().await;
     result
 }
@@ -521,13 +523,18 @@ fn read_browser<R: tokio::io::AsyncRead + Unpin + Send + 'static>(mut rd: R) -> 
     rx
 }
 
-async fn pump<R, W>(rd: R, wr: &mut W, link: &Arc<Link>, mut clip_rx: tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>) -> Result<()>
+async fn pump<R, W>(rd: R, wr: &mut W, link: &Arc<Link>, mut clip_rx: tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>, fd: Option<std::os::fd::RawFd>, max_bitrate: u32) -> Result<()>
 where
     R: tokio::io::AsyncRead + Unpin + Send + 'static,
     W: tokio::io::AsyncWrite + Unpin,
 {
     let mut from_browser = read_browser(rd);
     let mut sent_unacked: u32 = 0;
+    // Frames in flight and the encoder's bitrate follow the link, as with RDP (egfx.rs `Flow`): the browser acknowledges each frame it showed.
+    let mut flow = crate::egfx::Flow::new();
+    flow.reset();
+    link.send(Down::Credit { frames: flow.window as u16 });
+    let (mut next_id, mut acked_id) = (0u32, 0u32);
     let mut wanted: Option<(u16, u16, u16)> = None;
     let mut resize_at: Option<tokio::time::Instant> = None;
     let mut size = link.size();
@@ -571,10 +578,21 @@ where
                         link.send(Down::Wheel { vertical: -f64::from(vertical.clamp(-20.0, 20.0)), horizontal: f64::from(horizontal.clamp(-20.0, 20.0)) });
                     }
                     ToServer::Ack { frames } => {
-                        let give = credits_back(frames, sent_unacked);
-                        sent_unacked -= give;
-                        if give > 0 {
-                            link.send(Down::Credit { frames: give as u16 });
+                        let acks = credits_back(frames, sent_unacked);
+                        sent_unacked -= acks;
+                        let mut credits = 0u16;
+                        for _ in 0..acks {
+                            let info = fd.and_then(crate::tcpinfo::read);
+                            let (give, bitrate) = flow.frame_acked(acked_id, max_bitrate, info);
+                            acked_id = acked_id.wrapping_add(1);
+                            credits = credits.saturating_add(give);
+                            if let Some(bps) = bitrate {
+                                info!(bps, "bitrate for the browser's link");
+                                link.send(Down::Bitrate { bps });
+                            }
+                        }
+                        if credits > 0 {
+                            link.send(Down::Credit { frames: credits });
                         }
                     }
                     ToServer::RequestFull => link.send(Down::RequestFull),
@@ -595,6 +613,8 @@ where
                     Event::Closed => return Ok(()),
                     Event::Frame { kind: FrameKind::H264, data, .. } => {
                         sent_unacked += 1;
+                        flow.frame_sent(next_id, data.len());
+                        next_id = next_id.wrapping_add(1);
                         let key = is_key_frame(&data);
                         write_message(wr, &ToBrowser::Frame { key, ts_ms: started.elapsed().as_millis() as u32, data }).await?;
                     }
@@ -607,7 +627,9 @@ where
                         // new ones: without this a picture that then stays still is never sent. The browser starts its decoder again too, so what
                         // it was sent before is no longer owed an acknowledgement.
                         sent_unacked = 0;
-                        link.send(Down::Credit { frames: WINDOW });
+                        flow.reset();
+                        acked_id = next_id;
+                        link.send(Down::Credit { frames: flow.window as u16 });
                         link.send(Down::RequestFull);
                     }
                     Event::Cursor(name) => write_message(wr, &ToBrowser::Cursor(name)).await?,
