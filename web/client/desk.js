@@ -67,6 +67,7 @@ export class Desk {
     this.metaHeld = new Set(); // Command keys down (Mac), not yet sent
     this.metaSent = new Set();
     this.metaUsed = false;
+    this.underMeta = new Set(); // keys sent while Command was held (a Mac sends no key-up for them)
     this.tapped = new Set(); // keys sent as a whole tap (their key-up is not sent again)
   }
 
@@ -254,6 +255,7 @@ export class Desk {
     if (this.ended || !e.code || e.code === 'Unidentified') return;
     e.stopPropagation();
     const isMeta = e.code === 'MetaLeft' || e.code === 'MetaRight';
+    if (!isMeta) this.syncMeta(e.metaKey);
     if (MAC && isMeta) { e.preventDefault(); this.metaKey(e.code, down); return; }
     const cmd = MAC && e.metaKey && !e.ctrlKey && SHORTCUT.test(e.code); // Cmd+letter: the shortcut of the desktop is Ctrl+letter
     const ctrl = e.ctrlKey || cmd;
@@ -271,6 +273,7 @@ export class Desk {
       keys = [['ControlLeft', 1], [e.code, 1], [e.code, 0], ['ControlLeft', 0]];
     } else {
       if (down) this.pressed.add(e.code); else this.pressed.delete(e.code);
+      if (down && MAC && this.metaHeld.size) this.underMeta.add(e.code);
       keys = [[e.code, down ? 1 : 0]];
     }
     if (copy) this.armCopy();
@@ -286,6 +289,18 @@ export class Desk {
     }
   }
 
+  // The events say whether Command is down: when no Command is down any more, everything held for it is let go (its own key-up can be lost,
+  // for instance when the page lost the focus for a moment), or the desktop would see Super held for ever.
+  syncMeta(metaDown) {
+    if (!MAC || metaDown || (!this.metaHeld.size && !this.metaSent.size && !this.underMeta.size)) return;
+    for (const m of this.metaSent) this.send([3, ...str(m), 0]);
+    for (const code of this.underMeta) if (this.pressed.delete(code)) this.send([3, ...str(code), 0]);
+    this.metaSent.clear();
+    this.metaHeld.clear();
+    this.underMeta.clear();
+    this.metaUsed = false;
+  }
+
   // Command keys (Mac) wait: with a letter they make a Ctrl shortcut, with another key they are Super, alone they are a tap of Super.
   metaKey(code, down) {
     if (down) {
@@ -295,7 +310,11 @@ export class Desk {
     if (this.metaSent.has(code)) { this.metaSent.delete(code); this.emit([[code, 0]]); }
     else if (this.metaHeld.has(code) && !this.metaUsed) this.emit([[code, 1], [code, 0]]);
     this.metaHeld.delete(code);
-    if (!this.metaHeld.size) this.metaUsed = false;
+    if (!this.metaHeld.size) {
+      this.metaUsed = false;
+      for (const k of this.underMeta) if (this.pressed.delete(k)) this.send([3, ...str(k), 0]);
+      this.underMeta.clear();
+    }
   }
 
   sendKeys(keys) {
@@ -360,6 +379,7 @@ export class Desk {
   }
 
   move(e) {
+    this.syncMeta(e.metaKey);
     this.pending = this.point(e);
     if (this.raf) return;
     this.raf = requestAnimationFrame(() => {
@@ -371,6 +391,7 @@ export class Desk {
 
   button(e, down) {
     if (this.ended) return;
+    this.syncMeta(e.metaKey);
     if (down) this.buttons.add(e.button); else this.buttons.delete(e.button);
     // The position first, so that a click lands where the pointer is.
     const [x, y] = this.point(e);
@@ -395,6 +416,7 @@ export class Desk {
     for (const m of this.metaSent) this.send([3, ...str(m), 0]);
     this.metaSent.clear();
     this.metaHeld.clear();
+    this.underMeta.clear();
     this.metaUsed = false;
   }
 }
