@@ -17,6 +17,10 @@ const str = (s) => { const b = enc.encode(s); return [...u16(b.length), ...b]; }
 // A cursor name from the session: only plain CSS names are used, anything else is the arrow.
 const CURSOR = /^[a-z-]{1,30}$/;
 
+// On a Mac the Command key is the shortcut key: Cmd+C is Ctrl+C on the desktop. Command alone (the Super key) is still sent when it is let go on its own.
+const MAC = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform || '');
+const SHORTCUT = /^Key[ACVXZFS]$/;
+
 /** Whether this browser can show the stream. */
 export async function supported() {
   if (typeof VideoDecoder === 'undefined' || typeof EncodedVideoChunk === 'undefined') return false;
@@ -58,6 +62,12 @@ export class Desk {
     this.listeners = [];
     this.clip = ''; // the last clipboard text that went either way (an echo is not sent back)
     this.hold = null; // while the clipboard is read for a paste, the keys wait behind it
+    this.copyWait = null; // a copy asked for: the clipboard of the page is filled when the desktop's text arrives
+    this.pasteSeen = null;
+    this.metaHeld = new Set(); // Command keys down (Mac), not yet sent
+    this.metaSent = new Set();
+    this.metaUsed = false;
+    this.tapped = new Set(); // keys sent as a whole tap (their key-up is not sent again)
   }
 
   connect({ width, height, scale }) {
@@ -102,7 +112,13 @@ export class Desk {
       case 6: { // Clipboard: the desktop copied text
         const text = dec.decode(m.subarray(1));
         this.clip = text;
-        try { navigator.clipboard.writeText(text).catch(() => {}); } catch { /* no clipboard access here */ }
+        if (this.copyWait) {
+          // Safari lets a page fill the clipboard only inside the key press that asked for it: that press handed over a promise for this text.
+          this.copyWait.resolve(text);
+          this.copyWait = null;
+        } else {
+          try { navigator.clipboard.writeText(text).catch(() => {}); } catch { /* no clipboard access here */ }
+        }
         break;
       }
       case 5: // Error
@@ -214,6 +230,13 @@ export class Desk {
     on(window, 'keyup', (e) => this.key(e, false), { capture: true });
     on(window, 'blur', () => this.releaseAll());
     on(window, 'focus', () => { this.syncClipboard(); });
+    // The browser hands over its clipboard with a paste (no permission asked, and Safari allows nothing else).
+    on(window, 'paste', (e) => {
+      const text = e.clipboardData && e.clipboardData.getData('text/plain');
+      if (text) this.sendClipboard(text);
+      e.preventDefault();
+      if (this.pasteSeen) this.pasteSeen();
+    }, { capture: true });
     on(c, 'pointermove', (e) => this.move(e));
     on(c, 'pointerdown', (e) => { c.setPointerCapture(e.pointerId); this.move(e); this.button(e, true); e.preventDefault(); });
     on(c, 'pointerup', (e) => { this.button(e, false); e.preventDefault(); });
@@ -229,18 +252,73 @@ export class Desk {
 
   key(e, down) {
     if (this.ended || !e.code || e.code === 'Unidentified') return;
-    e.preventDefault();
     e.stopPropagation();
-    if (down) this.pressed.add(e.code); else this.pressed.delete(e.code);
-    const msg = [3, ...str(e.code), down ? 1 : 0];
-    // A paste: what the browser's clipboard holds goes first, then the key (and any key after it keeps its order).
-    if (down && ((e.ctrlKey && e.code === 'KeyV') || (e.shiftKey && e.code === 'Insert'))) {
-      this.after(this.syncClipboard().then(() => { this.send(msg); }));
-    } else if (this.hold) {
-      this.after(this.hold.then(() => { this.send(msg); }));
-    } else {
-      this.send(msg);
+    const isMeta = e.code === 'MetaLeft' || e.code === 'MetaRight';
+    if (MAC && isMeta) { e.preventDefault(); this.metaKey(e.code, down); return; }
+    const cmd = MAC && e.metaKey && !e.ctrlKey && SHORTCUT.test(e.code); // Cmd+letter: the shortcut of the desktop is Ctrl+letter
+    const ctrl = e.ctrlKey || cmd;
+    const paste = down && ((e.code === 'KeyV' && ctrl) || (e.code === 'Insert' && e.shiftKey));
+    const copy = down && (e.code === 'KeyC' || e.code === 'KeyX') && ctrl;
+    if (!paste) e.preventDefault(); // a paste needs the key's own effect: the page then gets a paste event with the clipboard
+    if (MAC && this.metaHeld.size) {
+      this.metaUsed = true;
+      if (!cmd && down) for (const m of this.metaHeld) if (!this.metaSent.has(m)) { this.metaSent.add(m); this.emit([[m, 1]]); }
     }
+    let keys;
+    if (cmd) {
+      if (!down) { this.tapped.delete(e.code); return; } // a Mac sends no key-up under Command anyway
+      this.tapped.add(e.code);
+      keys = [['ControlLeft', 1], [e.code, 1], [e.code, 0], ['ControlLeft', 0]];
+    } else {
+      if (down) this.pressed.add(e.code); else this.pressed.delete(e.code);
+      keys = [[e.code, down ? 1 : 0]];
+    }
+    if (copy) this.armCopy();
+    if (paste) {
+      // What the browser's clipboard holds goes first, then the key (and any key after it keeps its order).
+      const seen = new Promise((resolve) => {
+        this.pasteSeen = () => { this.pasteSeen = null; resolve(true); };
+        setTimeout(() => resolve(false), 250);
+      });
+      this.after(seen.then((got) => (got ? null : this.syncClipboard())).then(() => { this.sendKeys(keys); }));
+    } else {
+      this.emit(keys);
+    }
+  }
+
+  // Command keys (Mac) wait: with a letter they make a Ctrl shortcut, with another key they are Super, alone they are a tap of Super.
+  metaKey(code, down) {
+    if (down) {
+      if (!this.metaHeld.has(code)) this.metaHeld.add(code);
+      return;
+    }
+    if (this.metaSent.has(code)) { this.metaSent.delete(code); this.emit([[code, 0]]); }
+    else if (this.metaHeld.has(code) && !this.metaUsed) this.emit([[code, 1], [code, 0]]);
+    this.metaHeld.delete(code);
+    if (!this.metaHeld.size) this.metaUsed = false;
+  }
+
+  sendKeys(keys) {
+    for (const [code, d] of keys) this.send([3, ...str(code), d]);
+  }
+
+  emit(keys) {
+    if (this.hold) this.after(this.hold.then(() => { this.sendKeys(keys); }));
+    else this.sendKeys(keys);
+  }
+
+  // A copy: the page's clipboard is filled by this very key press with a promise of the text the desktop is about to announce (Safari allows no
+  // other way). When nothing arrives the promise fails and the clipboard stays as it was.
+  armCopy() {
+    if (!navigator.clipboard || !navigator.clipboard.write || typeof ClipboardItem === 'undefined') return;
+    if (this.copyWait) this.copyWait.reject(new Error('another copy'));
+    const text = new Promise((resolve, reject) => {
+      this.copyWait = { resolve, reject };
+      setTimeout(() => { if (this.copyWait && this.copyWait.resolve === resolve) { this.copyWait = null; } reject(new Error('nothing copied')); }, 1500);
+    });
+    try {
+      navigator.clipboard.write([new ClipboardItem({ 'text/plain': text.then((t) => new Blob([t], { type: 'text/plain' })) })]).catch(() => {});
+    } catch { this.copyWait = null; }
   }
 
   after(p) {
@@ -253,14 +331,19 @@ export class Desk {
     try {
       const text = await Promise.race([navigator.clipboard.readText(), new Promise((_, no) => setTimeout(no, 300))]);
       if (text && text !== this.clip && enc.encode(text).length < 1024 * 1024) {
-        this.clip = text;
-        const body = enc.encode(text);
-        const m = new Uint8Array(1 + body.length);
-        m[0] = 9;
-        m.set(body, 1);
-        this.send(m);
+        this.sendClipboard(text);
       }
     } catch { /* not allowed, empty, or not text: the desktop keeps its own */ }
+  }
+
+  sendClipboard(text) {
+    const body = enc.encode(text);
+    if (!text || body.length >= 1024 * 1024) return;
+    this.clip = text;
+    const m = new Uint8Array(1 + body.length);
+    m[0] = 9;
+    m.set(body, 1);
+    this.send(m);
   }
 
   // Where a pointer event is on the desktop, in its pixels. The picture is fitted into the canvas element (letterboxed when the shapes differ).
@@ -309,5 +392,9 @@ export class Desk {
     for (const b of this.buttons) this.send([5, b, 0]);
     this.pressed.clear();
     this.buttons.clear();
+    for (const m of this.metaSent) this.send([3, ...str(m), 0]);
+    this.metaSent.clear();
+    this.metaHeld.clear();
+    this.metaUsed = false;
   }
 }
