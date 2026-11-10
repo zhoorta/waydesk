@@ -3,8 +3,8 @@
 //
 // Messages are binary WebSocket messages, little endian, first byte the tag.
 //   browser -> daemon: 1 Start(w16 h16 scale16) 2 Resize(w16 h16 scale16) 3 Key(code, down) 4 Move(x32 y32) 5 Button(n, down)
-//                      6 Wheel(f32 f32) 7 Ack(n16) 8 RequestFull 9 Clipboard(UTF-8 text, the rest) 255 Bye        (strings: u16 length + UTF-8)
-//   daemon -> browser: 1 Ready(w16 h16) 2 Resized(w16 h16) 3 Frame(key8 ts32 annexb...) 4 Cursor(name) 5 Error(code8 text) 6 Clipboard(UTF-8 text) 7 CursorImage(hotx16 hoty16 w16 h16 BGRA premultiplied)
+//                      6 Wheel(f32 f32) 7 Ack(n16) 8 RequestFull 9 Clipboard(UTF-8 text, the rest) 10 Audio(on8) 255 Bye        (strings: u16 length + UTF-8)
+//   daemon -> browser: 1 Ready(w16 h16) 2 Resized(w16 h16) 3 Frame(key8 ts32 annexb...) 4 Cursor(name) 5 Error(code8 text) 6 Clipboard(UTF-8 text) 7 CursorImage(hotx16 hoty16 w16 h16 BGRA premultiplied) 8 Audio(16 bit stereo PCM, 44100 Hz)
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();
@@ -68,6 +68,8 @@ export class Desk {
     this.metaSent = new Set();
     this.metaUsed = false;
     this.underMeta = new Set(); // keys sent while Command was held (a Mac sends no key-up for them)
+    this.audio = null; // { ctx, next } once sound has come
+    this.muted = false;
     this.tapped = new Set(); // keys sent as a whole tap (their key-up is not sent again)
   }
 
@@ -107,6 +109,9 @@ export class Desk {
         this.canvas.style.cursor = CURSOR.test(name) ? (name === 'default' ? 'default' : name) : 'default';
         break;
       }
+      case 8: // Audio
+        this.play(m.subarray(1));
+        break;
       case 7: // CursorImage: a pointer an application drew itself
         this.cursorImage(m);
         break;
@@ -128,6 +133,52 @@ export class Desk {
       default:
         break;
     }
+  }
+
+  // Sound: each 20 ms chunk is scheduled right after the one before it, with a small cushion at the start so that a late message does not make a
+  // gap. When the page falls behind (a background tab, a busy moment) chunks are dropped instead of the sound lagging for ever.
+  play(bytes) {
+    if (this.muted || bytes.length < 4) return;
+    const AC = globalThis.AudioContext || globalThis.webkitAudioContext;
+    if (!AC) return;
+    if (!this.audio) {
+      let ctx;
+      try { ctx = new AC({ sampleRate: 44100, latencyHint: 'interactive' }); } catch { return; }
+      this.audio = { ctx, next: 0 };
+      // A page may only make sound after the person did something in it: the first click or key starts it.
+      const start = () => { if (ctx.state !== 'running') ctx.resume().catch(() => {}); };
+      for (const type of ['pointerdown', 'keydown']) {
+        const fn = () => start();
+        window.addEventListener(type, fn, { capture: true });
+        this.listeners.push([window, type, fn, { capture: true }]);
+      }
+      start();
+    }
+    const { ctx } = this.audio;
+    if (ctx.state !== 'running') return;
+    const frames = bytes.length >> 2;
+    const view = new DataView(bytes.buffer, bytes.byteOffset, frames * 4);
+    const buf = ctx.createBuffer(2, frames, 44100);
+    const left = buf.getChannelData(0), right = buf.getChannelData(1);
+    for (let i = 0; i < frames; i++) {
+      left[i] = view.getInt16(i * 4, true) / 32768;
+      right[i] = view.getInt16(i * 4 + 2, true) / 32768;
+    }
+    const now = ctx.currentTime;
+    if (this.audio.next < now + 0.02) this.audio.next = now + 0.12; // under run: start again with a cushion
+    if (this.audio.next > now + 0.6) return; // too far behind: drop
+    const src = ctx.createBufferSource();
+    src.buffer = buf;
+    src.connect(ctx.destination);
+    src.start(this.audio.next);
+    this.audio.next += buf.duration;
+  }
+
+  /** Sound on or off (off also stops the daemon sending it). */
+  setMuted(muted) {
+    this.muted = muted;
+    this.send([10, muted ? 0 : 1]);
+    if (muted && this.audio) this.audio.next = 0;
   }
 
   cursorImage(m) {
@@ -207,6 +258,7 @@ export class Desk {
     this.ended = true;
     this.detachInput();
     if (this.decoder && this.decoder.state !== 'closed') { try { this.decoder.close(); } catch { /* gone */ } }
+    if (this.audio) { try { this.audio.ctx.close(); } catch { /* gone */ } this.audio = null; }
     if (this.ws) {
       try { if (this.ws.readyState === WebSocket.OPEN) this.ws.send(new Uint8Array([255])); this.ws.close(); } catch { /* gone */ }
     }

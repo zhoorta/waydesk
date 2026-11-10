@@ -203,6 +203,8 @@ function openStream() {
     ended: (message, isError) => end(message, isError),
   });
   current = { el: canvas, desk };
+  muted = false;
+  $('mute').textContent = 'Sound on';
   if (params.get('debug') === '1') globalThis.__desk = desk; // for looking at the decoder's numbers in the console
   heldPassword = '';
   $('pass2').value = '';
@@ -286,6 +288,13 @@ async function openDesktop() {
 
 
 $('end').addEventListener('click', () => (current && current.desk ? current.desk.disconnect() : end('Disconnected.')));
+let muted = false;
+$('mute').addEventListener('click', () => {
+  muted = !muted;
+  $('mute').textContent = muted ? 'Sound off' : 'Sound on';
+  if (current && current.desk) current.desk.setMuted(muted);
+});
+$('mute').hidden = !useStream; // the RDP fallback has its own sound
 $('cad').addEventListener('click', () => current && (current.desk ? current.desk.ctrlAltDel() : current.ui.ctrlAltDel()));
 $('fs').addEventListener('click', async () => {
   await $('session').requestFullscreen();

@@ -29,6 +29,8 @@ pub const MAX_TO_SERVER: usize = 2048;
 pub const MAX_CLIPBOARD_MESSAGE: usize = 1 + crate::proto::MAX_CLIPBOARD;
 /// The most clipboard texts the browser may send in a second.
 const MAX_CLIPBOARDS_PER_SECOND: u32 = 5;
+/// Chunks of sound (20 ms each) that may wait for the connection: 0.5 s; more are dropped.
+const AUDIO_QUEUE: usize = 25;
 /// How long the browser has to send `Start`.
 const START_TIMEOUT: Duration = Duration::from_secs(10);
 /// More messages than this in a second is not a person: the connection is closed.
@@ -56,6 +58,8 @@ pub enum ToServer {
     RequestFull,
     /// Text the browser's clipboard holds now (the whole rest of the message, UTF-8).
     Clipboard { text: String },
+    /// Sound on (the default) or off: off stops the recording of the session's speaker, so nothing is sent.
+    Audio { on: bool },
     Bye,
 }
 
@@ -69,6 +73,8 @@ pub enum ToBrowser {
     Cursor(String),
     /// Text the desktop's clipboard holds now.
     Clipboard(String),
+    /// 20 ms of what the session plays: 16 bit stereo PCM, little endian, 44100 Hz (`audio::CHUNK` bytes).
+    Audio(Vec<u8>),
     /// A pointer picture an application drew: 32 bit BGRA, premultiplied alpha, rows from the top, at most 32 x 32 (the link checked).
     CursorImage { hot_x: u16, hot_y: u16, width: u16, height: u16, data: Vec<u8> },
     Error { code: u8, message: String },
@@ -132,6 +138,7 @@ impl ToServer {
             }
             7 => ToServer::Ack { frames: i.u16()? },
             8 => ToServer::RequestFull,
+            10 => ToServer::Audio { on: i.u8()? != 0 },
             9 => return String::from_utf8(i.0.to_vec()).ok().filter(|t| !t.is_empty()).map(|text| ToServer::Clipboard { text }),
             255 => ToServer::Bye,
             _ => return None,
@@ -179,6 +186,7 @@ impl ToServer {
                 o.extend_from_slice(&frames.to_le_bytes());
             }
             ToServer::RequestFull => o.push(8),
+            ToServer::Audio { on } => o.extend_from_slice(&[10, u8::from(*on)]),
             ToServer::Clipboard { text } => {
                 o.push(9);
                 o.extend_from_slice(text.as_bytes());
@@ -212,6 +220,11 @@ impl ToBrowser {
             ToBrowser::Clipboard(text) => {
                 o.push(6);
                 o.extend_from_slice(text.as_bytes());
+            }
+            ToBrowser::Audio(pcm) => {
+                o.reserve(1 + pcm.len());
+                o.push(8);
+                o.extend_from_slice(pcm);
             }
             ToBrowser::CursorImage { hot_x, hot_y, width, height, data } => {
                 o.push(7);
@@ -492,8 +505,16 @@ where
         let _ = clip_tx.send(data);
     }));
     link.send(Down::ClipboardOn);
+    // The session's sound, until the browser says it does not want it: chunks are dropped, not queued, when the connection is behind.
+    let (audio_tx, audio_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(AUDIO_QUEUE);
+    link.set_audio_sink(Some(Box::new(move |pcm| {
+        let _ = audio_tx.try_send(pcm);
+    })));
+    link.send(Down::AudioOn);
 
-    let result = pump(rd, wr, &link, clip_rx, fd, max_bitrate).await;
+    let result = pump(rd, wr, &link, clip_rx, audio_rx, fd, max_bitrate).await;
+    link.send(Down::AudioOff);
+    link.set_audio_sink(None);
     link.shutdown().await;
     result
 }
@@ -523,7 +544,7 @@ fn read_browser<R: tokio::io::AsyncRead + Unpin + Send + 'static>(mut rd: R) -> 
     rx
 }
 
-async fn pump<R, W>(rd: R, wr: &mut W, link: &Arc<Link>, mut clip_rx: tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>, fd: Option<std::os::fd::RawFd>, max_bitrate: u32) -> Result<()>
+async fn pump<R, W>(rd: R, wr: &mut W, link: &Arc<Link>, mut clip_rx: tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>, mut audio_rx: tokio::sync::mpsc::Receiver<Vec<u8>>, fd: Option<std::os::fd::RawFd>, max_bitrate: u32) -> Result<()>
 where
     R: tokio::io::AsyncRead + Unpin + Send + 'static,
     W: tokio::io::AsyncWrite + Unpin,
@@ -539,6 +560,7 @@ where
     let mut resize_at: Option<tokio::time::Instant> = None;
     let mut size = link.size();
     let started = Instant::now();
+    let mut sound = true;
     let mut clip_rate = Rate { window: Instant::now(), count: 0 };
     loop {
         let resize_due = async {
@@ -596,11 +618,22 @@ where
                         }
                     }
                     ToServer::RequestFull => link.send(Down::RequestFull),
+                    ToServer::Audio { on } => {
+                        if on != sound {
+                            sound = on;
+                            link.send(if on { Down::AudioOn } else { Down::AudioOff });
+                        }
+                    }
                     ToServer::Clipboard { text } => {
                         if clip_rate.hit_max(Instant::now(), MAX_CLIPBOARDS_PER_SECOND) {
                             link.send(Down::Clipboard { data: text.into_bytes() });
                         }
                     }
+                }
+            }
+            Some(pcm) = audio_rx.recv() => {
+                if sound {
+                    write_message(wr, &ToBrowser::Audio(pcm)).await?;
                 }
             }
             Some(data) = clip_rx.recv() => {
@@ -664,6 +697,7 @@ mod tests {
             ToServer::Ack { frames: 3 },
             ToServer::RequestFull,
             ToServer::Clipboard { text: "olá, mundo\n".into() },
+            ToServer::Audio { on: false },
             ToServer::Bye,
         ];
         for msg in all {
@@ -691,6 +725,8 @@ mod tests {
         long_start.push(0);
         assert_eq!(ToServer::decode(&long_start), None, "bytes after Start");
         assert_eq!(ToServer::decode(&vec![8; MAX_TO_SERVER + 1]), None, "a message that is too long");
+        assert_eq!(ToServer::decode(&[10]), None, "Audio without its flag");
+        assert_eq!(ToServer::decode(&[10, 1, 1]), None);
         assert_eq!(ToServer::decode(&[9]), None, "empty clipboard text");
         assert_eq!(ToServer::decode(&[9, 0xff, 0xfe]), None, "clipboard text that is not UTF-8");
         let mut big = vec![b'a'; MAX_CLIPBOARD_MESSAGE];
@@ -742,6 +778,11 @@ mod tests {
         assert_eq!(credits_back(100, 0), 0, "nothing was sent: nothing to give back");
         assert_eq!(credits_back(1, 1), 1);
         assert_eq!(credits_back(0, 5), 0);
+    }
+
+    #[test]
+    fn sound_goes_out_as_its_tag_and_the_samples() {
+        assert_eq!(ToBrowser::Audio(vec![1, 2, 3, 4]).encode(), vec![8, 1, 2, 3, 4]);
     }
 
     #[test]
