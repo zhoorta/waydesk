@@ -19,6 +19,8 @@ use crate::web::App;
 
 /// What the browser may send in one message: a password, a key, a mouse position. The daemon refuses more than this too.
 pub const MAX_FROM_BROWSER: usize = 2048;
+/// Clipboard text (tag 9) may be as long as the daemon's session takes: 1 MiB and the tag.
+pub const MAX_CLIPBOARD_FROM_BROWSER: usize = 1 + 1024 * 1024;
 /// The most the daemon may send in one message: a whole H.264 picture.
 pub const MAX_FROM_DAEMON: usize = 16 * 1024 * 1024;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -71,7 +73,7 @@ async fn session(ws: &mut WebSocket, ip: IpAddr, account: &str, app: &App) -> Re
             m = ws.recv() => match m {
                 Some(Ok(Message::Binary(b))) => {
                     last_heard = Instant::now();
-                    if b.is_empty() || b.len() > MAX_FROM_BROWSER {
+                    if b.is_empty() || b.len() > if b[0] == 9 { MAX_CLIPBOARD_FROM_BROWSER } else { MAX_FROM_BROWSER } {
                         break Err(format!("a message of {} bytes from the browser", b.len()));
                     }
                     from_browser_bytes += b.len() as u64;

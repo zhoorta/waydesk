@@ -370,7 +370,7 @@ async fn stream_handler(State(app): State<Arc<App>>, Extension(ClientAddr(peer))
         Err(Refusal::Total) => return text(StatusCode::SERVICE_UNAVAILABLE, "the server is full\n"),
     };
     info!(%ip, account = signed.account, active = app.sessions.active(), "stream requested");
-    ws.max_message_size(crate::stream::MAX_FROM_BROWSER).max_frame_size(crate::stream::MAX_FROM_BROWSER).on_upgrade(move |socket| crate::stream::run(socket, ip, signed.account, app, guard))
+    ws.max_message_size(crate::stream::MAX_CLIPBOARD_FROM_BROWSER).max_frame_size(crate::stream::MAX_CLIPBOARD_FROM_BROWSER).on_upgrade(move |socket| crate::stream::run(socket, ip, signed.account, app, guard))
 }
 
 /// `root` joined with a path from a URL, only if it stays inside `root` and names no hidden file.

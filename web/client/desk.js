@@ -3,8 +3,8 @@
 //
 // Messages are binary WebSocket messages, little endian, first byte the tag.
 //   browser -> daemon: 1 Start(w16 h16 scale16 password) 2 Resize(w16 h16 scale16) 3 Key(code, down) 4 Move(x32 y32) 5 Button(n, down)
-//                      6 Wheel(f32 f32) 7 Ack(n16) 8 RequestFull 255 Bye        (strings: u16 length + UTF-8)
-//   daemon -> browser: 1 Ready(w16 h16) 2 Resized(w16 h16) 3 Frame(key8 ts32 annexb...) 4 Cursor(name) 5 Error(code8 text)
+//                      6 Wheel(f32 f32) 7 Ack(n16) 8 RequestFull 9 Clipboard(UTF-8 text, the rest) 255 Bye        (strings: u16 length + UTF-8)
+//   daemon -> browser: 1 Ready(w16 h16) 2 Resized(w16 h16) 3 Frame(key8 ts32 annexb...) 4 Cursor(name) 5 Error(code8 text) 6 Clipboard(UTF-8 text)
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();
@@ -56,6 +56,8 @@ export class Desk {
     this.pending = null; // the latest pointer position, sent once per animation frame
     this.stats = { frames: 0, bytes: 0, received: 0, keys: 0, dropped: 0, resets: 0 };
     this.listeners = [];
+    this.clip = ''; // the last clipboard text that went either way (an echo is not sent back)
+    this.hold = null; // while the clipboard is read for a paste, the keys wait behind it
   }
 
   connect({ width, height, scale, password }) {
@@ -92,6 +94,12 @@ export class Desk {
       case 4: { // Cursor
         const name = dec.decode(m.subarray(1));
         this.canvas.style.cursor = CURSOR.test(name) ? (name === 'default' ? 'default' : name) : 'default';
+        break;
+      }
+      case 6: { // Clipboard: the desktop copied text
+        const text = dec.decode(m.subarray(1));
+        this.clip = text;
+        try { navigator.clipboard.writeText(text).catch(() => {}); } catch { /* no clipboard access here */ }
         break;
       }
       case 5: // Error
@@ -183,6 +191,7 @@ export class Desk {
     on(window, 'keydown', (e) => this.key(e, true), { capture: true });
     on(window, 'keyup', (e) => this.key(e, false), { capture: true });
     on(window, 'blur', () => this.releaseAll());
+    on(window, 'focus', () => { this.syncClipboard(); });
     on(c, 'pointermove', (e) => this.move(e));
     on(c, 'pointerdown', (e) => { c.setPointerCapture(e.pointerId); this.move(e); this.button(e, true); e.preventDefault(); });
     on(c, 'pointerup', (e) => { this.button(e, false); e.preventDefault(); });
@@ -201,7 +210,35 @@ export class Desk {
     e.preventDefault();
     e.stopPropagation();
     if (down) this.pressed.add(e.code); else this.pressed.delete(e.code);
-    this.send([3, ...str(e.code), down ? 1 : 0]);
+    const msg = [3, ...str(e.code), down ? 1 : 0];
+    // A paste: what the browser's clipboard holds goes first, then the key (and any key after it keeps its order).
+    if (down && ((e.ctrlKey && e.code === 'KeyV') || (e.shiftKey && e.code === 'Insert'))) {
+      this.after(this.syncClipboard().then(() => { this.send(msg); }));
+    } else if (this.hold) {
+      this.after(this.hold.then(() => { this.send(msg); }));
+    } else {
+      this.send(msg);
+    }
+  }
+
+  after(p) {
+    this.hold = p;
+    p.then(() => { if (this.hold === p) this.hold = null; });
+  }
+
+  /** Sends the browser's clipboard text to the desktop when it is not what both sides already have. Needs the browser's leave to read. */
+  async syncClipboard() {
+    try {
+      const text = await Promise.race([navigator.clipboard.readText(), new Promise((_, no) => setTimeout(no, 300))]);
+      if (text && text !== this.clip && enc.encode(text).length < 1024 * 1024) {
+        this.clip = text;
+        const body = enc.encode(text);
+        const m = new Uint8Array(1 + body.length);
+        m[0] = 9;
+        m.set(body, 1);
+        this.send(m);
+      }
+    } catch { /* not allowed, empty, or not text: the desktop keeps its own */ }
   }
 
   // Where a pointer event is on the desktop, in its pixels. The picture is fitted into the canvas element (letterboxed when the shapes differ).

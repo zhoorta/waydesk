@@ -24,6 +24,10 @@ use crate::proto::{Down, FrameKind};
 
 /// The longest message the browser may send (the password is the longest part).
 pub const MAX_TO_SERVER: usize = 2048;
+/// The one message that may be longer: clipboard text (the tag and up to the session's limit of text).
+pub const MAX_CLIPBOARD_MESSAGE: usize = 1 + crate::proto::MAX_CLIPBOARD;
+/// The most clipboard texts the browser may send in a second.
+const MAX_CLIPBOARDS_PER_SECOND: u32 = 5;
 /// The longest password.
 const MAX_PASSWORD: usize = 512;
 /// How long the browser has to send `Start`.
@@ -53,6 +57,8 @@ pub enum ToServer {
     /// The browser has shown this many frames.
     Ack { frames: u16 },
     RequestFull,
+    /// Text the browser's clipboard holds now (the whole rest of the message, UTF-8).
+    Clipboard { text: String },
     Bye,
 }
 
@@ -64,6 +70,8 @@ pub enum ToBrowser {
     /// One H.264 picture (Annex B) of the whole screen. `key`: the browser can start decoding here.
     Frame { key: bool, ts_ms: u32, data: Vec<u8> },
     Cursor(String),
+    /// Text the desktop's clipboard holds now.
+    Clipboard(String),
     Error { code: u8, message: String },
 }
 
@@ -105,7 +113,8 @@ impl<'a> In<'a> {
 impl ToServer {
     /// `None` for anything that is not exactly a message of this protocol.
     pub fn decode(buf: &[u8]) -> Option<Self> {
-        if buf.len() > MAX_TO_SERVER {
+        let limit = if buf.first() == Some(&9) { MAX_CLIPBOARD_MESSAGE } else { MAX_TO_SERVER };
+        if buf.len() > limit {
             return None;
         }
         let mut i = In(buf);
@@ -124,6 +133,7 @@ impl ToServer {
             }
             7 => ToServer::Ack { frames: i.u16()? },
             8 => ToServer::RequestFull,
+            9 => return String::from_utf8(i.0.to_vec()).ok().filter(|t| !t.is_empty()).map(|text| ToServer::Clipboard { text }),
             255 => ToServer::Bye,
             _ => return None,
         };
@@ -171,6 +181,10 @@ impl ToServer {
                 o.extend_from_slice(&frames.to_le_bytes());
             }
             ToServer::RequestFull => o.push(8),
+            ToServer::Clipboard { text } => {
+                o.push(9);
+                o.extend_from_slice(text.as_bytes());
+            }
             ToServer::Bye => o.push(255),
         }
         o
@@ -196,6 +210,10 @@ impl ToBrowser {
             ToBrowser::Cursor(name) => {
                 o.push(4);
                 o.extend_from_slice(name.as_bytes());
+            }
+            ToBrowser::Clipboard(text) => {
+                o.push(6);
+                o.extend_from_slice(text.as_bytes());
             }
             ToBrowser::Error { code, message } => {
                 o.push(5);
@@ -364,12 +382,16 @@ struct Rate {
 
 impl Rate {
     fn hit(&mut self, now: Instant) -> bool {
+        self.hit_max(now, MAX_MESSAGES_PER_SECOND)
+    }
+
+    fn hit_max(&mut self, now: Instant, max: u32) -> bool {
         if now.duration_since(self.window) >= Duration::from_secs(1) {
             self.window = now;
             self.count = 0;
         }
         self.count += 1;
-        self.count <= MAX_MESSAGES_PER_SECOND
+        self.count <= max
     }
 }
 
@@ -380,7 +402,7 @@ async fn read_message<R: tokio::io::AsyncRead + Unpin>(r: &mut R) -> Result<Opti
         _ => r.read_exact(&mut len[1..]).await?,
     };
     let len = u32::from_le_bytes(len) as usize;
-    if len == 0 || len > MAX_TO_SERVER {
+    if len == 0 || len > MAX_CLIPBOARD_MESSAGE {
         bail!("a message of {len} bytes");
     }
     let mut body = vec![0u8; len];
@@ -455,8 +477,14 @@ where
     }
     link.send(Down::Credit { frames: WINDOW });
     link.send(Down::RequestFull);
+    // The desktop's clipboard text comes back to the browser (the link has already bounded its size and speed).
+    let (clip_tx, clip_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    link.set_clipboard_sink(Box::new(move |data| {
+        let _ = clip_tx.send(data);
+    }));
+    link.send(Down::ClipboardOn);
 
-    let result = pump(rd, wr, &link).await;
+    let result = pump(rd, wr, &link, clip_rx).await;
     link.shutdown().await;
     result
 }
@@ -486,7 +514,7 @@ fn read_browser<R: tokio::io::AsyncRead + Unpin + Send + 'static>(mut rd: R) -> 
     rx
 }
 
-async fn pump<R, W>(rd: R, wr: &mut W, link: &Arc<Link>) -> Result<()>
+async fn pump<R, W>(rd: R, wr: &mut W, link: &Arc<Link>, mut clip_rx: tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>) -> Result<()>
 where
     R: tokio::io::AsyncRead + Unpin + Send + 'static,
     W: tokio::io::AsyncWrite + Unpin,
@@ -497,6 +525,7 @@ where
     let mut resize_at: Option<tokio::time::Instant> = None;
     let mut size = link.size();
     let started = Instant::now();
+    let mut clip_rate = Rate { window: Instant::now(), count: 0 };
     loop {
         let resize_due = async {
             match resize_at {
@@ -542,6 +571,16 @@ where
                         }
                     }
                     ToServer::RequestFull => link.send(Down::RequestFull),
+                    ToServer::Clipboard { text } => {
+                        if clip_rate.hit_max(Instant::now(), MAX_CLIPBOARDS_PER_SECOND) {
+                            link.send(Down::Clipboard { data: text.into_bytes() });
+                        }
+                    }
+                }
+            }
+            Some(data) = clip_rx.recv() => {
+                if let Ok(text) = String::from_utf8(data) {
+                    write_message(wr, &ToBrowser::Clipboard(text)).await?;
                 }
             }
             event = async { link.events.lock().await.recv().await } => {
@@ -595,6 +634,7 @@ mod tests {
             ToServer::Wheel { vertical: 1.5, horizontal: -0.25 },
             ToServer::Ack { frames: 3 },
             ToServer::RequestFull,
+            ToServer::Clipboard { text: "olá, mundo\n".into() },
             ToServer::Bye,
         ];
         for msg in all {
@@ -621,6 +661,13 @@ mod tests {
         let huge_password = ToServer::Start { width: 1, height: 1, scale_percent: 100, password: "x".repeat(513) }.encode();
         assert_eq!(ToServer::decode(&huge_password), None);
         assert_eq!(ToServer::decode(&vec![8; MAX_TO_SERVER + 1]), None, "a message that is too long");
+        assert_eq!(ToServer::decode(&[9]), None, "empty clipboard text");
+        assert_eq!(ToServer::decode(&[9, 0xff, 0xfe]), None, "clipboard text that is not UTF-8");
+        let mut big = vec![b'a'; MAX_CLIPBOARD_MESSAGE];
+        big[0] = 9;
+        assert!(ToServer::decode(&big).is_some(), "clipboard text up to the session's limit");
+        big.push(b'a');
+        assert_eq!(ToServer::decode(&big), None, "clipboard text over it");
     }
 
     #[test]
@@ -683,7 +730,7 @@ mod tests {
         assert_eq!(read_message(&mut good).await.unwrap(), None, "a clean end");
         let mut zero = std::io::Cursor::new(0u32.to_le_bytes().to_vec());
         assert!(read_message(&mut zero).await.is_err());
-        let mut huge = std::io::Cursor::new(((MAX_TO_SERVER + 1) as u32).to_le_bytes().to_vec());
+        let mut huge = std::io::Cursor::new(((MAX_CLIPBOARD_MESSAGE + 1) as u32).to_le_bytes().to_vec());
         assert!(read_message(&mut huge).await.is_err());
     }
 }
