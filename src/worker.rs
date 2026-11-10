@@ -17,7 +17,7 @@ use crate::encode::Tuning;
 use crate::encoder::Encode;
 use crate::input;
 use crate::proto::{self, Down, FrameKind, Up};
-use crate::sessionaudio::Audio;
+use crate::sessionaudio::{Audio, Mic};
 use crate::sessionclip::Clipboard;
 use crate::sessionfiles::{Files, FilesOutcome};
 use crate::session::{self, Session};
@@ -115,6 +115,7 @@ struct Worker {
     bitmaps: bool,
     up: mpsc::UnboundedSender<Up>,
     audio: Audio,
+    mic: Mic,
     clipboard: Clipboard,
     /// The clipboard files being received from the client.
     files: Files,
@@ -347,7 +348,7 @@ async fn serve_client(
     };
     let (w, h) = (session.shared.width, session.shared.height);
     session.shared.force_full();
-    let mut me = Worker { session: Some(session), enc: None, tuning: cfg.tuning, credits: 0, bitrate: None, bitmaps: cfg.tuning.is_none(), up: up_tx.clone(), audio: Audio::new(up_tx.clone()), clipboard: Clipboard::new(up_tx), files: Files::default(), settle: None, settling: false, last_frame: tokio::time::Instant::now(), last_rect: None, last_change: tokio::time::Instant::now() };
+    let mut me = Worker { session: Some(session), enc: None, tuning: cfg.tuning, credits: 0, bitrate: None, bitmaps: cfg.tuning.is_none(), up: up_tx.clone(), audio: Audio::new(up_tx.clone()), mic: Mic::default(), clipboard: Clipboard::new(up_tx), files: Files::default(), settle: None, settling: false, last_frame: tokio::time::Instant::now(), last_rect: None, last_change: tokio::time::Instant::now() };
     let _ = me.up.send(Up::Ready { width: w, height: h });
     // The shape of the mouse pointer goes to the client as it changes (when the client draws the pointer itself).
     if !crate::capture::cursor_in_picture() && crate::cursors::sway_reports_cursor() {
@@ -481,6 +482,9 @@ impl Worker {
             Down::FilesRead { id, index, offset, len } => self.clipboard.files_read(id, index, offset, len),
             Down::AudioOn => self.audio.start(),
             Down::AudioOff => self.audio.stop(),
+            Down::MicOn => self.mic.start(),
+            Down::MicOff => self.mic.stop(),
+            Down::Mic { pcm } => self.mic.write(&pcm),
             Down::Resize { width, height, scale_percent } => self.resize(width, height, scale_percent).await,
             Down::Bye => {}
         }

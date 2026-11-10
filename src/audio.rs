@@ -19,6 +19,11 @@ pub const SINK: &str = "waydesk-server";
 pub const RATE: u32 = 44_100;
 /// 20 ms of 16-bit stereo.
 pub const CHUNK: usize = (RATE as usize / 50) * 4;
+/// The client's microphone: 16-bit mono at 48 kHz, in chunks of 20 ms.
+pub const MIC_RATE: u32 = 48_000;
+pub const MIC_CHUNK: usize = (MIC_RATE as usize / 50) * 2;
+/// The session's virtual microphone, an input device the apps can record from.
+pub const MIC_SOURCE: &str = "waydesk-mic";
 
 #[derive(Default)]
 pub struct Factory {

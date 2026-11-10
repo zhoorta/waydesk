@@ -8,7 +8,7 @@ use std::process::{Child, Command, Stdio};
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
-use crate::audio::{ensure_sink, pactl, CHUNK, RATE, SINK};
+use crate::audio::{ensure_sink, pactl, CHUNK, MIC_CHUNK, MIC_RATE, MIC_SOURCE, RATE, SINK};
 use crate::proto::Up;
 
 pub struct Audio {
@@ -76,6 +76,105 @@ impl Audio {
 }
 
 impl Drop for Audio {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+/// The account's microphone: a PipeWire/PulseAudio "pipe source" (a real input device, not a monitor, so apps list it) that reads a FIFO;
+/// the client's microphone chunks are written into it. It exists while the client's microphone is on.
+#[derive(Default)]
+pub struct Mic {
+    fifo: Option<std::fs::File>,
+    module: Option<String>,
+    path: Option<std::path::PathBuf>,
+    previous_source: Option<String>,
+    dropped: u64,
+}
+
+impl Mic {
+    pub fn start(&mut self) {
+        self.stop();
+        let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR").map(std::path::PathBuf::from) else {
+            warn!("microphone: no XDG_RUNTIME_DIR in this session");
+            return;
+        };
+        let path = dir.join("waydesk-mic.fifo");
+        let _ = std::fs::remove_file(&path);
+        // Mode 0600 by the umask of the session; the FIFO lives in the account's own runtime directory.
+        let made = Command::new("mkfifo").arg("-m").arg("600").arg(&path).stderr(Stdio::null()).status();
+        if !matches!(made, Ok(s) if s.success()) {
+            warn!("microphone: cannot make the pipe (is mkfifo installed?)");
+            return;
+        }
+        let args = [
+            "load-module".to_string(),
+            "module-pipe-source".to_string(),
+            format!("source_name={MIC_SOURCE}"),
+            format!("file={}", path.display()),
+            "format=s16le".to_string(),
+            format!("rate={MIC_RATE}"),
+            "channels=1".to_string(),
+            "source_properties=device.description=Waydesk-Microphone".to_string(),
+        ];
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let module = match pactl(&args) {
+            Ok(id) if !id.trim().is_empty() => id.trim().to_owned(),
+            _ => {
+                warn!("microphone: no audio server in this session (is pipewire-pulse running?)");
+                let _ = std::fs::remove_file(&path);
+                return;
+            }
+        };
+        // Read and write at once: opening only for writing would wait for the reader, and a full pipe must not block the session.
+        use std::os::unix::fs::OpenOptionsExt as _;
+        let file = std::fs::OpenOptions::new().read(true).write(true).custom_flags(libc::O_NONBLOCK).open(&path);
+        let Ok(file) = file else {
+            warn!("microphone: cannot open the pipe");
+            let _ = pactl(&["unload-module", &module]);
+            let _ = std::fs::remove_file(&path);
+            return;
+        };
+        self.previous_source = pactl(&["get-default-source"]).ok().map(|s| s.trim().to_owned()).filter(|s| !s.is_empty() && s != MIC_SOURCE);
+        let _ = pactl(&["set-default-source", MIC_SOURCE]);
+        info!("microphone: the session has a virtual microphone");
+        self.fifo = Some(file);
+        self.module = Some(module);
+        self.path = Some(path);
+        self.dropped = 0;
+    }
+
+    pub fn write(&mut self, pcm: &[u8]) {
+        use std::io::Write as _;
+        if pcm.len() != MIC_CHUNK {
+            return;
+        }
+        if let Some(f) = self.fifo.as_mut() {
+            // A full pipe (the audio server is behind) loses the chunk: late sound is worse than a gap.
+            if f.write_all(pcm).is_err() {
+                self.dropped += 1;
+                if self.dropped == 1 {
+                    warn!("microphone: the pipe is full, chunks are dropped");
+                }
+            }
+        }
+    }
+
+    pub fn stop(&mut self) {
+        self.fifo = None;
+        if let Some(m) = self.module.take() {
+            let _ = pactl(&["unload-module", &m]);
+        }
+        if let Some(p) = self.path.take() {
+            let _ = std::fs::remove_file(p);
+        }
+        if let Some(s) = self.previous_source.take() {
+            let _ = pactl(&["set-default-source", &s]);
+        }
+    }
+}
+
+impl Drop for Mic {
     fn drop(&mut self) {
         self.stop();
     }

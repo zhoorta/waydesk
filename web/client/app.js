@@ -201,10 +201,12 @@ function openStream() {
       setTimeout(sendSize, 1000);
     },
     ended: (message, isError) => end(message, isError),
+    micEnded: () => { $('mic').textContent = 'Mic off'; say('The microphone stopped.'); },
   });
   current = { el: canvas, desk };
   muted = false;
   $('mute').textContent = 'Sound on';
+  $('mic').textContent = 'Mic off';
   if (params.get('debug') === '1') globalThis.__desk = desk; // for looking at the decoder's numbers in the console
   heldPassword = '';
   $('pass2').value = '';
@@ -294,6 +296,17 @@ $('mute').addEventListener('click', () => {
   $('mute').textContent = muted ? 'Sound off' : 'Sound on';
   if (current && current.desk) current.desk.setMuted(muted);
 });
+let micBusy = false;
+$('mic').addEventListener('click', async () => {
+  if (!current || !current.desk || micBusy) return;
+  micBusy = true;
+  const turnOn = !current.desk.mic;
+  const problem = await current.desk.setMic(turnOn);
+  micBusy = false;
+  $('mic').textContent = current.desk.mic ? 'Mic on' : 'Mic off';
+  if (problem) say(problem);
+});
+$('mic').hidden = !useStream;
 $('mute').hidden = !useStream; // the RDP fallback has its own sound
 $('cad').addEventListener('click', () => current && (current.desk ? current.desk.ctrlAltDel() : current.ui.ctrlAltDel()));
 $('fs').addEventListener('click', async () => {

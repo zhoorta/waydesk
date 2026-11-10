@@ -29,6 +29,8 @@ pub const MAX_TO_SERVER: usize = 2048;
 pub const MAX_CLIPBOARD_MESSAGE: usize = 1 + crate::proto::MAX_CLIPBOARD;
 /// The most clipboard texts the browser may send in a second.
 const MAX_CLIPBOARDS_PER_SECOND: u32 = 5;
+/// A chunk is 20 ms: 50 a second, and room for a burst after a stall.
+const MAX_MIC_CHUNKS_PER_SECOND: u32 = 75;
 /// Chunks of sound (20 ms each) that may wait for the connection: 0.5 s; more are dropped.
 const AUDIO_QUEUE: usize = 25;
 /// How long the browser has to send `Start`.
@@ -60,6 +62,10 @@ pub enum ToServer {
     Clipboard { text: String },
     /// Sound on (the default) or off: off stops the recording of the session's speaker, so nothing is sent.
     Audio { on: bool },
+    /// The browser's microphone on or off: on makes the session's virtual microphone, off removes it.
+    Mic { on: bool },
+    /// 20 ms of the browser's microphone: 16 bit mono PCM, little endian, 48000 Hz (`audio::MIC_CHUNK` bytes).
+    MicData(Vec<u8>),
     Bye,
 }
 
@@ -139,6 +145,8 @@ impl ToServer {
             7 => ToServer::Ack { frames: i.u16()? },
             8 => ToServer::RequestFull,
             10 => ToServer::Audio { on: i.u8()? != 0 },
+            11 => ToServer::Mic { on: i.u8()? != 0 },
+            12 => return (i.0.len() == crate::audio::MIC_CHUNK).then(|| ToServer::MicData(i.0.to_vec())),
             9 => return String::from_utf8(i.0.to_vec()).ok().filter(|t| !t.is_empty()).map(|text| ToServer::Clipboard { text }),
             255 => ToServer::Bye,
             _ => return None,
@@ -187,6 +195,11 @@ impl ToServer {
             }
             ToServer::RequestFull => o.push(8),
             ToServer::Audio { on } => o.extend_from_slice(&[10, u8::from(*on)]),
+            ToServer::Mic { on } => o.extend_from_slice(&[11, u8::from(*on)]),
+            ToServer::MicData(pcm) => {
+                o.push(12);
+                o.extend_from_slice(pcm);
+            }
             ToServer::Clipboard { text } => {
                 o.push(9);
                 o.extend_from_slice(text.as_bytes());
@@ -514,6 +527,7 @@ where
 
     let result = pump(rd, wr, &link, clip_rx, audio_rx, fd, max_bitrate).await;
     link.send(Down::AudioOff);
+    link.send(Down::MicOff);
     link.set_audio_sink(None);
     link.shutdown().await;
     result
@@ -562,6 +576,8 @@ where
     let started = Instant::now();
     let mut sound = true;
     let mut clip_rate = Rate { window: Instant::now(), count: 0 };
+    let mut mic_rate = Rate { window: Instant::now(), count: 0 };
+    let mut mic = false;
     loop {
         let resize_due = async {
             match resize_at {
@@ -622,6 +638,17 @@ where
                         if on != sound {
                             sound = on;
                             link.send(if on { Down::AudioOn } else { Down::AudioOff });
+                        }
+                    }
+                    ToServer::Mic { on } => {
+                        if on != mic {
+                            mic = on;
+                            link.send(if on { Down::MicOn } else { Down::MicOff });
+                        }
+                    }
+                    ToServer::MicData(pcm) => {
+                        if mic && mic_rate.hit_max(Instant::now(), MAX_MIC_CHUNKS_PER_SECOND) {
+                            link.send(Down::Mic { pcm });
                         }
                     }
                     ToServer::Clipboard { text } => {
@@ -698,6 +725,8 @@ mod tests {
             ToServer::RequestFull,
             ToServer::Clipboard { text: "olá, mundo\n".into() },
             ToServer::Audio { on: false },
+            ToServer::Mic { on: true },
+            ToServer::MicData(vec![7; crate::audio::MIC_CHUNK]),
             ToServer::Bye,
         ];
         for msg in all {
@@ -726,6 +755,11 @@ mod tests {
         assert_eq!(ToServer::decode(&long_start), None, "bytes after Start");
         assert_eq!(ToServer::decode(&vec![8; MAX_TO_SERVER + 1]), None, "a message that is too long");
         assert_eq!(ToServer::decode(&[10]), None, "Audio without its flag");
+        assert_eq!(ToServer::decode(&[11]), None, "Mic without its flag");
+        assert_eq!(ToServer::decode(&[12, 1, 2]), None, "a microphone chunk of the wrong size");
+        let mut long = vec![12];
+        long.extend(vec![0u8; crate::audio::MIC_CHUNK + 1]);
+        assert_eq!(ToServer::decode(&long), None, "a microphone chunk that is too long");
         assert_eq!(ToServer::decode(&[10, 1, 1]), None);
         assert_eq!(ToServer::decode(&[9]), None, "empty clipboard text");
         assert_eq!(ToServer::decode(&[9, 0xff, 0xfe]), None, "clipboard text that is not UTF-8");

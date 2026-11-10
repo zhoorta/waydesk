@@ -3,7 +3,7 @@
 //
 // Messages are binary WebSocket messages, little endian, first byte the tag.
 //   browser -> daemon: 1 Start(w16 h16 scale16) 2 Resize(w16 h16 scale16) 3 Key(code, down) 4 Move(x32 y32) 5 Button(n, down)
-//                      6 Wheel(f32 f32) 7 Ack(n16) 8 RequestFull 9 Clipboard(UTF-8 text, the rest) 10 Audio(on8) 255 Bye        (strings: u16 length + UTF-8)
+//                      6 Wheel(f32 f32) 7 Ack(n16) 8 RequestFull 9 Clipboard(UTF-8 text, the rest) 10 Audio(on8) 11 Mic(on8) 12 MicData(16 bit mono PCM, 48000 Hz, 20 ms) 255 Bye        (strings: u16 length + UTF-8)
 //   daemon -> browser: 1 Ready(w16 h16) 2 Resized(w16 h16) 3 Frame(key8 ts32 annexb...) 4 Cursor(name) 5 Error(code8 text) 6 Clipboard(UTF-8 text) 7 CursorImage(hotx16 hoty16 w16 h16 BGRA premultiplied) 8 Audio(16 bit stereo PCM, 44100 Hz)
 
 const enc = new TextEncoder();
@@ -70,6 +70,8 @@ export class Desk {
     this.underMeta = new Set(); // keys sent while Command was held (a Mac sends no key-up for them)
     this.audio = null; // { ctx, next } once sound has come
     this.muted = false;
+    this.mic = null; // { stream, ctx } while the microphone is on
+    this.micWanted = false;
     this.tapped = new Set(); // keys sent as a whole tap (their key-up is not sent again)
   }
 
@@ -181,6 +183,61 @@ export class Desk {
     if (muted && this.audio) this.audio.next = 0;
   }
 
+  /** Microphone on or off. On asks the browser for permission; resolves to an error text, or '' when it is on (or off). */
+  async setMic(on) {
+    this.micWanted = on;
+    if (!on) { this.stopMic(); return ''; }
+    if (this.mic) return '';
+    const AC = globalThis.AudioContext || globalThis.webkitAudioContext;
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || !AC || !globalThis.AudioWorkletNode) return 'This browser cannot record a microphone here.';
+    let stream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 } });
+    } catch (e) {
+      return e && e.name === 'NotAllowedError' ? 'The microphone is blocked: allow it for this site in the browser.' : 'No microphone could be opened.';
+    }
+    if (!this.micWanted || this.ended) { for (const t of stream.getTracks()) t.stop(); return ''; }
+    let ctx;
+    try {
+      ctx = new AC({ latencyHint: 'interactive' });
+      await ctx.audioWorklet.addModule('/mic-worklet.js');
+      const node = new AudioWorkletNode(ctx, 'waydesk-mic', { numberOfInputs: 1, numberOfOutputs: 1, channelCount: 1, channelCountMode: 'explicit' });
+      const mute = ctx.createGain();
+      mute.gain.value = 0; // a node that goes nowhere may not be run: this one is, and makes no sound
+      ctx.createMediaStreamSource(stream).connect(node);
+      node.connect(mute).connect(ctx.destination);
+      node.port.onmessage = (ev) => {
+        if (!this.ws || this.ws.readyState !== WebSocket.OPEN || this.ws.bufferedAmount > 64 * 1024) return; // behind: late sound is dropped
+        const pcm = new Uint8Array(ev.data);
+        const msg = new Uint8Array(1 + pcm.length);
+        msg[0] = 12;
+        msg.set(pcm, 1);
+        this.ws.send(msg);
+      };
+      if (ctx.state !== 'running') await ctx.resume();
+    } catch (e) {
+      for (const t of stream.getTracks()) t.stop();
+      if (ctx) { try { ctx.close(); } catch { /* gone */ } }
+      return 'The microphone could not be started.';
+    }
+    if (!this.micWanted || this.ended) { for (const t of stream.getTracks()) t.stop(); try { ctx.close(); } catch { /* gone */ } return ''; }
+    this.mic = { stream, ctx };
+    // Someone else (an unplugged headset) ending the capture turns the microphone off.
+    stream.getAudioTracks()[0].addEventListener('ended', () => { this.stopMic(); if (this.on.micEnded) this.on.micEnded(); });
+    this.send([11, 1]);
+    return '';
+  }
+
+  stopMic() {
+    const m = this.mic;
+    this.mic = null;
+    if (m) {
+      for (const t of m.stream.getTracks()) t.stop();
+      try { m.ctx.close(); } catch { /* gone */ }
+    }
+    this.send([11, 0]);
+  }
+
   cursorImage(m) {
     const hx = m[1] | (m[2] << 8), hy = m[3] | (m[4] << 8), w = m[5] | (m[6] << 8), h = m[7] | (m[8] << 8);
     const px = m.subarray(9);
@@ -259,6 +316,8 @@ export class Desk {
     this.detachInput();
     if (this.decoder && this.decoder.state !== 'closed') { try { this.decoder.close(); } catch { /* gone */ } }
     if (this.audio) { try { this.audio.ctx.close(); } catch { /* gone */ } this.audio = null; }
+    this.micWanted = false;
+    if (this.mic) { for (const t of this.mic.stream.getTracks()) t.stop(); try { this.mic.ctx.close(); } catch { /* gone */ } this.mic = null; }
     if (this.ws) {
       try { if (this.ws.readyState === WebSocket.OPEN) this.ws.send(new Uint8Array([255])); this.ws.close(); } catch { /* gone */ }
     }

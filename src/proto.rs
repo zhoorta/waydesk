@@ -114,6 +114,12 @@ pub enum Down {
     AudioOn,
     /// The sound channel is closed: stop recording.
     AudioOff,
+    /// The client has a microphone: make the session's virtual microphone (`audio::MIC_SOURCE`).
+    MicOn,
+    /// The microphone is off: remove the virtual microphone.
+    MicOff,
+    /// 20 ms of the client's microphone: 16 bit mono PCM, little endian, 48000 Hz (`audio::MIC_CHUNK` bytes).
+    Mic { pcm: Vec<u8> },
     Bye,
 }
 
@@ -285,6 +291,12 @@ impl Down {
             Down::ClipboardOn => o.u8(11),
             Down::AudioOn => o.u8(12),
             Down::AudioOff => o.u8(13),
+            Down::MicOn => o.u8(21),
+            Down::MicOff => o.u8(22),
+            Down::Mic { pcm } => {
+                o.u8(23);
+                o.bytes(pcm);
+            }
             Down::Clipboard { data } => {
                 o.u8(10);
                 o.bytes(data);
@@ -359,6 +371,9 @@ impl Down {
             20 => Down::FilesRead { id: i.u32()?, index: i.u32()?, offset: i.u64()?, len: i.u32()? },
             12 => Down::AudioOn,
             13 => Down::AudioOff,
+            21 => Down::MicOn,
+            22 => Down::MicOff,
+            23 => Down::Mic { pcm: i.bytes()? },
             255 => Down::Bye,
             t => return Err(ProtoError::UnknownTag(t)),
         };
@@ -722,6 +737,9 @@ mod tests {
             Down::ClipboardOn,
             Down::AudioOn,
             Down::AudioOff,
+            Down::MicOn,
+            Down::MicOff,
+            Down::Mic { pcm: vec![1; 1920] },
             Down::Bye,
         ]
     }
