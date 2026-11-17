@@ -215,9 +215,8 @@ $('form').addEventListener('submit', async (e) => {
     $('code').value = '';
     say('');
     await learnRole();
+    // After signing in a person lands on "My desktop" (or the admin page they asked for) and opens the desktop from there.
     show('desk');
-    // A person who went to an admin page first (and was asked to sign in) lands there; everybody else gets the desktop, as before.
-    if (!(me.admin && adminView(location.hash.slice(1)))) openDesktop();
   } catch (err) {
     me = null;
     heldPassword = '';

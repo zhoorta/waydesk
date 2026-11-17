@@ -14,7 +14,7 @@ const el = (tag, props = {}, ...kids) => {
 };
 const chip = (text, tone = '') => el('span', { class: 'tag ' + tone }, text);
 const dot = (tone = '') => el('span', { class: 'dot ' + tone });
-const win = (title, ...body) => el('section', { class: 'win' }, el('div', { class: 'bar' }, el('span', { class: 't' }, title), el('span', { class: 'cap', 'aria-hidden': 'true' }, el('i', {}, '–'), el('i', {}, '□'), el('i', {}, '✕'))), el('div', { class: 'body' }, body));
+const win = (title, ...body) => el('section', { class: 'win' }, el('div', { class: 'bar' }, el('span', { class: 't' }, title)), el('div', { class: 'body' }, body));
 const meter = (percent, warn = false) => el('div', { class: 'meter' }, el('i', { class: warn ? 'w' : '', style: `width:${Math.max(0, Math.min(100, Math.round(percent)))}%` }));
 const gb = (mb) => (mb >= 1024 ? (mb / 1024).toFixed(mb >= 10240 ? 0 : 1) + ' GB' : Math.round(mb) + ' MB');
 const table = (heads, rows, empty) => el('div', { class: 'tw' }, rows.length === 0 ? el('p', { class: 'muted' }, empty) : el('table', {}, el('thead', {}, el('tr', {}, heads.map((h) => el('th', { class: h.startsWith('>') ? 'n' : '' }, h.replace(/^>/, ''))))), el('tbody', {}, rows)));
@@ -164,6 +164,12 @@ const views = {
       tile('Sessions', a.sessions ?? sessionsNow.length, a.max_active_users ? 'of ' + a.max_active_users : 'running', a.max_active_users ? ((a.sessions ?? 0) / a.max_active_users) * 100 : null, a.max_active_users && (a.sessions ?? 0) / a.max_active_users > 0.8),
       tile('Memory', gb(usedMb), 'of ' + gb(m.mem_total_mb || 0), memPct, memPct > 80),
       tile('Swap', swapTotal ? gb(m.swap_used_mb || 0) : 'none', swapTotal ? 'of ' + gb(swapTotal) : '', swapTotal ? ((m.swap_used_mb || 0) / swapTotal) * 100 : null, swapTotal && (m.swap_used_mb || 0) / swapTotal > 0.5),
+      // How busy the CPUs were over the second the status measured; an older server that does not say falls back to the load average per core.
+      (() => {
+        const cores = m.cores || 1;
+        const pct = m.cpu_percent != null ? m.cpu_percent : Math.min(100, ((parseFloat((m.load || [])[0]) || 0) / cores) * 100);
+        return tile('CPU', Math.round(pct), '% busy \u00b7 ' + cores + (cores === 1 ? ' core' : ' cores'), pct, pct > 85);
+      })(),
       g0 ? tile('GPU' + (gpus.length > 1 ? ' 1 of ' + gpus.length : ''), g0.busy_percent == null ? '-' : Math.round(g0.busy_percent), '% busy' + (g0.encoder_percent != null ? ' · encode ' + Math.round(g0.encoder_percent) + '%' : ''), g0.busy_percent, g0.busy_percent > 85) : tile('GPU', 'none', 'software rendering', null));
     const attention = [];
     if (a.open === false) attention.push(['full', 'bad', 'New sessions are refused: ' + (a.reason || 'the machine is full')]);

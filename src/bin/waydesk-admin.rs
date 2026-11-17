@@ -994,6 +994,31 @@ fn status(json_out: bool, watch: Option<std::time::Duration>) -> Result<()> {
     }
 }
 
+/// The counters of the first line of /proc/stat (all CPUs): (busy, total) in clock ticks. Busy is everything but idle and waiting for I/O; guest time is
+/// already part of user time, so it is not added again.
+fn read_cpu_times() -> Option<(u64, u64)> {
+    parse_cpu_times(&std::fs::read_to_string("/proc/stat").ok()?)
+}
+
+fn parse_cpu_times(stat: &str) -> Option<(u64, u64)> {
+    let line = stat.lines().next()?.strip_prefix("cpu ")?;
+    // user nice system idle iowait irq softirq steal
+    let f: Vec<u64> = line.split_whitespace().take(8).filter_map(|v| v.parse().ok()).collect();
+    if f.len() < 4 {
+        return None;
+    }
+    let total: u64 = f.iter().sum();
+    let idle = f[3] + f.get(4).copied().unwrap_or(0);
+    Some((total.saturating_sub(idle), total))
+}
+
+/// How busy the CPUs were between two readings, in percent.
+fn cpu_busy_percent(before: Option<(u64, u64)>, after: Option<(u64, u64)>) -> Option<f64> {
+    let ((b0, t0), (b1, t1)) = (before?, after?);
+    let total = t1.checked_sub(t0).filter(|t| *t > 0)?;
+    Some((b1.saturating_sub(b0) as f64 / total as f64 * 100.0).clamp(0.0, 100.0))
+}
+
 fn status_once(json_out: bool, compact: bool) -> Result<()> {
     let info = memory::read_meminfo().context("cannot read /proc/meminfo")?;
     let load = std::fs::read_to_string("/proc/loadavg").unwrap_or_default().split_whitespace().take(3).map(str::to_owned).collect::<Vec<_>>();
@@ -1002,7 +1027,9 @@ fn status_once(json_out: bool, compact: bool) -> Result<()> {
     // The GPU counters and the CPU of the accounts are measured over the same second.
     let mut gpus = gpuinfo::list();
     let sampler = gpuinfo::begin(&gpus);
+    let cpu_before = read_cpu_times();
     let usage = gather_usage(std::time::Duration::from_millis(1000))?;
+    let cpu_busy = cpu_busy_percent(cpu_before, read_cpu_times());
     gpuinfo::finish(sampler, &mut gpus);
     let setting = gpu_setting();
     let roles = gpuplace::effective_roles(server_setting("WAYDESK_GPU_ROLES").as_deref());
@@ -1063,7 +1090,7 @@ fn status_once(json_out: bool, compact: bool) -> Result<()> {
                 "mem_total_mb": info.total_kb / 1024, "mem_available_mb": info.available_kb / 1024,
                 "swap_total_mb": info.swap_total_kb / 1024, "swap_used_mb": (info.swap_total_kb - info.swap_free_kb.min(info.swap_total_kb)) / 1024,
                 "swap_devices": swaps.iter().map(|(n, size, used)| json!({ "name": n, "size_mb": size / 1024, "used_mb": used / 1024 })).collect::<Vec<_>>(),
-                "load": load, "cores": cores,
+                "load": load, "cores": cores, "cpu_percent": cpu_busy.map(round),
                 "os": os_pretty_name(&std::fs::read_to_string("/etc/os-release").unwrap_or_default()),
                 "kernel": std::fs::read_to_string("/proc/sys/kernel/osrelease").unwrap_or_default().trim(),
             },
@@ -1092,7 +1119,7 @@ fn status_once(json_out: bool, compact: bool) -> Result<()> {
         let list: Vec<String> = swaps.iter().map(|(n, size, used)| format!("{} {} ({} used)", n.rsplit('/').next().unwrap_or(n), human_mb(size / 1024), human_mb(used / 1024))).collect();
         println!("Swap      {}", list.join(", "));
     }
-    println!("Load      {} ({cores} cores)", load.join(" "));
+    println!("Load      {} ({cores} cores){}", load.join(" "), cpu_busy.map(|b| format!(", CPU {b:.0}% busy")).unwrap_or_default());
     println!("System    {}", system_line());
     if gpus.is_empty() {
         println!("GPU       none (no render node: sessions render and encode on the CPU)");
@@ -1603,6 +1630,24 @@ fn users_limit(name: &str, rest: &[&str]) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_cpu_load_is_the_busy_share_between_two_readings() {
+        let stat = |busy: u64, idle: u64, iowait: u64| format!("cpu  {busy} 0 0 {idle} {iowait} 0 0 0 0 0\ncpu0 1 2 3 4 5 6 7 8\nintr 1\n");
+        let a = parse_cpu_times(&stat(100, 700, 100)).unwrap();
+        assert_eq!(a, (100, 900), "waiting for I/O counts as idle");
+        // 50 more busy ticks and 150 more idle ones: a quarter busy
+        let b = parse_cpu_times(&stat(150, 850, 100)).unwrap();
+        assert_eq!(cpu_busy_percent(Some(a), Some(b)), Some(25.0));
+        // nothing passed, a missing reading, a counter that went backwards
+        assert_eq!(cpu_busy_percent(Some(a), Some(a)), None);
+        assert_eq!(cpu_busy_percent(None, Some(a)), None);
+        assert_eq!(cpu_busy_percent(Some(b), Some(a)), None);
+        assert_eq!(parse_cpu_times("nonsense"), None);
+        assert_eq!(parse_cpu_times("cpu  1 2 3\n"), None);
+        // an older kernel with four counters only
+        assert_eq!(parse_cpu_times("cpu  10 0 10 80\n"), Some((20, 100)));
+    }
+
     #[test]
     fn a_program_run_as_an_account_has_no_controlling_terminal_and_a_time_limit_that_reaches_it() {
         let a = Account { name: "ana".into(), uid: 1001, gid: 1001, shell: "/bin/bash".into() };

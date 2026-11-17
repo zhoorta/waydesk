@@ -62,9 +62,6 @@ nav a[aria-current] { color: var(--copper); border-bottom-color: var(--copper); 
 .win > .bar { display: flex; align-items: center; gap: var(--s2); height: 36px; padding: 0 var(--s2) 0 var(--s3); background: var(--bar); color: var(--dim); font-size: var(--fs-xs); }
 .win > .bar .t { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .win > .bar .act { color: var(--dim); }
-.cap { display: flex; gap: 1px; }
-.cap i { display: block; width: 30px; height: 18px; font-style: normal; font-size: var(--fs-xs); line-height: 18px; text-align: center; color: #737a82; }
-.cap i:first-child { border-radius: var(--r-pill) 0 0 var(--r-pill); } .cap i:last-child { border-radius: 0 var(--r-pill) var(--r-pill) 0; }
 .win > .body { padding: var(--s4); }
 .win > .body > :first-child { margin-top: 0; } .win > .body > :last-child { margin-bottom: 0; }
 .page { margin-top: var(--s5); display: grid; gap: var(--s4); }
@@ -186,8 +183,7 @@ select { padding: 8px 10px; }
 
 <script>
 const ico = n => `<svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-${n}"/></svg>`;
-const cap = '<span class="cap" aria-hidden="true"><i>&#x2013;</i><i>&#x25a1;</i><i>&#x2715;</i></span>';
-const win = (title, body, extra = '') => `<section class="win"><div class="bar"><span class="t">${title}</span>${extra}${cap}</div><div class="body">${body}</div></section>`;
+const win = (title, body, extra = '') => `<section class="win"><div class="bar"><span class="t">${title}</span>${extra}</div><div class="body">${body}</div></section>`;
 const chip = (t, c = '') => `<span class="tag ${c}">${t}</span>`;
 const bar = (p, w) => `<div class="meter"><i class="${w ? 'w' : ''}" style="width:${p}%"></i></div>`;
 const dot = c => `<span class="dot ${c || ''}"></span>`;

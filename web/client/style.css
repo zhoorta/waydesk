@@ -27,9 +27,6 @@ p { margin: 8px 0; }
 .win { background: var(--panel); backdrop-filter: blur(10px); border: 1px solid rgba(255,255,255,.11); border-radius: var(--r-win); box-shadow: var(--shadow); overflow: hidden; }
 .win > .bar { display: flex; align-items: center; gap: 8px; height: 36px; padding: 0 8px 0 16px; background: var(--bar); color: var(--dim); font-size: 13px; }
 .win > .bar .t { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.cap { display: flex; gap: 1px; }
-.cap i { display: block; width: 30px; height: 18px; font-style: normal; font-size: 13px; line-height: 18px; text-align: center; color: #737a82; }
-.cap i:first-child { border-radius: var(--r-pill) 0 0 var(--r-pill); } .cap i:last-child { border-radius: 0 var(--r-pill) var(--r-pill) 0; }
 .win > .body { padding: 24px; }
 
 .center { min-height: 100vh; display: grid; place-items: center; padding: 24px; }
