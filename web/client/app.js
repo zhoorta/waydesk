@@ -2,6 +2,7 @@
 // (the page sends the password only into it); the gateway hands out a one-time token for starting the session.
 import { Desk, supported as streamSupported } from './desk.js';
 import { render as renderAdmin, stop as stopAdmin, known as adminView } from './admin.js';
+import { render as renderAccount } from './account.js';
 
 // The desktop is the daemon's own browser stream (desk.js): H.264 to the browser's decoder, input back. `?rdp=1` uses the RDP client instead
 // (the IronRDP browser client, loaded only then), to compare the two or where the browser cannot decode H.264.
@@ -117,15 +118,26 @@ async function showState() {
 function route() {
   const view = location.hash.slice(1);
   const admin = Boolean(me && me.admin) && adminView(view);
+  const account = view === 'account';
+  const signedOut = () => { me = null; show('login'); say('Your sign-in ended. Sign in again.', true); };
   $('adminnav').hidden = !(me && me.admin);
-  $('mypage').hidden = admin;
-  $('adminpage').hidden = !admin;
+  $('mypage').hidden = admin || account;
+  $('adminpage').hidden = !(admin || account);
   for (const a of document.querySelectorAll('.topbar nav a')) {
-    if (a.dataset.view === (admin ? view : 'desktop')) a.setAttribute('aria-current', 'page');
+    if (a.dataset.view === (admin || account ? view : 'desktop')) a.setAttribute('aria-current', 'page');
     else a.removeAttribute('aria-current');
   }
-  if (admin) renderAdmin(view, $('adminpage'), () => { me = null; show('login'); say('Your sign-in ended. Sign in again.', true); }, () => me.csrf);
-  else stopAdmin();
+  if (admin) renderAdmin(view, $('adminpage'), signedOut, () => me.csrf);
+  else if (account) {
+    stopAdmin();
+    renderAccount($('adminpage'), () => me.csrf, signedOut, (text, tone) => {
+      const f = $('flash');
+      f.textContent = text;
+      f.className = 'flash ' + tone;
+      f.hidden = false;
+      setTimeout(() => { f.hidden = true; }, 6000);
+    });
+  } else stopAdmin();
 }
 window.addEventListener('hashchange', () => { if (me && !$('desk').hidden) route(); });
 // Whether the account administers the machine is the server's answer (it asks the helper); the pages ask again on every request.

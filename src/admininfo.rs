@@ -41,6 +41,8 @@ fn args(kind: InfoKind) -> &'static [&'static str] {
         InfoKind::Sessions => &["sessions", "list", "--json"],
         InfoKind::Status => &["status", "--json"],
         InfoKind::Role => &[],
+        InfoKind::Access => &["access", "show"],
+        InfoKind::Cert => &["cert", "status"],
     }
 }
 
@@ -56,9 +58,16 @@ pub fn answer(kind: InfoKind, name: &str, admin: bool, exe: &Path) -> Result<Str
     if kind == InfoKind::Role {
         return Ok(format!("{{\"admin\":{admin}}}"));
     }
-    ensure!(admin || kind != InfoKind::Status, "only administrators may ask for the status");
+    let admin_only = matches!(kind, InfoKind::Status | InfoKind::Access | InfoKind::Cert);
+    ensure!(admin || !admin_only, "only administrators may ask for this");
     let out = run(exe, args(kind))?;
-    if admin || kind == InfoKind::Status { Ok(out) } else { own_rows(&out, name) }
+    match kind {
+        // These two print sentences, not JSON.
+        InfoKind::Access | InfoKind::Cert => Ok(serde_json::json!({ "text": out.trim_end() }).to_string()),
+        InfoKind::Status => Ok(out),
+        _ if admin => Ok(out),
+        _ => own_rows(&out, name),
+    }
 }
 
 /// Has the runner do an action: connects to its socket (root only), sends one line of JSON and reads its one-line answer. The action has been
@@ -139,6 +148,40 @@ pub fn audit(query: &AuditQuery, exe: &Path) -> Result<String> {
     let args = query.args();
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     Ok(audit_lines_to_list(&run(exe, &args)?))
+}
+
+/// The lowest password length the portal accepts when somebody changes their own (the command line takes any length up to 128).
+pub const MIN_NEW_PASSWORD: usize = 8;
+
+/// Why a new password is not accepted, in plain words.
+pub fn check_new_password(old: &str, new: &str) -> std::result::Result<(), &'static str> {
+    if new.chars().count() < MIN_NEW_PASSWORD {
+        return Err("the new password must be at least 8 characters");
+    }
+    if new.len() > 128 || new.contains(['\n', '\r', '\0']) {
+        return Err("the new password may be up to 128 characters, on one line");
+    }
+    if new == old {
+        return Err("the new password is the same as the old one");
+    }
+    Ok(())
+}
+
+/// Has the runner set the password of the account `uid` (the one that asked, whose old password the helper has just checked). The answer never
+/// holds the password.
+pub fn run_self_password(socket: &Path, uid: u32, source: &str, new: &str) -> Result<String> {
+    use std::io::Write as _;
+    let mut sock = std::os::unix::net::UnixStream::connect(socket).with_context(|| format!("cannot reach the administration socket {}", socket.display()))?;
+    let limit = Some(Duration::from_secs(30));
+    let _ = sock.set_read_timeout(limit);
+    let _ = sock.set_write_timeout(limit);
+    let request = serde_json::json!({ "actor_uid": uid, "source": source, "self_passwd": { "new": new } });
+    sock.write_all(format!("{request}\n").as_bytes())?;
+    sock.shutdown(std::net::Shutdown::Write)?;
+    let mut answer = String::new();
+    (&sock).take(64 * 1024).read_to_string(&mut answer).context("reading the answer")?;
+    ensure!(!answer.trim().is_empty(), "the runner gave no answer");
+    Ok(answer.trim().to_owned())
 }
 
 struct Slot;
@@ -264,6 +307,27 @@ mod tests {
         let _turn = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         assert_eq!(audit(&q, &fake).unwrap(), r#"[{"event":"admin.user.add","n":2},{"event":"login","n":1}]"#);
         assert!(audit(&AuditQuery { limit: 0, ..q }, &fake).is_err());
+    }
+
+    #[test]
+    fn a_new_password_is_checked_before_anything_is_asked_of_the_runner() {
+        assert!(check_new_password("old-password", "a-better-one").is_ok());
+        assert!(check_new_password("old-password", "short").is_err());
+        assert!(check_new_password("old-password", "has\nnewline!").is_err());
+        assert!(check_new_password("old-password", &"x".repeat(129)).is_err());
+        assert!(check_new_password("same-password", "same-password").is_err());
+        assert!(check_new_password("a", "ünïcödé-pässwörd").is_ok());
+    }
+
+    #[test]
+    fn access_and_certificate_status_are_for_administrators_and_come_back_as_text_in_json() {
+        let _turn = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let fake = script(r#"echo "Listening on     127.0.0.1:3389  (local)"; echo 'quote " and \ backslash'"#);
+        assert!(answer(InfoKind::Access, "alice", false, &fake).is_err());
+        assert!(answer(InfoKind::Cert, "alice", false, &fake).is_err());
+        let v: serde_json::Value = serde_json::from_str(&answer(InfoKind::Access, "root", true, &fake).unwrap()).unwrap();
+        assert!(v["text"].as_str().unwrap().starts_with("Listening on"));
+        assert!(v["text"].as_str().unwrap().contains("quote \" and \\ backslash"));
     }
 
     #[test]

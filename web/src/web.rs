@@ -80,6 +80,8 @@ pub struct App {
     pub admin_cache: std::sync::Mutex<std::collections::HashMap<&'static str, (Instant, String)>>,
     /// Changes asked for by administrators, per address.
     pub admin_rate: RateLimiter,
+    /// Password changes, per address (a wrong old password is also slowed and counted by the helper).
+    pub pw_rate: RateLimiter,
 }
 
 /// How long an administrators' answer is reused.
@@ -92,6 +94,7 @@ impl App {
             auth,
             admin_cache: Default::default(),
             admin_rate: RateLimiter::new(30, Duration::from_secs(60)),
+            pw_rate: RateLimiter::new(5, Duration::from_secs(60)),
             tokens: Tokens::new(Duration::from_secs(30)),
             token_rate: RateLimiter::new(cfg.rate_per_minute, Duration::from_secs(60)),
             ws_rate: RateLimiter::new(cfg.rate_per_minute.saturating_mul(3), Duration::from_secs(60)),
@@ -146,6 +149,9 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/api/me", get(me))
         .route("/api/mine", get(mine))
         .route("/api/admin/do", post(admin_do).layer(axum::extract::DefaultBodyLimit::max(2048)))
+        .route("/api/account", get(account_info))
+        .route("/api/account/password", post(change_password).layer(axum::extract::DefaultBodyLimit::max(2048)))
+        .route("/api/admin/totp", post(admin_totp).layer(axum::extract::DefaultBodyLimit::max(1024)))
         .route("/api/admin/audit", get(admin_audit))
         .route("/api/admin/{kind}", get(admin_page))
         .route("/api/logout", post(logout))
@@ -334,6 +340,8 @@ fn admin_kind(name: &str) -> Option<(&'static str, portal::InfoKind)> {
         "users" => Some(("users", portal::InfoKind::Users)),
         "sessions" => Some(("sessions", portal::InfoKind::Sessions)),
         "status" => Some(("status", portal::InfoKind::Status)),
+        "access" => Some(("access", portal::InfoKind::Access)),
+        "cert" => Some(("cert", portal::InfoKind::Cert)),
         _ => None,
     }
 }
@@ -364,6 +372,108 @@ async fn admin_do(State(app): State<Arc<App>>, Extension(ClientAddr(peer)): Exte
         // A refusal in words (a name that is not valid, "the server could not do this now"): shown to the administrator as it is.
         Ok(Err(why)) if why.starts_with("helper: ") => json(StatusCode::BAD_REQUEST, format!("{}\n", serde_json::json!({ "ok": false, "error": &why["helper: ".len()..] }))),
         _ => text(StatusCode::BAD_GATEWAY, "the server could not be asked\n"),
+    }
+}
+
+fn totp_mode_word(mode: TotpMode) -> &'static str {
+    match mode {
+        TotpMode::Off => "off",
+        TotpMode::Optional => "optional",
+        TotpMode::Required => "required",
+    }
+}
+
+/// The portal's own settings, as the administrators' Settings page shows them (changing them is editing /etc/default/waydesk and restarting the portal).
+fn settings_json(app: &App) -> String {
+    serde_json::json!({
+        "portal": {
+            "bind": app.cfg.bind.to_string(),
+            "plain_http": app.cfg.plain_http,
+            "public_origin": app.cfg.public_origin,
+            "allow_from": app.cfg.allow_from,
+            "totp": totp_mode_word(app.cfg.totp),
+            "idle_minutes": app.cfg.idle.as_secs() / 60,
+            "absolute_hours": app.cfg.absolute.as_secs() / 3600,
+        },
+        "enrolled": app.store.list(),
+    })
+    .to_string()
+}
+
+/// What the signed-in person's own page shows: the account and whether it has a second factor.
+async fn account_info(State(app): State<Arc<App>>, headers: HeaderMap) -> Response {
+    let Some((_, signed)) = signed_in(&app, &headers) else { return text(StatusCode::UNAUTHORIZED, "not signed in\n") };
+    json(StatusCode::OK, format!("{}\n", serde_json::json!({ "account": signed.account, "totp": totp_mode_word(app.cfg.totp), "enrolled": app.store.exists(&signed.account) })))
+}
+
+#[derive(serde::Deserialize)]
+struct PasswordChange {
+    old: String,
+    new: String,
+}
+
+/// The signed-in person changes their own password. The old one is checked by the helper like a login (same delay and lockout); the new one is set by
+/// the runner. Neither is logged here, and the refusals are in words.
+async fn change_password(State(app): State<Arc<App>>, Extension(ClientAddr(peer)): Extension<ClientAddr>, Extension(PublicHost(host)): Extension<PublicHost>, headers: HeaderMap, body: axum::body::Bytes) -> Response {
+    let (id, signed) = match changing(&app, &headers, &host) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    if !app.pw_rate.hit(peer.ip(), Instant::now()) {
+        return text(StatusCode::TOO_MANY_REQUESTS, "too many attempts, wait a minute\n");
+    }
+    let Ok(req) = serde_json::from_slice::<PasswordChange>(&body) else { return text(StatusCode::BAD_REQUEST, "bad request\n") };
+    if req.old.len() > 512 || req.new.len() > 512 {
+        return text(StatusCode::BAD_REQUEST, "bad request\n");
+    }
+    let Some(ticket) = app.portal.ticket(&id) else { return text(StatusCode::UNAUTHORIZED, "not signed in\n") };
+    let (auth, account, source) = (app.auth.clone(), signed.account.clone(), signed.ip.to_string());
+    let answer = tokio::task::spawn_blocking(move || auth.change_password(&ticket, &account, &source, &req.old, &req.new)).await;
+    let refuse = |status: StatusCode, why: &str| (status, [(header::CONTENT_TYPE, "application/json"), (header::CACHE_CONTROL, "no-store")], format!("{}\n", serde_json::json!({ "ok": false, "error": why }))).into_response();
+    match answer {
+        Ok(Ok(())) => {
+            info!(account = signed.account, "changed their own password");
+            json(StatusCode::OK, "{\"ok\":true}\n".into())
+        }
+        Ok(Err(why)) if why.contains("current password") => refuse(StatusCode::FORBIDDEN, "The current password is wrong."),
+        Ok(Err(why)) if why.starts_with("helper: ") => refuse(StatusCode::BAD_REQUEST, &why["helper: ".len()..]),
+        _ => refuse(StatusCode::BAD_GATEWAY, "The server could not change the password now."),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct TotpRequest {
+    action: String,
+    name: String,
+}
+
+/// An administrator takes an account's authenticator away (a lost phone): the account then signs in with the password alone, where the policy allows,
+/// and sets a new one up. The administrator is checked by the helper on this request.
+async fn admin_totp(State(app): State<Arc<App>>, Extension(PublicHost(host)): Extension<PublicHost>, headers: HeaderMap, body: axum::body::Bytes) -> Response {
+    let (id, signed) = match changing(&app, &headers, &host) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    let Ok(req) = serde_json::from_slice::<TotpRequest>(&body) else { return text(StatusCode::BAD_REQUEST, "bad request\n") };
+    if req.action != "remove" || !crate::totp::valid_account(&req.name) {
+        return text(StatusCode::BAD_REQUEST, "bad request\n");
+    }
+    let Some(ticket) = app.portal.ticket(&id) else { return text(StatusCode::UNAUTHORIZED, "not signed in\n") };
+    let (auth, account, source) = (app.auth.clone(), signed.account.clone(), signed.ip.to_string());
+    match tokio::task::spawn_blocking(move || auth.is_admin(&ticket, &account, &source)).await {
+        Ok(Ok(true)) => {}
+        Ok(Ok(false)) => return text(StatusCode::FORBIDDEN, "administrators only\n"),
+        _ => return text(StatusCode::BAD_GATEWAY, "the server could not be asked\n"),
+    }
+    match app.store.remove(&req.name) {
+        Ok(removed) => {
+            warn!(admin = signed.account, account = req.name, removed, "an administrator removed the authenticator of an account");
+            json(StatusCode::OK, format!("{}\n", serde_json::json!({ "ok": true, "removed": removed })))
+        }
+        Err(e) => {
+            warn!("could not remove an authenticator: {e:#}");
+            text(StatusCode::INTERNAL_SERVER_ERROR, "could not remove it\n")
+        }
     }
 }
 
@@ -401,7 +511,9 @@ async fn admin_audit(State(app): State<Arc<App>>, Query(q): Query<AuditParams>, 
 /// Read-only data for the administrators' pages: the helper's lists and status. Whether the account is an administrator is asked of the helper on
 /// every request (a person taken out of the group loses the pages at once); the answer itself is kept a few seconds.
 async fn admin_page(State(app): State<Arc<App>>, UrlPath(kind): UrlPath<String>, headers: HeaderMap) -> Response {
-    let Some((name, info_kind)) = admin_kind(&kind) else { return text(StatusCode::NOT_FOUND, "not found\n") };
+    // "settings" is the portal's own configuration, which needs no question to the helper; the rest are the helper's.
+    let settings = kind == "settings";
+    let Some((name, info_kind)) = (if settings { Some(("settings", portal::InfoKind::Role)) } else { admin_kind(&kind) }) else { return text(StatusCode::NOT_FOUND, "not found\n") };
     let Some((id, signed)) = signed_in(&app, &headers) else { return text(StatusCode::UNAUTHORIZED, "not signed in\n") };
     let Some(ticket) = app.portal.ticket(&id) else { return text(StatusCode::UNAUTHORIZED, "not signed in\n") };
     let (auth, account, source) = (app.auth.clone(), signed.account.clone(), signed.ip.to_string());
@@ -414,6 +526,9 @@ async fn admin_page(State(app): State<Arc<App>>, UrlPath(kind): UrlPath<String>,
             return text(StatusCode::FORBIDDEN, "administrators only\n");
         }
         _ => return text(StatusCode::BAD_GATEWAY, "the server could not be asked\n"),
+    }
+    if settings {
+        return json(StatusCode::OK, format!("{}\n", settings_json(&app)));
     }
     let now = Instant::now();
     if let Some((at, body)) = app.admin_cache.lock().unwrap().get(name) {

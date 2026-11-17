@@ -41,6 +41,16 @@ impl crate::portal::Authenticator for FakeAuth {
         Ok(format!("[{{\"event\":\"login\",\"user\":\"ana\",\"since\":\"{}\"}}]", query.0))
     }
 
+    fn change_password(&self, _ticket: &str, account: &str, _source: &str, old: &str, new: &str) -> Result<(), String> {
+        if old != format!("pw-{account}") {
+            return Err("helper: the current password is not right".into());
+        }
+        if new.len() < 8 {
+            return Err("helper: the new password must be at least 8 characters".into());
+        }
+        Ok(())
+    }
+
     /// The stand-in runner: refuses the account `ana` (not an administrator), says that a name `bad` is not valid, and otherwise does what it is told.
     fn admin_do(&self, _ticket: &str, account: &str, _source: &str, action: &str) -> Result<String, String> {
         if account != "boss" {
@@ -862,4 +872,64 @@ async fn the_audit_log_is_for_administrators_and_the_filters_reach_the_helper() 
     assert_eq!(status, 400);
     assert!(body.contains("between 1 and 500"), "{body}");
     assert_eq!(env.http("GET", &format!("/api/admin/audit?user={}", "a".repeat(65)), &[("Cookie", &boss.cookie)]).await.0, 400, "a filter that long is not one");
+}
+
+#[tokio::test]
+async fn a_person_changes_their_own_password_and_an_administrator_sees_the_settings() {
+    let env = start("accountpage", Opts::default()).await;
+    let ana = env.browser("ana").await;
+    let boss = env.browser("boss").await;
+    let origin = env.origin();
+    let put = |b: &Browser, o: Option<&str>, csrf: bool, body: &str| {
+        let mut h: Vec<(&str, String)> = vec![("Cookie", b.cookie.clone())];
+        if let Some(o) = o {
+            h.push(("Origin", o.to_string()));
+        }
+        if csrf {
+            h.push(("X-CSRF-Token", b.csrf.clone()));
+        }
+        (h, body.to_string())
+    };
+    macro_rules! post {
+        ($path:expr, $b:expr, $o:expr, $c:expr, $body:expr) => {{
+            let (h, body) = put($b, $o, $c, $body);
+            let h: Vec<(&str, &str)> = h.iter().map(|(k, v)| (*k, v.as_str())).collect();
+            env.send("POST", $path, &h, &body).await
+        }};
+    }
+    let good = r#"{"old":"pw-ana","new":"a-new-password"}"#;
+    assert_eq!(env.http("GET", "/api/account", &[]).await.0, 401);
+    let (status, info) = env.http("GET", "/api/account", &[("Cookie", &ana.cookie)]).await;
+    assert!(status == 200 && info.contains("\"account\":\"ana\"") && info.contains("\"enrolled\":false"), "{info}");
+
+    assert_eq!(post!("/api/account/password", &ana, None, true, good).0, 403, "no origin");
+    assert_eq!(post!("/api/account/password", &ana, Some(&origin), false, good).0, 403, "no csrf token");
+    assert_eq!(post!("/api/account/password", &ana, Some(&origin), true, "nope").0, 400);
+    let (status, body) = post!("/api/account/password", &ana, Some(&origin), true, r#"{"old":"wrong","new":"a-new-password"}"#);
+    assert_eq!(status, 403);
+    assert!(body.contains("current password is wrong"), "{body}");
+    let (status, body) = post!("/api/account/password", &ana, Some(&origin), true, r#"{"old":"pw-ana","new":"short"}"#);
+    assert_eq!(status, 400);
+    assert!(body.contains("at least 8"), "{body}");
+    let (status, body) = post!("/api/account/password", &ana, Some(&origin), true, good);
+    assert_eq!((status, body.contains("\"ok\":true")), (200, true), "{body}");
+    assert!(!body.contains("a-new-password"), "the answer never repeats a password");
+
+    // the settings: only for administrators
+    assert_eq!(env.http("GET", "/api/admin/settings", &[("Cookie", &ana.cookie)]).await.0, 403);
+    let store = crate::totp::Store::new(&env.dir.join("totp"));
+    store.enroll("ana").unwrap();
+    let (status, settings) = env.http("GET", "/api/admin/settings", &[("Cookie", &boss.cookie)]).await;
+    assert_eq!(status, 200);
+    assert!(settings.contains("\"totp\":\"off\"") && settings.contains("\"enrolled\":[\"ana\"]"), "{settings}");
+
+    // taking an authenticator away: administrators only, and only a name that can be one
+    let remove = r#"{"action":"remove","name":"ana"}"#;
+    assert_eq!(post!("/api/admin/totp", &ana, Some(&origin), true, remove).0, 403, "not an administrator");
+    assert_eq!(post!("/api/admin/totp", &boss, Some(&origin), false, remove).0, 403, "no csrf token");
+    assert_eq!(post!("/api/admin/totp", &boss, Some(&origin), true, r#"{"action":"remove","name":"../x"}"#).0, 400);
+    assert_eq!(post!("/api/admin/totp", &boss, Some(&origin), true, r#"{"action":"add","name":"ana"}"#).0, 400);
+    assert!(store.exists("ana"));
+    assert_eq!(post!("/api/admin/totp", &boss, Some(&origin), true, remove).0, 200);
+    assert!(!store.exists("ana"));
 }

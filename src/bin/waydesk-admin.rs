@@ -320,6 +320,37 @@ fn serve_request() -> Result<()> {
     if source.len() > 45 || !source.chars().all(|c| c.is_ascii_hexdigit() || c == '.' || c == ':') {
         return reply(json!({ "ok": false, "error": "bad source address" }));
     }
+    // A person changing their own password: the helper has checked the old one; this sets the new one for the account that asked, and for nobody else.
+    if let Some(change) = req.get("self_passwd") {
+        let new = change.get("new").and_then(|n| n.as_str()).unwrap_or("");
+        if new.chars().count() < 8 || !valid_password(new) {
+            return reply(json!({ "ok": false, "error": "the new password is not acceptable" }));
+        }
+        let Some(me) = req.get("actor_uid").and_then(|u| u.as_u64()).and_then(|u| u32::try_from(u).ok()).and_then(|uid| accounts().ok()?.into_iter().find(|a| a.uid == uid)) else {
+            return reply(json!({ "ok": false, "error": "not an ordinary account" }));
+        };
+        let exe = std::env::current_exe().context("path of this program")?;
+        let mut child = Command::new(exe)
+            .args(["users", "passwd", &me.name, "--stdin"])
+            .env_clear()
+            .env("PATH", "/usr/sbin:/usr/bin:/sbin:/bin")
+            .env("SUDO_UID", me.uid.to_string())
+            .env("WAYDESK_VIA", "portal")
+            .env("WAYDESK_SOURCE", source)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .context("cannot run waydesk-admin")?;
+        child.stdin.take().context("no input pipe")?.write_all(format!("{new}\n").as_bytes())?;
+        let out = child.wait_with_output()?;
+        return if out.status.success() {
+            reply(json!({ "ok": true, "result": { "message": "the password was changed" } }))
+        } else {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            reply(json!({ "ok": false, "error": stderr.trim().lines().last().unwrap_or("it failed").trim_start_matches("waydesk-admin: ").chars().take(300).collect::<String>() }))
+        };
+    }
     let action = match req.get("do").ok_or_else(|| "nothing to do".to_string()).and_then(adminaction::AdminAction::from_json) {
         Ok(a) => a,
         Err(why) => return reply(json!({ "ok": false, "error": why })),

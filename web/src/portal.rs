@@ -49,6 +49,12 @@ pub trait Authenticator: Send + Sync {
         Err("no helper".into())
     }
 
+    /// The signed-in account changes its own password. The helper checks the old one (with the lockout of a login) and has the new one set.
+    /// `Err("helper: ...")` is a refusal in words the page can show.
+    fn change_password(&self, _ticket: &str, _account: &str, _source: &str, _old: &str, _new: &str) -> Result<(), String> {
+        Err("no helper".into())
+    }
+
     /// A change an administrator asked for (the JSON of one action, see `src/adminaction.rs`). The helper decides whether the account may and whether the
     /// action is one it knows; `Ok` is the runner's JSON answer (`{"ok":...}`), `Err("helper: ...")` a refusal in words the page can show.
     fn admin_do(&self, _ticket: &str, _account: &str, _source: &str, _action: &str) -> Result<String, String> {
@@ -139,6 +145,26 @@ impl Authenticator for HelperAuth {
                 HelperResp::Info { json } => Ok(json),
                 HelperResp::Error { message } => Err(format!("helper: {message}")),
                 other => Err(format!("unexpected answer to an audit request: {other:?}")),
+            },
+            HelperResp::AuthFail => Err("the sign-in is no longer good".into()),
+            HelperResp::Error { message } => Err(format!("helper: {message}")),
+            other => Err(format!("unexpected answer to a ticket: {other:?}")),
+        };
+        let _ = proto::write_frame(&mut sock, &HelperReq::Bye.encode());
+        result
+    }
+
+    fn change_password(&self, ticket: &str, account: &str, source: &str, old: &str, new: &str) -> Result<(), String> {
+        let mut sock = self.connect()?;
+        // A wrong old password takes the helper a few seconds on purpose, like a failed login.
+        let _ = sock.set_read_timeout(Some(Duration::from_secs(45)));
+        let redeem = HelperReq::Redeem { ticket: ticket.to_owned(), user: account.to_owned(), source: source.to_owned() };
+        let result = match Self::ask(&mut sock, &redeem)? {
+            HelperResp::AuthOk => match Self::ask(&mut sock, &HelperReq::ChangePassword { old: old.to_owned(), new: new.to_owned() })? {
+                HelperResp::Info { json } if json.contains("\"ok\":true") => Ok(()),
+                HelperResp::Info { json } => Err(format!("helper: {}", serde_json::from_str::<serde_json::Value>(&json).ok().and_then(|v| v.get("error").and_then(|e| e.as_str().map(str::to_owned))).unwrap_or_else(|| "the server could not change the password".into()))),
+                HelperResp::Error { message } => Err(format!("helper: {message}")),
+                other => Err(format!("unexpected answer to a password change: {other:?}")),
             },
             HelperResp::AuthFail => Err("the sign-in is no longer good".into()),
             HelperResp::Error { message } => Err(format!("helper: {message}")),

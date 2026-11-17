@@ -546,6 +546,9 @@ pub enum HelperReq {
     /// The audit log, filtered, for an administrator (see `admininfo::AuditQuery`); the answer is a JSON list, newest first (`HelperResp::Info`).
     /// An empty text is "no filter"; `limit` is at most 500.
     Audit { since: String, user: String, event: String, outcome: String, limit: u16 },
+    /// The account that logged in on this connection changes its own password: the helper checks `old` again (the same lockout as a login), then has the
+    /// runner set `new`. Neither password is logged or kept.
+    ChangePassword { old: String, new: String },
     Bye,
 }
 
@@ -558,6 +561,10 @@ pub enum InfoKind {
     Status,
     /// `{"admin":true|false}`: whether the account administers the machine (asked on every request, never kept).
     Role,
+    /// `{"text":"..."}`: what `waydesk-admin access show` says (administrators only).
+    Access,
+    /// `{"text":"..."}`: what `waydesk-admin cert status` says (administrators only).
+    Cert,
 }
 
 /// From the helper to the daemon.
@@ -608,6 +615,8 @@ impl HelperReq {
                     InfoKind::Sessions => 2,
                     InfoKind::Status => 3,
                     InfoKind::Role => 4,
+                    InfoKind::Access => 5,
+                    InfoKind::Cert => 6,
                 });
             }
             HelperReq::Admin { json } => {
@@ -621,6 +630,11 @@ impl HelperReq {
                 o.str(event);
                 o.str(outcome);
                 o.u16(*limit);
+            }
+            HelperReq::ChangePassword { old, new } => {
+                o.u8(9);
+                o.str(old);
+                o.str(new);
             }
             HelperReq::Bye => o.u8(255),
         }
@@ -641,11 +655,14 @@ impl HelperReq {
                     2 => InfoKind::Sessions,
                     3 => InfoKind::Status,
                     4 => InfoKind::Role,
+                    5 => InfoKind::Access,
+                    6 => InfoKind::Cert,
                     t => return Err(ProtoError::UnknownTag(t)),
                 },
             },
             7 => HelperReq::Admin { json: i.str()? },
             8 => HelperReq::Audit { since: i.str()?, user: i.str()?, event: i.str()?, outcome: i.str()?, limit: i.u16()? },
+            9 => HelperReq::ChangePassword { old: i.str()?, new: i.str()? },
             255 => HelperReq::Bye,
             t => return Err(ProtoError::UnknownTag(t)),
         };
@@ -893,6 +910,9 @@ mod tests {
             HelperReq::Info { kind: InfoKind::Sessions },
             HelperReq::Info { kind: InfoKind::Status },
             HelperReq::Info { kind: InfoKind::Role },
+            HelperReq::Info { kind: InfoKind::Access },
+            HelperReq::Info { kind: InfoKind::Cert },
+            HelperReq::ChangePassword { old: "pä ss".into(), new: "x".repeat(20) },
             HelperReq::Admin { json: r#"{"action":"user_add","name":"frida"}"#.into() },
             HelperReq::Audit { since: "7d".into(), user: "alice".into(), event: "admin".into(), outcome: "fail".into(), limit: 200 },
             HelperReq::Bye,

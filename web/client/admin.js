@@ -180,7 +180,7 @@ const views = {
       tiles,
       el('div', { class: 'two' },
         win('sessions now', table(['Account', 'Desktop', 'Encoder', '>Memory', '>CPU'], rows, 'Nobody is logged in.')),
-        el('div', { class: 'stack' },
+        el('div', { class: 'colstack' },
           win('needs attention', attention.length ? el('div', { class: 'tw' }, el('table', { class: 'plain' }, el('tbody', {}, attention.map(([k, tone, text]) => el('tr', {}, cell(chip(k, tone)), cell(text)))))) : el('p', { class: 'ok' }, 'Nothing needs attention.')),
           win('machine', el('dl', { class: 'kv' },
             el('dt', {}, 'System'), el('dd', {}, m.os || '-'),
@@ -270,6 +270,41 @@ const views = {
     form.addEventListener('submit', (e) => { e.preventDefault(); load(); });
     await load();
     return [el('div', { class: 'head' }, el('h1', {}, 'Audit'), el('span', { class: 'sp' }), el('span', { class: 'muted small' }, 'read only \u00b7 same records as ', el('code', {}, 'waydesk-admin audit'))), win('filter', form), holder];
+  },
+
+  async settings() {
+    const [s, access, cert] = await Promise.all([get('settings'), get('access'), get('cert')]);
+    const p = s.portal || {};
+    const pre = (text) => el('pre', { class: 'plainpre' }, text || '-');
+    const policy = { off: 'off: the password is enough', optional: 'optional: asked of accounts that set one up', required: 'required: every account needs one' }[p.totp] || p.totp;
+    const enrolled = s.enrolled || [];
+    const removeTotp = async (name) => {
+      if (!(await confirmBox('Remove the authenticator of ' + name + '?', name + ' will sign in with the password alone (where the policy allows it) and can set a new authenticator up.', 'Remove', true))) return;
+      try {
+        const r = await fetch('/api/admin/totp', { method: 'POST', cache: 'no-store', headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': ctx.csrf() }, body: JSON.stringify({ action: 'remove', name }) });
+        if (r.status === 401) { ctx.signedOut(); return; }
+        if (!r.ok) throw new Error(r.status === 403 ? 'Only administrators can do this.' : 'It did not work (' + r.status + ').');
+        ctx.flash('Removed the authenticator of ' + name + '.', 'ok');
+      } catch (e) { ctx.flash(e.message, 'bad'); }
+      ctx.reload();
+    };
+    return [
+      el('div', { class: 'head' }, el('h1', {}, 'Settings'), el('span', { class: 'sp' }), el('span', { class: 'muted small' }, 'read only \u00b7 changed on the server with ', el('code', {}, 'waydesk-admin'), ' and ', el('code', {}, '/etc/default/waydesk'))),
+      el('div', { class: 'two' },
+        el('div', { class: 'colstack' },
+          win('who can reach the desktop (RDP)', pre(access.text), el('p', { class: 'hint' }, 'Change it with ', el('code', {}, 'waydesk-admin access local | lan | vpn'), '. The daemon restarts and people connected over RDP reconnect.')),
+          win('certificate', pre(cert.text), el('p', { class: 'hint' }, 'Reissue or replace it with ', el('code', {}, 'waydesk-admin cert'), '.'))),
+        el('div', { class: 'colstack' },
+          win('this portal', el('dl', { class: 'kv' },
+            el('dt', {}, 'Listens on'), el('dd', { class: 'mono' }, (p.bind || '-') + (p.plain_http ? ' (plain HTTP behind a proxy)' : ' (HTTPS)')),
+            el('dt', {}, 'Public address'), el('dd', {}, p.public_origin || 'the address people open'),
+            el('dt', {}, 'Allowed from'), el('dd', { class: 'mono' }, p.allow_from || 'private networks (loopback: any)'),
+            el('dt', {}, 'Idle sign-out'), el('dd', {}, (p.idle_minutes ?? '-') + ' minutes'),
+            el('dt', {}, 'Longest sign-in'), el('dd', {}, (p.absolute_hours ?? '-') + ' hours'))),
+          win('two-step sign-in', el('p', {}, el('b', {}, 'Policy: '), policy),
+            enrolled.length ? table(['Account', ''], enrolled.map((n) => el('tr', {}, cell(el('b', {}, n)), cell(el('div', { class: 'acts' }, button('Remove', () => removeTotp(n), 'sm danger')), 'n'))), '') : el('p', { class: 'muted' }, 'No account has an authenticator set up.'),
+            el('p', { class: 'hint' }, 'Remove one when somebody loses their phone. Setting one up is done on the server: ', el('code', {}, 'waydesk-web totp add ACCOUNT'), '.')))),
+    ];
   },
 
   async sessions() {

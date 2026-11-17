@@ -508,6 +508,27 @@ fn serve(mut sock: UnixStream, cfg: &Config, policy: &PamPolicy, sessions: &Sess
                     }
                 },
             },
+            HelperReq::ChangePassword { old, new } => match (&who, &login) {
+                (Some(user), Some((source, _))) => {
+                    let fail = |sock: &mut UnixStream, why: &str| reply(sock, &HelperResp::Error { message: why.into() });
+                    if let Err(why) = crate::admininfo::check_new_password(&old, &new) {
+                        fail(&mut sock, why)
+                    } else if policy.authenticate(&user.name, &old, source).is_none() {
+                        // The old password is checked like a login: same delay, same lockout. Whatever happens, neither password is written anywhere.
+                        audit::event("admin.user.passwd", Outcome::Refused).str("user", &user.name).num("uid", user.uid.into()).source(source).str("reason", "old_password").emit();
+                        fail(&mut sock, "the current password is not right")
+                    } else {
+                        match crate::admininfo::run_self_password(&cfg.admin_socket, user.uid, source, &new) {
+                            Ok(answer) => reply(&mut sock, &HelperResp::Info { json: answer }),
+                            Err(e) => {
+                                warn!(user = %user.name, "the runner could not change the password: {e:#}");
+                                fail(&mut sock, "the server could not change the password now")
+                            }
+                        }
+                    }
+                }
+                _ => reply(&mut sock, &HelperResp::Error { message: "not logged in".into() }),
+            },
             HelperReq::Bye => false,
         };
         if !ok {
