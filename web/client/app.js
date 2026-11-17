@@ -6,6 +6,8 @@ import { Desk, supported as streamSupported } from './desk.js';
 // (the IronRDP browser client, loaded only then), to compare the two or where the browser cannot decode H.264.
 const params = new URLSearchParams(location.search);
 const $ = (id) => document.getElementById(id);
+// A toolbar button is an icon and a label; only the label changes, and aria-pressed says whether the thing is on.
+const setLabel = (id, text, on) => { $(id).querySelector('span').textContent = text; $(id).setAttribute('aria-pressed', String(on)); };
 // Messages go to the card that is showing: the sign-in form, or "My desktop".
 const say = (text, error = false) => {
   const el = $('desk').hidden ? $('msg') : $('deskmsg');
@@ -75,7 +77,9 @@ function show(view) {
   $('desk').hidden = view !== 'desk';
   $('session').hidden = view !== 'session';
   if (view === 'desk') {
-    $('who').textContent = 'Signed in as ' + me.account + '.';
+    $('account').textContent = me.account;
+    $('cardtitle').textContent = me.account + ' · desktop';
+    $('who').textContent = 'Your desktop is ready.';
     // The stream needs no password: the server holds a ticket for this sign-in. Only the RDP fallback asks for it.
     const askPassword = !useStream && heldPassword === '';
     $('askpass').hidden = !askPassword;
@@ -177,6 +181,11 @@ $('deskform').addEventListener('submit', (e) => {
   e.preventDefault();
   openDesktop();
 });
+// "Open fullscreen" opens the desktop and asks the browser for fullscreen in the same click (a browser only allows it from a click).
+$('openfs').addEventListener('click', () => {
+  openDesktop();
+  $('fs').click();
+});
 
 $('signout').addEventListener('click', async () => {
   try { await fetch('/api/logout', { method: 'POST', cache: 'no-store', headers: { 'X-CSRF-Token': me.csrf } }); } catch { /* the cookie ends by itself */ }
@@ -201,12 +210,12 @@ function openStream() {
       setTimeout(sendSize, 1000);
     },
     ended: (message, isError) => end(message, isError),
-    micEnded: () => { $('mic').textContent = 'Mic off'; say('The microphone stopped.'); },
+    micEnded: () => { setLabel('mic', 'Mic off', false); say('The microphone stopped.'); },
   });
   current = { el: canvas, desk };
   muted = true;
-  $('mute').textContent = 'Sound off';
-  $('mic').textContent = 'Mic off';
+  setLabel('mute', 'Sound off', false);
+  setLabel('mic', 'Mic off', false);
   if (params.get('debug') === '1') globalThis.__desk = desk; // for looking at the decoder's numbers in the console
   heldPassword = '';
   $('pass2').value = '';
@@ -293,7 +302,7 @@ $('end').addEventListener('click', () => (current && current.desk ? current.desk
 let muted = true; // sound is off until asked for
 $('mute').addEventListener('click', () => {
   muted = !muted;
-  $('mute').textContent = muted ? 'Sound off' : 'Sound on';
+  setLabel('mute', muted ? 'Sound off' : 'Sound on', !muted);
   if (current && current.desk) current.desk.setMuted(muted);
 });
 let micBusy = false;
@@ -303,7 +312,7 @@ $('mic').addEventListener('click', async () => {
   const turnOn = !current.desk.mic;
   const problem = await current.desk.setMic(turnOn);
   micBusy = false;
-  $('mic').textContent = current.desk.mic ? 'Mic on' : 'Mic off';
+  setLabel('mic', current.desk.mic ? 'Mic on' : 'Mic off', current.desk.mic);
   if (problem) say(problem);
 });
 $('mic').hidden = !useStream;
@@ -314,7 +323,15 @@ $('fs').addEventListener('click', async () => {
   // In fullscreen the browser lets a page take keys such as Alt+Tab and Ctrl+W (Chromium).
   if (navigator.keyboard && navigator.keyboard.lock) navigator.keyboard.lock().catch(() => {});
 });
+// In fullscreen the toolbar floats above the stream and shows when the pointer touches the top edge; it hides again when the pointer leaves it.
+$('session').addEventListener('mousemove', (e) => {
+  if (!document.fullscreenElement) return;
+  const bar = $('bar');
+  if (e.clientY < 8) bar.classList.add('show');
+  else if (e.clientY > bar.getBoundingClientRect().bottom + 24) bar.classList.remove('show');
+});
 document.addEventListener('fullscreenchange', () => {
+  $('bar').classList.remove('show');
   if (!document.fullscreenElement && navigator.keyboard && navigator.keyboard.unlock) navigator.keyboard.unlock();
 });
 

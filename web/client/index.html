@@ -4,37 +4,68 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Waydesk</title>
-  <link rel="icon" href="data:,">
+  <meta name="theme-color" content="#06121c">
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
-  <main id="login">
-    <form id="form" method="post" action="#">
-      <h1>Waydesk</h1>
-      <label>Account <input id="user" name="username" autocomplete="username" autocapitalize="none" spellcheck="false" required autofocus></label>
-      <label>Password <input id="pass" name="password" type="password" autocomplete="current-password" required></label>
-      <label>Code from your authenticator app <input id="code" name="code" inputmode="numeric" autocomplete="one-time-code" spellcheck="false" placeholder="if you have set one up"></label>
-      <button type="submit" id="go" disabled>Loading…</button>
-      <p id="msg" role="status"></p>
-    </form>
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <symbol id="i-open" viewBox="0 0 24 24"><path d="M14 4h6v6M20 4l-8 8M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/></symbol>
+    <symbol id="i-full" viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></symbol>
+    <symbol id="i-snd" viewBox="0 0 24 24"><path d="M4 9v6h4l5 4V5L8 9H4zM17 8a5 5 0 0 1 0 8"/></symbol>
+    <symbol id="i-mic" viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></symbol>
+    <symbol id="i-key" viewBox="0 0 24 24"><rect x="3" y="6" width="18" height="12" rx="2"/><path d="M7 10h.01M11 10h.01M15 10h.01M8 14h8"/></symbol>
+    <symbol id="i-off" viewBox="0 0 24 24"><path d="M12 3v9M6.3 6.8a8 8 0 1 0 11.4 0"/></symbol>
+  </svg>
+
+  <main id="login" class="center">
+    <div class="stack">
+      <img class="biglogo" src="logo-dark.svg" alt="Waydesk" width="159" height="35">
+      <section class="win">
+        <div class="bar"><span class="t">sign in</span><span class="cap" aria-hidden="true"><i>&#x2013;</i><i>&#x25a1;</i><i>&#x2715;</i></span></div>
+        <form id="form" class="body" method="post" action="#">
+          <label>Account <input id="user" name="username" autocomplete="username" autocapitalize="none" spellcheck="false" required autofocus></label>
+          <label>Password <input id="pass" name="password" type="password" autocomplete="current-password" required></label>
+          <label>Code from your authenticator app <input id="code" name="code" inputmode="numeric" autocomplete="one-time-code" spellcheck="false" placeholder="6 digits, if you set one up"></label>
+          <button type="submit" id="go" class="btn primary" disabled>Loading…</button>
+          <p id="msg" role="status"></p>
+        </form>
+      </section>
+    </div>
   </main>
-  <main id="desk" hidden>
-    <form id="deskform" method="post" action="#">
+
+  <div id="desk" hidden>
+    <header class="topbar">
+      <img src="logo-dark.svg" alt="Waydesk" width="119" height="26">
+      <nav aria-label="Portal"><a href="#" aria-current="page">My desktop</a></nav>
+      <div class="who"><b id="account"></b><button type="button" id="signout" class="btn sm">Sign out</button></div>
+    </header>
+    <main class="page">
       <h1>My desktop</h1>
-      <p id="who"></p>
-      <label id="askpass" hidden>Password again <input id="pass2" type="password" autocomplete="current-password"></label>
-      <button type="submit" id="open">Open desktop</button>
-      <button type="button" id="signout" class="quiet">Sign out</button>
-      <p id="deskmsg" role="status"></p>
-    </form>
-  </main>
+      <section class="win card">
+        <div class="bar"><span class="t" id="cardtitle">desktop</span><span class="cap" aria-hidden="true"><i>&#x2013;</i><i>&#x25a1;</i><i>&#x2715;</i></span></div>
+        <form id="deskform" class="body" method="post" action="#">
+          <p id="who" class="muted"></p>
+          <label id="askpass" hidden>Password again <input id="pass2" type="password" autocomplete="current-password"></label>
+          <div class="actions">
+            <button type="submit" id="open" class="btn primary"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-open"/></svg>Open desktop</button>
+            <button type="button" id="openfs" class="btn"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-full"/></svg>Open fullscreen</button>
+          </div>
+          <p class="hint">Your programs keep running when you close this tab.</p>
+          <p id="deskmsg" role="status"></p>
+        </form>
+      </section>
+    </main>
+  </div>
+
   <div id="session" hidden>
-    <div id="bar">
-      <button type="button" id="fs">Fullscreen</button>
-      <button type="button" id="mute">Sound off</button>
-      <button type="button" id="mic">Mic off</button>
-      <button type="button" id="cad">Ctrl+Alt+Del</button>
-      <button type="button" id="end">Disconnect</button>
+    <div id="bar" role="toolbar" aria-label="Session controls">
+      <button type="button" id="mute" class="ib" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-snd"/></svg><span>Sound off</span></button>
+      <button type="button" id="mic" class="ib" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-mic"/></svg><span>Mic off</span></button>
+      <button type="button" id="cad" class="ib"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-key"/></svg><span>Ctrl+Alt+Del</span></button>
+      <span class="sep"></span>
+      <button type="button" id="fs" class="ib"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-full"/></svg><span>Fullscreen</span></button>
+      <button type="button" id="end" class="ib danger"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-off"/></svg><span>Disconnect</span></button>
     </div>
     <div id="screen"></div>
   </div>
