@@ -80,12 +80,36 @@ function show(view) {
     $('account').textContent = me.account;
     $('cardtitle').textContent = me.account + ' · desktop';
     $('who').textContent = 'Your desktop is ready.';
+    showState();
     // The stream needs no password: the server holds a ticket for this sign-in. Only the RDP fallback asks for it.
     const askPassword = !useStream && heldPassword === '';
     $('askpass').hidden = !askPassword;
     $(askPassword ? 'pass2' : 'open').focus();
   }
   if (view === 'login') $('user').focus();
+}
+// What the server says about this account's desktop (the helper's own row for it): running since when, which desktop and graphics. When it
+// cannot say, the card keeps its plain text.
+async function showState() {
+  const el = $('state');
+  el.hidden = true;
+  try {
+    const r = await fetch('/api/mine', { cache: 'no-store' });
+    if (!r.ok) return;
+    const s = await r.json();
+    if (!s.available) return;
+    const running = s.session === 'running';
+    $('who').textContent = running ? 'Your desktop is running.' : 'Your desktop starts when you open it, in about 20 seconds.';
+    const rows = [['State', running ? 'running' + (s.since ? ' since ' + s.since.replace(/^\w+ /, '') : '') : 'not started'], ['Desktop', s.desktop_running || s.desktop], ['Graphics', s.gpu]];
+    el.replaceChildren(...rows.filter((x) => x[1]).flatMap(([k, v]) => {
+      const dt = document.createElement('dt');
+      const dd = document.createElement('dd');
+      dt.textContent = k;
+      dd.textContent = v;
+      return [dt, dd];
+    }));
+    el.hidden = el.childElementCount === 0;
+  } catch { /* the card stays as it is */ }
 }
 const showSession = (on) => show(on ? 'session' : (me ? 'desk' : 'login'));
 

@@ -49,6 +49,8 @@ pub struct Config {
     /// What a new session needs (see `memory::admission`).
     pub min_available_mb: Option<u64>,
     pub max_active_users: usize,
+    /// `waydesk-admin`, which answers the read-only `Info` requests (`admininfo.rs`).
+    pub admin_exe: PathBuf,
 }
 
 /// Connections served at once.
@@ -455,6 +457,20 @@ fn serve(mut sock: UnixStream, cfg: &Config, policy: &PamPolicy, sessions: &Sess
                 tickets.revoke(&ticket);
                 reply(&mut sock, &HelperResp::AuthOk)
             }
+            HelperReq::Info { kind } => match &who {
+                None => reply(&mut sock, &HelperResp::Error { message: "not logged in".into() }),
+                Some(user) => {
+                    // The administrator check is made again on every request: a person taken out of the group stops being one at once.
+                    let admin = crate::admininfo::is_admin(&user.groups);
+                    match crate::admininfo::answer(kind, &user.name, admin, &cfg.admin_exe) {
+                        Ok(json) => reply(&mut sock, &HelperResp::Info { json }),
+                        Err(e) => {
+                            warn!(user = %user.name, ?kind, "info refused or failed: {e:#}");
+                            reply(&mut sock, &HelperResp::Error { message: format!("{e:#}") })
+                        }
+                    }
+                }
+            },
             HelperReq::Bye => false,
         };
         if !ok {

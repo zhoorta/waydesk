@@ -18,6 +18,8 @@ pub const MAX_MESSAGE: u32 = 48 * 1024 * 1024;
 
 /// Longest string in a helper message (account names, passwords, addresses).
 pub const MAX_STRING: u32 = 1024;
+/// The longest JSON text a helper `Info` answer may carry (a status of a large machine is a few hundred KiB).
+pub const MAX_INFO: u32 = 4 * 1024 * 1024;
 
 #[derive(Debug, PartialEq)]
 pub enum ProtoError {
@@ -226,6 +228,14 @@ impl<'a> In<'a> {
     fn str(&mut self) -> Result<String, ProtoError> {
         let n = self.u32()?;
         if n > MAX_STRING {
+            return Err(ProtoError::TooLarge(n));
+        }
+        String::from_utf8(self.take(n as usize)?.to_vec()).map_err(|_| ProtoError::BadString)
+    }
+    /// Like `str`, with a larger limit (for the helper's JSON answers).
+    fn long_str(&mut self, max: u32) -> Result<String, ProtoError> {
+        let n = self.u32()?;
+        if n > max {
             return Err(ProtoError::TooLarge(n));
         }
         String::from_utf8(self.take(n as usize)?.to_vec()).map_err(|_| ProtoError::BadString)
@@ -527,7 +537,19 @@ pub enum HelperReq {
     Redeem { ticket: String, user: String, source: String },
     /// The ticket is no longer wanted.
     RevokeTicket { ticket: String },
+    /// Read-only information for the account that logged in on this connection: its own row, or everybody's when it is an administrator
+    /// (`admininfo.rs`). Nothing is changed by it.
+    Info { kind: InfoKind },
     Bye,
+}
+
+/// What `HelperReq::Info` asks for: the same JSON as `waydesk-admin users list|sessions list|status --json`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InfoKind {
+    Users,
+    Sessions,
+    /// Administrators only.
+    Status,
 }
 
 /// From the helper to the daemon.
@@ -541,6 +563,8 @@ pub enum HelperResp {
     /// The machine will not take a new session now; `reason` is one of the `REFUSED_*` values, `message` is for the log.
     Refused { reason: u8, message: String },
     Ticket { ticket: String },
+    /// The answer to `Info`: JSON text.
+    Info { json: String },
 }
 
 /// Why a new session was refused (`HelperResp::Refused`).
@@ -569,6 +593,14 @@ impl HelperReq {
                 o.u8(5);
                 o.str(ticket);
             }
+            HelperReq::Info { kind } => {
+                o.u8(6);
+                o.u8(match kind {
+                    InfoKind::Users => 1,
+                    InfoKind::Sessions => 2,
+                    InfoKind::Status => 3,
+                });
+            }
             HelperReq::Bye => o.u8(255),
         }
         o.0
@@ -582,6 +614,14 @@ impl HelperReq {
             3 => HelperReq::IssueTicket,
             4 => HelperReq::Redeem { ticket: i.str()?, user: i.str()?, source: i.str()? },
             5 => HelperReq::RevokeTicket { ticket: i.str()? },
+            6 => HelperReq::Info {
+                kind: match i.u8()? {
+                    1 => InfoKind::Users,
+                    2 => InfoKind::Sessions,
+                    3 => InfoKind::Status,
+                    t => return Err(ProtoError::UnknownTag(t)),
+                },
+            },
             255 => HelperReq::Bye,
             t => return Err(ProtoError::UnknownTag(t)),
         };
@@ -611,6 +651,10 @@ impl HelperResp {
                 o.u8(6);
                 o.str(ticket);
             }
+            HelperResp::Info { json } => {
+                o.u8(7);
+                o.str(json);
+            }
         }
         o.0
     }
@@ -624,6 +668,7 @@ impl HelperResp {
             4 => HelperResp::Error { message: i.str()? },
             5 => HelperResp::Refused { reason: i.u8()?, message: i.str()? },
             6 => HelperResp::Ticket { ticket: i.str()? },
+            7 => HelperResp::Info { json: i.long_str(MAX_INFO)? },
             t => return Err(ProtoError::UnknownTag(t)),
         };
         i.finish()?;
@@ -820,6 +865,9 @@ mod tests {
             HelperReq::IssueTicket,
             HelperReq::Redeem { ticket: "ab".repeat(32), user: "alice".into(), source: "10.0.0.1".into() },
             HelperReq::RevokeTicket { ticket: "ab".repeat(32) },
+            HelperReq::Info { kind: InfoKind::Users },
+            HelperReq::Info { kind: InfoKind::Sessions },
+            HelperReq::Info { kind: InfoKind::Status },
             HelperReq::Bye,
         ];
         for r in reqs {
@@ -829,7 +877,7 @@ mod tests {
                 assert!(HelperReq::decode(&b[..cut]).is_err());
             }
         }
-        for r in [HelperResp::AuthOk, HelperResp::AuthFail, HelperResp::Started, HelperResp::Error { message: "no".into() }, HelperResp::Refused { reason: REFUSED_MEMORY, message: "full".into() }, HelperResp::Ticket { ticket: "cd".repeat(32) }] {
+        for r in [HelperResp::AuthOk, HelperResp::AuthFail, HelperResp::Started, HelperResp::Error { message: "no".into() }, HelperResp::Refused { reason: REFUSED_MEMORY, message: "full".into() }, HelperResp::Ticket { ticket: "cd".repeat(32) }, HelperResp::Info { json: "[1]".repeat(2000) }] {
             assert_eq!(HelperResp::decode(&r.encode()).unwrap(), r);
         }
         // a string longer than allowed
@@ -841,6 +889,8 @@ mod tests {
         b.extend_from_slice(&1u32.to_le_bytes());
         b.push(0xff);
         assert_eq!(HelperReq::decode(&b), Err(ProtoError::BadString));
+        // an Info request with an unknown kind
+        assert_eq!(HelperReq::decode(&[6, 9]), Err(ProtoError::UnknownTag(9)));
         // a long error message is cut, not refused
         let long = HelperResp::Error { message: "x".repeat(5000) };
         assert!(matches!(HelperResp::decode(&long.encode()), Ok(HelperResp::Error { .. })));

@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 #[allow(dead_code)] // the daemon uses all of it, this crate the helper's login only
 mod proto;
 use proto::{HelperReq, HelperResp};
+pub use proto::InfoKind;
 
 /// The name of the cookie. `__Host-` makes the browser accept it only with `Secure`, `Path=/` and no `Domain`, so a subdomain or a plain-HTTP page
 /// cannot plant or overwrite it.
@@ -36,6 +37,12 @@ pub trait Authenticator: Send + Sync {
 
     /// The ticket is no longer wanted (the person signed out).
     fn revoke(&self, _ticket: &str) {}
+
+    /// Read-only information about the signed-in account's machine, as JSON (`proto::InfoKind`): the account's own rows, or everybody's for an
+    /// administrator. The helper decides what the account may see; the portal only passes it on. (Stand-ins without a helper have nothing to say.)
+    fn info(&self, _ticket: &str, _account: &str, _source: &str, _kind: InfoKind) -> Result<String, String> {
+        Err("no helper".into())
+    }
 }
 
 /// The root helper of the daemon (`waydesk-server --helper`). Its socket opens only for the daemon's account, so the portal runs as that account.
@@ -88,6 +95,23 @@ impl Authenticator for HelperAuth {
 
     fn login(&self, account: &str, password: &str, source: &str) -> Result<Option<String>, String> {
         self.run(account, password, source, true)
+    }
+
+    fn info(&self, ticket: &str, account: &str, source: &str, kind: InfoKind) -> Result<String, String> {
+        let mut sock = self.connect()?;
+        let redeem = HelperReq::Redeem { ticket: ticket.to_owned(), user: account.to_owned(), source: source.to_owned() };
+        let result = match Self::ask(&mut sock, &redeem)? {
+            HelperResp::AuthOk => match Self::ask(&mut sock, &HelperReq::Info { kind })? {
+                HelperResp::Info { json } => Ok(json),
+                HelperResp::Error { message } => Err(format!("helper: {message}")),
+                other => Err(format!("unexpected answer to an info request: {other:?}")),
+            },
+            HelperResp::AuthFail => Err("the sign-in is no longer good".into()),
+            HelperResp::Error { message } => Err(format!("helper: {message}")),
+            other => Err(format!("unexpected answer to a ticket: {other:?}")),
+        };
+        let _ = proto::write_frame(&mut sock, &HelperReq::Bye.encode());
+        result
     }
 
     fn revoke(&self, ticket: &str) {

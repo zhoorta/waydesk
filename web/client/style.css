@@ -76,3 +76,6 @@ input:focus { outline: 2px solid var(--copper); border-color: transparent; }
 iron-remote-desktop { display: block; width: 100%; height: 100%; }
 #screen canvas { display: block; width: 100%; height: 100%; object-fit: contain; background: #000; outline: none; touch-action: none; }
 @media (max-width: 560px) { .win > .body { padding: 16px; } h1 { font-size: 22px; } }
+
+dl.kv { display: grid; grid-template-columns: max-content 1fr; gap: 8px 24px; font-size: 14px; margin: 0; }
+dl.kv dt { color: var(--dim); } dl.kv dd { margin: 0; }

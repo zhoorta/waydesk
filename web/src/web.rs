@@ -134,6 +134,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/healthz", get(|| async { "ok\n" }))
         .route("/api/login", post(login).layer(axum::extract::DefaultBodyLimit::max(4096)))
         .route("/api/me", get(me))
+        .route("/api/mine", get(mine))
         .route("/api/logout", post(logout))
         .route("/api/session", post(session_token).layer(axum::extract::DefaultBodyLimit::max(4096)))
         .route("/ws", get(ws_handler))
@@ -304,6 +305,32 @@ async fn me(State(app): State<Arc<App>>, headers: HeaderMap) -> Response {
     }
 }
 
+/// The signed-in account's own desktop, from the helper: whether its session is running and since when, its desktop and graphics. The helper decides
+/// what an account may see (its own row); when it cannot be asked, the page still works and says nothing about the state.
+async fn mine(State(app): State<Arc<App>>, headers: HeaderMap) -> Response {
+    let Some((id, signed)) = signed_in(&app, &headers) else { return text(StatusCode::UNAUTHORIZED, "not signed in\n") };
+    let Some(ticket) = app.portal.ticket(&id) else { return text(StatusCode::UNAUTHORIZED, "not signed in\n") };
+    let (auth, account, source) = (app.auth.clone(), signed.account.clone(), signed.ip.to_string());
+    let answer = tokio::task::spawn_blocking(move || auth.info(&ticket, &account, &source, crate::portal::InfoKind::Users)).await;
+    json(StatusCode::OK, mine_json(answer.ok().and_then(Result::ok).as_deref(), &signed.account))
+}
+
+/// The row of `account` in the helper's user list, cut down to what the page shows; `{"available":false}` when there is none.
+fn mine_json(list: Option<&str>, account: &str) -> String {
+    let row = list.and_then(|l| serde_json::from_str::<Vec<serde_json::Value>>(l).ok()).and_then(|rows| rows.into_iter().find(|r| r.get("name").and_then(|n| n.as_str()) == Some(account)));
+    let Some(row) = row else { return "{\"available\":false}\n".into() };
+    let text = |k: &str| row.get(k).and_then(|v| v.as_str()).map(str::to_owned);
+    let out = serde_json::json!({
+        "available": true,
+        "session": text("session").unwrap_or_else(|| "none".into()),
+        "since": text("session_since"),
+        "desktop": text("desktop"),
+        "desktop_running": text("desktop_running"),
+        "gpu": text("gpu"),
+    });
+    format!("{out}\n")
+}
+
 /// Tells the helper that a ticket is no longer wanted (in the background: the helper is a local socket, but a slow one must not hold a request).
 fn revoke(app: &Arc<App>, ticket: String) {
     let auth = app.auth.clone();
@@ -453,6 +480,19 @@ async fn static_file(State(app): State<Arc<App>>, headers: HeaderMap, uri: Uri) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_page_gets_only_the_accounts_own_fields() {
+        let list = r#"[{"name":"bob","session":"running","uid":1002},{"name":"alice","session":"running","session_since":"Tue 2026-11-17 08:41:00 UTC","desktop":"plasma","desktop_running":"plasma","gpu":"off","uid":1001,"sudo":true}]"#;
+        let v: serde_json::Value = serde_json::from_str(&mine_json(Some(list), "alice")).unwrap();
+        assert_eq!(v["available"], true);
+        assert_eq!(v["session"], "running");
+        assert_eq!(v["desktop"], "plasma");
+        assert!(v.get("uid").is_none() && v.get("sudo").is_none(), "nothing the page does not need");
+        for none in [None, Some("not json"), Some("[]"), Some(r#"[{"name":"bob"}]"#)] {
+            assert_eq!(mine_json(none, "alice").trim(), r#"{"available":false}"#);
+        }
+    }
 
     #[test]
     fn paths_cannot_leave_the_directory_or_name_hidden_files() {

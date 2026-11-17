@@ -164,7 +164,7 @@ fn shell_allows_login(shell: &str, listed: &str) -> bool {
 }
 
 /// The id of the group called `name`.
-fn group_gid(name: &str) -> Option<u32> {
+pub(crate) fn group_gid(name: &str) -> Option<u32> {
     let cname = CString::new(name).ok()?;
     let mut grp: libc::group = unsafe { std::mem::zeroed() };
     let mut buf = vec![0u8; 16384];
