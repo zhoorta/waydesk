@@ -543,6 +543,9 @@ pub enum HelperReq {
     /// A change an administrator asked for: JSON of one `adminaction::AdminAction` (at most 1 KiB). The helper checks the administrator and the
     /// action, then has the runner (`waydesk-admin serve-request`) do it; the answer is the runner's JSON (`HelperResp::Info`).
     Admin { json: String },
+    /// The audit log, filtered, for an administrator (see `admininfo::AuditQuery`); the answer is a JSON list, newest first (`HelperResp::Info`).
+    /// An empty text is "no filter"; `limit` is at most 500.
+    Audit { since: String, user: String, event: String, outcome: String, limit: u16 },
     Bye,
 }
 
@@ -611,6 +614,14 @@ impl HelperReq {
                 o.u8(7);
                 o.str(json);
             }
+            HelperReq::Audit { since, user, event, outcome, limit } => {
+                o.u8(8);
+                o.str(since);
+                o.str(user);
+                o.str(event);
+                o.str(outcome);
+                o.u16(*limit);
+            }
             HelperReq::Bye => o.u8(255),
         }
         o.0
@@ -634,6 +645,7 @@ impl HelperReq {
                 },
             },
             7 => HelperReq::Admin { json: i.str()? },
+            8 => HelperReq::Audit { since: i.str()?, user: i.str()?, event: i.str()?, outcome: i.str()?, limit: i.u16()? },
             255 => HelperReq::Bye,
             t => return Err(ProtoError::UnknownTag(t)),
         };
@@ -882,6 +894,7 @@ mod tests {
             HelperReq::Info { kind: InfoKind::Status },
             HelperReq::Info { kind: InfoKind::Role },
             HelperReq::Admin { json: r#"{"action":"user_add","name":"frida"}"#.into() },
+            HelperReq::Audit { since: "7d".into(), user: "alice".into(), event: "admin".into(), outcome: "fail".into(), limit: 200 },
             HelperReq::Bye,
         ];
         for r in reqs {

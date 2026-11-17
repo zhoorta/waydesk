@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::extract::ws::WebSocketUpgrade;
-use axum::extract::{Extension, Path as UrlPath, State};
+use axum::extract::{Extension, Path as UrlPath, Query, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode, Uri};
 use axum::middleware;
 use axum::response::{IntoResponse, Response};
@@ -146,6 +146,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/api/me", get(me))
         .route("/api/mine", get(mine))
         .route("/api/admin/do", post(admin_do).layer(axum::extract::DefaultBodyLimit::max(2048)))
+        .route("/api/admin/audit", get(admin_audit))
         .route("/api/admin/{kind}", get(admin_page))
         .route("/api/logout", post(logout))
         .route("/api/session", post(session_token).layer(axum::extract::DefaultBodyLimit::max(4096)))
@@ -361,6 +362,37 @@ async fn admin_do(State(app): State<Arc<App>>, Extension(ClientAddr(peer)): Exte
         Ok(Ok(body)) => json(StatusCode::OK, format!("{body}\n")),
         Ok(Err(why)) if why.contains("only administrators") => text(StatusCode::FORBIDDEN, "administrators only\n"),
         // A refusal in words (a name that is not valid, "the server could not do this now"): shown to the administrator as it is.
+        Ok(Err(why)) if why.starts_with("helper: ") => json(StatusCode::BAD_REQUEST, format!("{}\n", serde_json::json!({ "ok": false, "error": &why["helper: ".len()..] }))),
+        _ => text(StatusCode::BAD_GATEWAY, "the server could not be asked\n"),
+    }
+}
+
+#[derive(serde::Deserialize, Default)]
+struct AuditParams {
+    #[serde(default)]
+    since: String,
+    #[serde(default)]
+    user: String,
+    #[serde(default)]
+    event: String,
+    #[serde(default)]
+    outcome: String,
+    limit: Option<u16>,
+}
+
+/// The audit log, filtered (an administrator's page). The helper checks the administrator and every filter; the portal only passes them on, cut to
+/// a sensible length first.
+async fn admin_audit(State(app): State<Arc<App>>, Query(q): Query<AuditParams>, headers: HeaderMap) -> Response {
+    let Some((id, signed)) = signed_in(&app, &headers) else { return text(StatusCode::UNAUTHORIZED, "not signed in\n") };
+    let Some(ticket) = app.portal.ticket(&id) else { return text(StatusCode::UNAUTHORIZED, "not signed in\n") };
+    if [&q.since, &q.user, &q.event, &q.outcome].iter().any(|s| s.len() > 64) {
+        return text(StatusCode::BAD_REQUEST, "bad request\n");
+    }
+    let (auth, account, source) = (app.auth.clone(), signed.account.clone(), signed.ip.to_string());
+    let answer = tokio::task::spawn_blocking(move || auth.audit(&ticket, &account, &source, (&q.since, &q.user, &q.event, &q.outcome, q.limit.unwrap_or(200)))).await;
+    match answer {
+        Ok(Ok(body)) => json(StatusCode::OK, format!("{body}\n")),
+        Ok(Err(why)) if why.contains("only administrators") => text(StatusCode::FORBIDDEN, "administrators only\n"),
         Ok(Err(why)) if why.starts_with("helper: ") => json(StatusCode::BAD_REQUEST, format!("{}\n", serde_json::json!({ "ok": false, "error": &why["helper: ".len()..] }))),
         _ => text(StatusCode::BAD_GATEWAY, "the server could not be asked\n"),
     }

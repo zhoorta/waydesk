@@ -79,6 +79,68 @@ pub fn run_action(socket: &Path, actor_uid: u32, source: &str, action: &crate::a
     Ok(answer.trim().to_owned())
 }
 
+/// A look at the audit log: the filters of `waydesk-admin audit`, each checked against a short rule. Empty means no filter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuditQuery {
+    pub since: String,
+    pub user: String,
+    pub event: String,
+    pub outcome: String,
+    pub limit: u16,
+}
+
+pub const AUDIT_MAX_LIMIT: u16 = 500;
+
+impl AuditQuery {
+    /// Why the query is not one we run, in plain words.
+    pub fn validate(&self) -> std::result::Result<(), &'static str> {
+        let since_ok = self.since.is_empty()
+            || (self.since.len() <= 4 && self.since.len() >= 2 && self.since.ends_with(['m', 'h', 'd', 'w']) && self.since[..self.since.len() - 1].chars().all(|c| c.is_ascii_digit()))
+            || (self.since.len() == 10 && self.since.chars().enumerate().all(|(i, c)| if i == 4 || i == 7 { c == '-' } else { c.is_ascii_digit() }));
+        if !since_ok {
+            return Err("the time must be like 30m, 2h, 7d, 1w or a date such as 2026-10-29");
+        }
+        if !self.user.is_empty() && !crate::adminaction::valid_name(&self.user) {
+            return Err("that is not a valid account name");
+        }
+        if !self.event.is_empty() && (self.event.len() > 32 || !self.event.chars().all(|c| c.is_ascii_lowercase() || c == '.')) {
+            return Err("the kind of event must be lower case letters and dots");
+        }
+        if !matches!(self.outcome.as_str(), "" | "ok" | "fail" | "refused") {
+            return Err("the outcome must be ok, fail or refused");
+        }
+        if self.limit == 0 || self.limit > AUDIT_MAX_LIMIT {
+            return Err("the number of events must be between 1 and 500");
+        }
+        Ok(())
+    }
+
+    fn args(&self) -> Vec<String> {
+        let mut v = vec!["audit".to_owned(), "--json".to_owned(), "--since".to_owned(), if self.since.is_empty() { "7d".into() } else { self.since.clone() }, "--limit".to_owned(), self.limit.to_string()];
+        for (flag, value) in [("--user", &self.user), ("--event", &self.event), ("--outcome", &self.outcome)] {
+            if !value.is_empty() {
+                v.extend([flag.to_owned(), value.clone()]);
+            }
+        }
+        v
+    }
+}
+
+/// One JSON object per line (what `waydesk-admin audit --json` prints, oldest first) as one JSON list, newest first. A line that is not JSON is left out.
+pub fn audit_lines_to_list(lines: &str) -> String {
+    let mut rows: Vec<serde_json::Value> = lines.lines().filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok()).filter(serde_json::Value::is_object).collect();
+    rows.reverse();
+    serde_json::Value::Array(rows).to_string()
+}
+
+/// The audit log for an administrator.
+pub fn audit(query: &AuditQuery, exe: &Path) -> Result<String> {
+    query.validate().map_err(|why| anyhow::anyhow!(why))?;
+    let args = query.args();
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    Ok(audit_lines_to_list(&run(exe, &args)?))
+}
+
 struct Slot;
 impl Slot {
     fn take() -> Option<Slot> {
@@ -177,6 +239,31 @@ mod tests {
         assert_eq!(sent["do"]["name"], "eva");
         // no runner: an error, and the slot is given back
         assert!(run_action(&dir.join("nobody.sock"), 1000, "10.0.0.7", &action).is_err());
+    }
+
+    #[test]
+    fn an_audit_query_is_checked_and_becomes_one_fixed_command_line() {
+        let q = |since: &str, user: &str, event: &str, outcome: &str, limit: u16| AuditQuery { since: since.into(), user: user.into(), event: event.into(), outcome: outcome.into(), limit };
+        assert!(q("", "", "", "", 200).validate().is_ok());
+        assert!(q("2h", "alice", "admin.user", "fail", 500).validate().is_ok());
+        assert!(q("2026-11-17", "", "login", "", 1).validate().is_ok());
+        for bad in [q("7 days", "", "", "", 10), q("-1d", "", "", "", 10), q("h", "", "", "", 10), q("1000d", "", "", "", 10), q("", "-rf", "", "", 10), q("", "", "Login", "", 10), q("", "", "a b", "", 10), q("", "", "", "maybe", 10), q("", "", "", "", 0), q("", "", "", "", 501), q("2026-11-1x", "", "", "", 10), q("", "", &"a".repeat(33), "", 10)] {
+            assert!(bad.validate().is_err(), "{bad:?}");
+        }
+        assert_eq!(q("", "", "", "", 50).args(), ["audit", "--json", "--since", "7d", "--limit", "50"]);
+        assert_eq!(q("2h", "alice", "admin", "fail", 10).args(), ["audit", "--json", "--since", "2h", "--limit", "10", "--user", "alice", "--event", "admin", "--outcome", "fail"]);
+    }
+
+    #[test]
+    fn the_audit_lines_become_a_list_newest_first_and_bad_lines_are_left_out() {
+        let list = audit_lines_to_list("{\"n\":1}\nnot json\n[2]\n{\"n\":3}\n");
+        assert_eq!(list, r#"[{"n":3},{"n":1}]"#);
+        assert_eq!(audit_lines_to_list(""), "[]");
+        let fake = script(r#"echo '{"event":"login","n":1}'; echo '{"event":"admin.user.add","n":2}'"#);
+        let q = AuditQuery { since: "1d".into(), user: String::new(), event: String::new(), outcome: String::new(), limit: 10 };
+        let _turn = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(audit(&q, &fake).unwrap(), r#"[{"event":"admin.user.add","n":2},{"event":"login","n":1}]"#);
+        assert!(audit(&AuditQuery { limit: 0, ..q }, &fake).is_err());
     }
 
     #[test]

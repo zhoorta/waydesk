@@ -497,6 +497,17 @@ fn serve(mut sock: UnixStream, cfg: &Config, policy: &PamPolicy, sessions: &Sess
                 }
                 _ => reply(&mut sock, &HelperResp::Error { message: "not logged in".into() }),
             },
+            HelperReq::Audit { since, user, event, outcome, limit } => match &who {
+                None => reply(&mut sock, &HelperResp::Error { message: "not logged in".into() }),
+                Some(me) if !crate::admininfo::is_admin(&me.groups) => reply(&mut sock, &HelperResp::Error { message: "only administrators may read the audit log".into() }),
+                Some(me) => match crate::admininfo::audit(&crate::admininfo::AuditQuery { since, user, event, outcome, limit }, &cfg.admin_exe) {
+                    Ok(json) => reply(&mut sock, &HelperResp::Info { json }),
+                    Err(e) => {
+                        warn!(user = %me.name, "audit log not read: {e:#}");
+                        reply(&mut sock, &HelperResp::Error { message: format!("{e:#}") })
+                    }
+                },
+            },
             HelperReq::Bye => false,
         };
         if !ok {

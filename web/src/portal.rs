@@ -44,6 +44,11 @@ pub trait Authenticator: Send + Sync {
         Err("no helper".into())
     }
 
+    /// The audit log for an administrator (filters as in `HelperReq::Audit`, empty = none): a JSON list, newest first.
+    fn audit(&self, _ticket: &str, _account: &str, _source: &str, _query: (&str, &str, &str, &str, u16)) -> Result<String, String> {
+        Err("no helper".into())
+    }
+
     /// A change an administrator asked for (the JSON of one action, see `src/adminaction.rs`). The helper decides whether the account may and whether the
     /// action is one it knows; `Ok` is the runner's JSON answer (`{"ok":...}`), `Err("helper: ...")` a refusal in words the page can show.
     fn admin_do(&self, _ticket: &str, _account: &str, _source: &str, _action: &str) -> Result<String, String> {
@@ -117,6 +122,23 @@ impl Authenticator for HelperAuth {
                 HelperResp::Info { json } => Ok(json),
                 HelperResp::Error { message } => Err(format!("helper: {message}")),
                 other => Err(format!("unexpected answer to an info request: {other:?}")),
+            },
+            HelperResp::AuthFail => Err("the sign-in is no longer good".into()),
+            HelperResp::Error { message } => Err(format!("helper: {message}")),
+            other => Err(format!("unexpected answer to a ticket: {other:?}")),
+        };
+        let _ = proto::write_frame(&mut sock, &HelperReq::Bye.encode());
+        result
+    }
+
+    fn audit(&self, ticket: &str, account: &str, source: &str, (since, user, event, outcome, limit): (&str, &str, &str, &str, u16)) -> Result<String, String> {
+        let mut sock = self.connect()?;
+        let redeem = HelperReq::Redeem { ticket: ticket.to_owned(), user: account.to_owned(), source: source.to_owned() };
+        let result = match Self::ask(&mut sock, &redeem)? {
+            HelperResp::AuthOk => match Self::ask(&mut sock, &HelperReq::Audit { since: since.into(), user: user.into(), event: event.into(), outcome: outcome.into(), limit })? {
+                HelperResp::Info { json } => Ok(json),
+                HelperResp::Error { message } => Err(format!("helper: {message}")),
+                other => Err(format!("unexpected answer to an audit request: {other:?}")),
             },
             HelperResp::AuthFail => Err("the sign-in is no longer good".into()),
             HelperResp::Error { message } => Err(format!("helper: {message}")),

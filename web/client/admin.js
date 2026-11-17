@@ -211,6 +211,61 @@ const views = {
     return [el('div', { class: 'head' }, el('h1', {}, 'Users'), el('span', { class: 'sp' }), search, button('Add user', addUser, 'primary')), holder];
   },
 
+  async audit() {
+    const holder = el('div', {});
+    const field = (label, control) => el('label', {}, label, control);
+    const sel = (name, options) => el('select', { name }, options.map(([v, t]) => el('option', { value: v }, t)));
+    const user = el('input', { name: 'user', placeholder: 'any', autocomplete: 'off', spellcheck: 'false', 'aria-label': 'Account' });
+    const kind = sel('event', [['', 'all'], ['login', 'sign-ins'], ['session', 'sessions'], ['connection', 'connections'], ['admin', 'changes (admin)'], ['gpu', 'graphics'], ['audit', 'the log itself']]);
+    const outcome = sel('outcome', [['', 'any'], ['ok', 'ok'], ['fail', 'failed'], ['refused', 'refused']]);
+    const since = sel('since', [['1h', 'last hour'], ['24h', 'last 24 hours'], ['7d', 'last 7 days'], ['4w', 'last 4 weeks']]);
+    since.value = '24h';
+    const limit = sel('limit', [['100', '100 events'], ['200', '200 events'], ['500', '500 events']]);
+    limit.value = '200';
+    let rows = [];
+    const csv = () => {
+      // A cell that starts with = + - or @ would be a formula in a spreadsheet: it gets a quote in front.
+      const cellText = (v) => { let s = v == null ? '' : String(v); if (/^[=+\-@\t\r]/.test(s)) s = "'" + s; return '"' + s.replace(/"/g, '""') + '"'; };
+      const cols = ['ts', 'event', 'outcome', 'user', 'actor', 'target', 'source', 'via', 'reason', 'detail', 'seconds'];
+      const text = [cols.join(',')].concat(rows.map((r) => cols.map((c) => cellText(r[c])).join(','))).join('\r\n') + '\r\n';
+      const url = URL.createObjectURL(new Blob([text], { type: 'text/csv' }));
+      const a = el('a', { href: url, download: 'waydesk-audit.csv' });
+      document.body.append(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    };
+    const tone = { ok: 'ok', fail: 'bad', refused: 'warn' };
+    const draw = () => holder.replaceChildren(win('events \u00b7 ' + rows.length, table(['Time', 'Event', 'Outcome', 'Account', 'From', 'Details'],
+      rows.map((r) => {
+        // Who: the account the event is about; for a change, the administrator who made it and the account it was made to.
+        const who = r.target ? [el('b', {}, r.target), el('span', { class: 'dim' }, ' by ' + (r.actor || '?') + (r.via && r.via !== 'portal' ? ' (' + r.via + ')' : ''))] : el('b', {}, r.user || r.actor || (r.user_invalid ? '(not a name)' : '-'));
+        const details = [r.reason, r.detail, r.seconds != null ? r.seconds + ' s' : null, r.via === 'portal' ? 'portal' : null].filter(Boolean).join(' \u00b7 ');
+        return el('tr', {}, cell(String(r.ts || '').replace('T', ' ').replace(/\.\d+Z$/, 'Z'), 'mono'), cell(r.event || '-'), cell(chip(r.outcome || '-', tone[r.outcome] || '')), cell(who), cell(r.source || '-', 'mono'), cell(details));
+      }), 'No events match.')));
+    const load = async () => {
+      const q = new URLSearchParams({ since: since.value, limit: limit.value });
+      for (const [k, v] of [['user', user.value.trim()], ['event', kind.value], ['outcome', outcome.value]]) if (v) q.set(k, v);
+      holder.replaceChildren(el('p', { class: 'muted' }, 'Loading\u2026'));
+      try {
+        const r = await fetch('/api/admin/audit?' + q, { cache: 'no-store' });
+        if (r.status === 401) { const e = new Error('Your sign-in ended.'); e.signedOut = true; throw e; }
+        if (r.status === 403) throw new Error('This page is for administrators.');
+        if (r.status === 400) { let m = 'Check the filters.'; try { m = (await r.json()).error || m; } catch { /* the default */ } throw new Error(m); }
+        if (!r.ok) throw new Error('The server could not be asked (' + r.status + ').');
+        rows = await r.json();
+        draw();
+      } catch (e) {
+        if (e.signedOut) { ctx.signedOut(); return; }
+        holder.replaceChildren(el('p', { class: 'bad' }, e.message));
+      }
+    };
+    const form = el('form', { class: 'row' }, field('Account', user), field('Event', kind), field('Outcome', outcome), field('Time', since), field('Show', limit), button('Search', () => form.requestSubmit(), 'primary'), button('Export CSV', () => csv()));
+    form.addEventListener('submit', (e) => { e.preventDefault(); load(); });
+    await load();
+    return [el('div', { class: 'head' }, el('h1', {}, 'Audit'), el('span', { class: 'sp' }), el('span', { class: 'muted small' }, 'read only \u00b7 same records as ', el('code', {}, 'waydesk-admin audit'))), win('filter', form), holder];
+  },
+
   async sessions() {
     const [list, s] = await Promise.all([get('sessions'), get('status')]);
     const by = new Map((s.users || []).map((u) => [u.name, u]));
@@ -249,7 +304,7 @@ export async function render(view, root, onSignedOut, csrf) {
   };
   root.replaceChildren(el('p', { class: 'muted' }, 'Loading…'));
   await draw();
-  if (view !== 'users') timer = setInterval(() => { if (!document.hidden) draw(); }, 10000);
+  if (view !== 'users' && view !== 'audit') timer = setInterval(() => { if (!document.hidden) draw(); }, 10000);
 }
 export const stop = () => clearInterval(timer);
 export const known = (v) => Object.hasOwn(views, v);

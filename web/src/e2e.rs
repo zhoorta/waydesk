@@ -31,6 +31,16 @@ impl crate::portal::Authenticator for FakeAuth {
         Ok(account != "locked" && password == format!("pw-{account}"))
     }
 
+    fn audit(&self, _ticket: &str, account: &str, _source: &str, query: (&str, &str, &str, &str, u16)) -> Result<String, String> {
+        if account != "boss" {
+            return Err("helper: only administrators may read the audit log".into());
+        }
+        if query.4 == 0 {
+            return Err("helper: the number of events must be between 1 and 500".into());
+        }
+        Ok(format!("[{{\"event\":\"login\",\"user\":\"ana\",\"since\":\"{}\"}}]", query.0))
+    }
+
     /// The stand-in runner: refuses the account `ana` (not an administrator), says that a name `bad` is not valid, and otherwise does what it is told.
     fn admin_do(&self, _ticket: &str, account: &str, _source: &str, action: &str) -> Result<String, String> {
         if account != "boss" {
@@ -836,4 +846,20 @@ async fn a_change_needs_the_origin_the_csrf_token_an_administrator_and_a_valid_a
     let (status, body) = post!(&boss, Some(&origin), true, action);
     assert_eq!(status, 200);
     assert!(body.contains("\"ok\":true") && body.contains("user_disable"), "{body}");
+}
+
+#[tokio::test]
+async fn the_audit_log_is_for_administrators_and_the_filters_reach_the_helper() {
+    let env = start("auditpage", Opts::default()).await;
+    let boss = env.browser("boss").await;
+    let ana = env.browser("ana").await;
+    assert_eq!(env.http("GET", "/api/admin/audit", &[]).await.0, 401);
+    assert_eq!(env.http("GET", "/api/admin/audit", &[("Cookie", &ana.cookie)]).await.0, 403);
+    let (status, body) = env.http("GET", "/api/admin/audit?since=2h&user=ana&limit=10", &[("Cookie", &boss.cookie)]).await;
+    assert_eq!(status, 200);
+    assert!(body.contains("\"user\":\"ana\"") && body.contains("\"since\":\"2h\""), "{body}");
+    let (status, body) = env.http("GET", "/api/admin/audit?limit=0", &[("Cookie", &boss.cookie)]).await;
+    assert_eq!(status, 400);
+    assert!(body.contains("between 1 and 500"), "{body}");
+    assert_eq!(env.http("GET", &format!("/api/admin/audit?user={}", "a".repeat(65)), &[("Cookie", &boss.cookie)]).await.0, 400, "a filter that long is not one");
 }
