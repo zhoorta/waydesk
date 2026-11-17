@@ -1,0 +1,17 @@
+[Unit]
+Description=waydesk administration request (one connection)
+Documentation=file:///usr/share/doc/waydesk/README.md
+# Runs unsandboxed on purpose: it makes accounts and changes groups (useradd, gpasswd, systemctl), which the helper's sandbox does not allow.
+# That is why it is a program of its own that understands nothing but a short, checked list of actions, and why only root can reach its socket.
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/waydesk-admin serve-request
+StandardInput=socket
+StandardOutput=socket
+StandardError=journal
+TimeoutStartSec=90
+RuntimeMaxSec=90
+KillMode=control-group
+MemoryMax=128M
+TasksMax=64

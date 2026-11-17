@@ -41,6 +41,9 @@ use serde_json::json;
 #[allow(dead_code)]
 #[path = "../aistatus.rs"]
 mod aistatus;
+#[allow(dead_code)]
+#[path = "../adminaction.rs"]
+mod adminaction;
 #[path = "../audit.rs"]
 mod audit;
 #[path = "../configcheck.rs"]
@@ -283,6 +286,7 @@ fn dispatch(args: &[&str], json_out: bool) -> Result<()> {
         // (they ask for root themselves where they change something).
         [which @ ("access" | "cert" | "vpn"), rest @ ..] => run_admin_script(which, rest),
         ["users", "limit", name, rest @ ..] => users_limit(name, rest),
+        ["serve-request"] => serve_request(),
         ["sessions", "end", name] => {
             require_root()?;
             let a = account(name)?;
@@ -295,6 +299,55 @@ fn dispatch(args: &[&str], json_out: bool) -> Result<()> {
             std::process::exit(2);
         }
     }
+}
+
+/// `waydesk-admin serve-request`: the runner for what administrators ask of the portal. systemd starts it for each connection to
+/// `/run/waydesk-admin.sock` (waydesk-admin.socket, mode 0600, root only: the root helper is the one that connects), with the connection as stdin
+/// and stdout. It reads one line of JSON, `{"actor_uid":N,"source":"IP","do":{...}}`, checks it against the closed list in `adminaction.rs`
+/// (the helper did too), checks that the actor is still an administrator, runs the matching `waydesk-admin` command line with a clean
+/// environment (`SUDO_UID` is the actor, so the command's own rules apply: nobody switches off their own access; the audit line names the actor,
+/// `via: portal` and the address) and prints one line of JSON: `{"ok":true,"result":...}` or `{"ok":false,"error":"..."}`.
+fn serve_request() -> Result<()> {
+    require_root()?;
+    let reply = |v: serde_json::Value| -> Result<()> {
+        println!("{v}");
+        Ok(())
+    };
+    let mut line = String::new();
+    std::io::stdin().take(4096).read_to_string(&mut line).context("reading the request")?;
+    let Ok(req) = serde_json::from_str::<serde_json::Value>(line.trim()) else { return reply(json!({ "ok": false, "error": "the request is not JSON" })) };
+    let source = req.get("source").and_then(|s| s.as_str()).unwrap_or("");
+    if source.len() > 45 || !source.chars().all(|c| c.is_ascii_hexdigit() || c == '.' || c == ':') {
+        return reply(json!({ "ok": false, "error": "bad source address" }));
+    }
+    let action = match req.get("do").ok_or_else(|| "nothing to do".to_string()).and_then(adminaction::AdminAction::from_json) {
+        Ok(a) => a,
+        Err(why) => return reply(json!({ "ok": false, "error": why })),
+    };
+    // The actor has to be an administrator now, whatever the helper checked a moment ago.
+    let actor = req.get("actor_uid").and_then(|u| u.as_u64()).and_then(|u| u32::try_from(u).ok());
+    let is_admin = actor.is_some_and(|uid| accounts().is_ok_and(|all| all.iter().any(|a| a.uid == uid && in_group(a, sudo_group()))));
+    let Some(actor) = actor.filter(|_| is_admin) else { return reply(json!({ "ok": false, "error": "only administrators may do this" })) };
+    let exe = std::env::current_exe().context("path of this program")?;
+    let out = Command::new(exe)
+        .args(action.args())
+        .env_clear()
+        .env("PATH", "/usr/sbin:/usr/bin:/sbin:/bin")
+        .env("SUDO_UID", actor.to_string())
+        .env("WAYDESK_VIA", "portal")
+        .env("WAYDESK_SOURCE", source)
+        .stdin(Stdio::null())
+        .output()
+        .context("cannot run waydesk-admin")?;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    if out.status.success() {
+        // `users add` and `users passwd` print JSON (with the new password); the others print a sentence.
+        let result = serde_json::from_str::<serde_json::Value>(stdout.trim()).unwrap_or_else(|_| json!({ "message": stdout.trim() }));
+        return reply(json!({ "ok": true, "result": result }));
+    }
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let why = stderr.trim().lines().last().unwrap_or("it failed").trim_start_matches("waydesk-admin: ");
+    reply(json!({ "ok": false, "error": why.chars().take(300).collect::<String>() }))
 }
 
 const USAGE: &str = "
@@ -1775,7 +1828,14 @@ fn audit_emit(name: &'static str, worked: bool, target: Option<String>, detail: 
         (_, Ok(u)) => ("sudo", u.parse::<u32>().ok()),
         _ => ("root", Some(0)),
     };
+    // The portal's runner (`serve-request`) says so, and from which address.
+    let via = if via == "sudo" && std::env::var("WAYDESK_VIA").as_deref() == Ok("portal") { "portal" } else { via };
     let mut e = audit::event(name, if worked { audit::Outcome::Ok } else { audit::Outcome::Fail }).str("via", via);
+    if via == "portal" {
+        if let Ok(source) = std::env::var("WAYDESK_SOURCE") {
+            e = e.source(&source);
+        }
+    }
     if let Some(uid) = uid {
         e = e.num("actor_uid", uid.into()).str("actor", &audit::name_of(uid).unwrap_or_default());
     }

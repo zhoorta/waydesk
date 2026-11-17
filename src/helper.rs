@@ -51,6 +51,8 @@ pub struct Config {
     pub max_active_users: usize,
     /// `waydesk-admin`, which answers the read-only `Info` requests (`admininfo.rs`).
     pub admin_exe: PathBuf,
+    /// The runner's socket (`waydesk-admin.socket`), where administrators' changes are sent.
+    pub admin_socket: PathBuf,
 }
 
 /// Connections served at once.
@@ -470,6 +472,30 @@ fn serve(mut sock: UnixStream, cfg: &Config, policy: &PamPolicy, sessions: &Sess
                         }
                     }
                 }
+            },
+            HelperReq::Admin { json } => match (&who, &login) {
+                (Some(user), Some((source, _))) => {
+                    // The administrator is checked on this request (the group list was read when this connection logged in, and the portal logs in anew
+                    // for every request); the action is checked against the closed list; the runner checks both again.
+                    let refuse = |sock: &mut UnixStream, why: &str| reply(sock, &HelperResp::Error { message: why.into() });
+                    if !crate::admininfo::is_admin(&user.groups) {
+                        warn!(user = %user.name, "a change was asked for by an account that is not an administrator");
+                        audit::event("admin.refused", Outcome::Refused).str("user", &user.name).num("uid", user.uid.into()).source(source).str("reason", "not_admin").emit();
+                        refuse(&mut sock, "only administrators may do this")
+                    } else {
+                        match serde_json::from_str::<serde_json::Value>(&json).map_err(|_| "the request is not JSON".to_string()).and_then(|v| crate::adminaction::AdminAction::from_json(&v)) {
+                            Err(why) => refuse(&mut sock, &why),
+                            Ok(action) => match crate::admininfo::run_action(&cfg.admin_socket, user.uid, source, &action) {
+                                Ok(answer) => reply(&mut sock, &HelperResp::Info { json: answer }),
+                                Err(e) => {
+                                    warn!(user = %user.name, "the runner could not be asked: {e:#}");
+                                    refuse(&mut sock, "the server could not do this now")
+                                }
+                            },
+                        }
+                    }
+                }
+                _ => reply(&mut sock, &HelperResp::Error { message: "not logged in".into() }),
             },
             HelperReq::Bye => false,
         };

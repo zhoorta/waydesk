@@ -61,6 +61,24 @@ pub fn answer(kind: InfoKind, name: &str, admin: bool, exe: &Path) -> Result<Str
     if admin || kind == InfoKind::Status { Ok(out) } else { own_rows(&out, name) }
 }
 
+/// Has the runner do an action: connects to its socket (root only), sends one line of JSON and reads its one-line answer. The action has been
+/// validated by the caller and is checked again by the runner. `actor` is the administrator who asked, `source` the address they came from.
+pub fn run_action(socket: &Path, actor_uid: u32, source: &str, action: &crate::adminaction::AdminAction) -> Result<String> {
+    use std::io::Write as _;
+    // No slot here: changes do not wait behind status measurements; the runner's socket limits how many run at once.
+    let mut sock = std::os::unix::net::UnixStream::connect(socket).with_context(|| format!("cannot reach the administration socket {}", socket.display()))?;
+    let limit = Some(Duration::from_secs(95));
+    let _ = sock.set_read_timeout(limit);
+    let _ = sock.set_write_timeout(limit);
+    let request = serde_json::json!({ "actor_uid": actor_uid, "source": source, "do": action.to_json() });
+    sock.write_all(format!("{request}\n").as_bytes())?;
+    sock.shutdown(std::net::Shutdown::Write)?;
+    let mut answer = String::new();
+    (&sock).take(64 * 1024).read_to_string(&mut answer).context("reading the answer")?;
+    ensure!(!answer.trim().is_empty(), "the runner gave no answer");
+    Ok(answer.trim().to_owned())
+}
+
 struct Slot;
 impl Slot {
     fn take() -> Option<Slot> {
@@ -131,6 +149,34 @@ mod tests {
         assert!(own_rows("not json", "alice").is_err());
         // a row without a name belongs to nobody
         assert_eq!(own_rows(r#"[{"uid":1}]"#, "alice").unwrap(), "[]");
+    }
+
+    #[test]
+    fn an_action_goes_to_the_runner_as_one_line_and_its_answer_comes_back() {
+        use std::io::{Read as _, Write as _};
+        let _turn = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("waydesk-runner-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("admin.sock");
+        let _ = std::fs::remove_file(&path);
+        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut conn, _) = listener.accept().unwrap();
+            let mut got = String::new();
+            conn.read_to_string(&mut got).unwrap();
+            conn.write_all(b"{\"ok\":true,\"result\":{\"message\":\"done\"}}\n").unwrap();
+            got
+        });
+        let action = crate::adminaction::AdminAction::SessionEnd { name: "eva".into() };
+        let answer = run_action(&path, 1000, "10.0.0.7", &action).unwrap();
+        assert_eq!(answer, r#"{"ok":true,"result":{"message":"done"}}"#);
+        let sent: serde_json::Value = serde_json::from_str(server.join().unwrap().trim()).unwrap();
+        assert_eq!(sent["actor_uid"], 1000);
+        assert_eq!(sent["source"], "10.0.0.7");
+        assert_eq!(sent["do"]["action"], "session_end");
+        assert_eq!(sent["do"]["name"], "eva");
+        // no runner: an error, and the slot is given back
+        assert!(run_action(&dir.join("nobody.sock"), 1000, "10.0.0.7", &action).is_err());
     }
 
     #[test]

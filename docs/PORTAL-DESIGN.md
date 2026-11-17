@@ -51,6 +51,23 @@ The portal switches on only what the installation needs (mockup: `web/mockup/ind
 
 Multi-server model (stage 2): the portal owns the users; assigning a person to a server creates a system account there with a password nobody sees; the portal reaches it through tickets; native RDP clients use an app password the portal issues. Servers enrol by dialling out with a single-use join code (1 hour). One running desktop per person per server; a person may run desktops on several servers at once. Open: whether OIDC/LDAP come in stage 2 or 3 (leaning: local accounts first, data model ready for both).
 
+## Changes from the portal: the runner (decided 2026-11-17)
+
+The root helper cannot make the changes itself: its unit runs under `ProtectSystem=full` and a small capability set (no write to `/etc`, no `CAP_FOWNER`), so `useradd`, `gpasswd` and `chpasswd` fail inside it. Loosening the sandbox of the process that checks passwords was rejected. Instead:
+
+```
+browser --POST /api/admin/do (Origin + CSRF + rate)--> portal --Redeem + Admin--> helper (sandboxed, root)
+   helper: still an administrator? action in the closed list?  --one line of JSON--> /run/waydesk-admin.sock (0600, root)
+   waydesk-admin@.service (socket activated, no sandbox): `waydesk-admin serve-request`
+   runner: checks the list and the actor again, runs the matching `waydesk-admin` command line with a clean environment
+           (SUDO_UID = the actor, WAYDESK_VIA=portal, WAYDESK_SOURCE = address) and prints one line of JSON
+```
+
+- **Closed list** (`src/adminaction.rs`): add user (RDP group only), enable, disable (with or without ending the session), new random password, set desktop and graphics, memory limit, end session. Not in it: removing an account, `sudo`/`wheel` and `waydesk-admins` membership (command line only). Names, desktops, graphics and sizes are checked against short rules; the command line is built from the action, never from what the browser sent.
+- **Rules of the command line apply as for `sudo`:** nobody switches off their own access; the audit line (`admin.user.add`, ...) names the actor, says `via: portal` and the address. The new password is in the answer once and nowhere else (no log line, no cache, `no-store`).
+- **Who may talk to the runner:** only root (the helper). A compromised helper can ask for these actions, not for arbitrary commands.
+- Not yet: the same unit files for Arch and Fedora packages; a live test on a machine with systemd.
+
 ## Pages
 
 People (every account in the login group):

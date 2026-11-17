@@ -124,7 +124,7 @@ function route() {
     if (a.dataset.view === (admin ? view : 'desktop')) a.setAttribute('aria-current', 'page');
     else a.removeAttribute('aria-current');
   }
-  if (admin) renderAdmin(view, $('adminpage'), () => { me = null; show('login'); say('Your sign-in ended. Sign in again.', true); });
+  if (admin) renderAdmin(view, $('adminpage'), () => { me = null; show('login'); say('Your sign-in ended. Sign in again.', true); }, () => me.csrf);
   else stopAdmin();
 }
 window.addEventListener('hashchange', () => { if (me && !$('desk').hidden) route(); });

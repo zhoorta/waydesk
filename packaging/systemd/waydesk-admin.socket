@@ -1,0 +1,15 @@
+[Unit]
+Description=waydesk administration requests from the portal (root only)
+Documentation=file:///usr/share/doc/waydesk/README.md
+
+# The root helper connects here when an administrator changes something in the portal. Only root can open it (mode 0600); each connection
+# starts one waydesk-admin@.service, which accepts nothing but the closed list in src/adminaction.rs.
+[Socket]
+ListenStream=/run/waydesk-admin.sock
+SocketMode=0600
+Accept=yes
+MaxConnections=4
+MaxConnectionsPerSource=4
+
+[Install]
+WantedBy=sockets.target

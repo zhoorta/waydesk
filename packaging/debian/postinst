@@ -32,6 +32,7 @@ if [ "$1" = configure ]; then
     udevadm control --reload >/dev/null 2>&1 || true
     udevadm trigger --subsystem-match=drm --action=change >/dev/null 2>&1 || true
     systemctl enable waydesk-helper.service waydesk.service >/dev/null 2>&1 || true
+    systemctl enable --now waydesk-admin.socket >/dev/null 2>&1 || true   # the portal's administration requests (root only)
     systemctl restart waydesk-helper.service waydesk.service >/dev/null 2>&1 || true
     # On a first install nobody may log in over RDP until an account is in waydesk-users (the account that ran the installation was added
     # above). When there is none, say how to make the first administrator.

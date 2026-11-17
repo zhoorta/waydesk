@@ -44,6 +44,12 @@ pub trait Authenticator: Send + Sync {
         Err("no helper".into())
     }
 
+    /// A change an administrator asked for (the JSON of one action, see `src/adminaction.rs`). The helper decides whether the account may and whether the
+    /// action is one it knows; `Ok` is the runner's JSON answer (`{"ok":...}`), `Err("helper: ...")` a refusal in words the page can show.
+    fn admin_do(&self, _ticket: &str, _account: &str, _source: &str, _action: &str) -> Result<String, String> {
+        Err("no helper".into())
+    }
+
     /// Whether the account administers the machine, as the helper sees it now.
     fn is_admin(&self, ticket: &str, account: &str, source: &str) -> Result<bool, String> {
         let answer = self.info(ticket, account, source, InfoKind::Role)?;
@@ -111,6 +117,25 @@ impl Authenticator for HelperAuth {
                 HelperResp::Info { json } => Ok(json),
                 HelperResp::Error { message } => Err(format!("helper: {message}")),
                 other => Err(format!("unexpected answer to an info request: {other:?}")),
+            },
+            HelperResp::AuthFail => Err("the sign-in is no longer good".into()),
+            HelperResp::Error { message } => Err(format!("helper: {message}")),
+            other => Err(format!("unexpected answer to a ticket: {other:?}")),
+        };
+        let _ = proto::write_frame(&mut sock, &HelperReq::Bye.encode());
+        result
+    }
+
+    fn admin_do(&self, ticket: &str, account: &str, source: &str, action: &str) -> Result<String, String> {
+        let mut sock = self.connect()?;
+        // A change can take a while (ending a session waits for logind): the answer is waited for longer than a login is.
+        let _ = sock.set_read_timeout(Some(Duration::from_secs(100)));
+        let redeem = HelperReq::Redeem { ticket: ticket.to_owned(), user: account.to_owned(), source: source.to_owned() };
+        let result = match Self::ask(&mut sock, &redeem)? {
+            HelperResp::AuthOk => match Self::ask(&mut sock, &HelperReq::Admin { json: action.to_owned() })? {
+                HelperResp::Info { json } => Ok(json),
+                HelperResp::Error { message } => Err(format!("helper: {message}")),
+                other => Err(format!("unexpected answer to a change: {other:?}")),
             },
             HelperResp::AuthFail => Err("the sign-in is no longer good".into()),
             HelperResp::Error { message } => Err(format!("helper: {message}")),

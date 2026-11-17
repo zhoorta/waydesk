@@ -2,6 +2,7 @@
 //! Each connection gets its own headless output (client size and scale), captured with wlr-screencopy,
 //! sent as H.264 over the graphics pipeline (bitmap updates as a fallback), with keyboard and pointer injected.
 
+mod adminaction;
 mod admininfo;
 mod allow;
 mod audio;
@@ -640,7 +641,7 @@ async fn main() -> anyhow::Result<()> {
         let exe = std::env::current_exe().context("path of this program")?;
         // `waydesk-admin` next to this program (both are in /usr/bin when packaged), else where the packages put it.
         let admin_exe = Some(exe.with_file_name("waydesk-admin")).filter(|p| p.exists()).unwrap_or_else(|| PathBuf::from("/usr/bin/waydesk-admin"));
-        return helper::run(helper::Config { socket: helper_socket, daemon_user, allow_users, require_group, exe, worker_args, workspace, systemd_sessions, min_available_mb, max_active_users, admin_exe });
+        return helper::run(helper::Config { socket: helper_socket, daemon_user, allow_users, require_group, exe, worker_args, workspace, systemd_sessions, min_available_mb, max_active_users, admin_exe, admin_socket: PathBuf::from("/run/waydesk-admin.sock") });
     }
     anyhow::ensure!(matches!(auth_mode.as_str(), "file" | "pam" | "helper"), "--auth must be file, pam or helper");
     anyhow::ensure!(!per_user || auth_mode == "pam", "--per-user needs --auth pam (the account comes from the login)");

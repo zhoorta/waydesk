@@ -31,6 +31,17 @@ impl crate::portal::Authenticator for FakeAuth {
         Ok(account != "locked" && password == format!("pw-{account}"))
     }
 
+    /// The stand-in runner: refuses the account `ana` (not an administrator), says that a name `bad` is not valid, and otherwise does what it is told.
+    fn admin_do(&self, _ticket: &str, account: &str, _source: &str, action: &str) -> Result<String, String> {
+        if account != "boss" {
+            return Err("helper: only administrators may do this".into());
+        }
+        if action.contains("\"name\":\"bad\"") {
+            return Err("helper: that is not a valid account name".into());
+        }
+        Ok(format!("{{\"ok\":true,\"result\":{{\"echo\":{action}}}}}"))
+    }
+
     /// The account `boss` administers the machine; everybody else does not. A role question is not counted.
     fn info(&self, _ticket: &str, account: &str, _source: &str, kind: crate::portal::InfoKind) -> Result<String, String> {
         use crate::portal::InfoKind::*;
@@ -786,4 +797,43 @@ async fn the_administrators_pages_are_for_administrators_and_their_answers_are_k
     let (status, again) = env.http("GET", "/api/admin/users", &[("Cookie", &boss.cookie)]).await;
     assert_eq!((status, again), (200, body), "the second request is answered from the kept answer");
     assert_eq!(INFO_CALLS.load(std::sync::atomic::Ordering::SeqCst) - before, 1, "the helper was asked once");
+}
+
+#[tokio::test]
+async fn a_change_needs_the_origin_the_csrf_token_an_administrator_and_a_valid_action() {
+    let env = start("adminchange", Opts::default()).await;
+    let boss = env.browser("boss").await;
+    let ana = env.browser("ana").await;
+    let origin = env.origin();
+    let action = r#"{"action":"user_disable","name":"eva"}"#;
+    let send = |b: &Browser, origin: Option<&str>, csrf: bool, body: &str| {
+        let mut h: Vec<(&str, String)> = vec![("Cookie", b.cookie.clone())];
+        if let Some(o) = origin {
+            h.push(("Origin", o.to_string()));
+        }
+        if csrf {
+            h.push(("X-CSRF-Token", b.csrf.clone()));
+        }
+        (h, body.to_string())
+    };
+    macro_rules! post {
+        ($b:expr, $o:expr, $c:expr, $body:expr) => {{
+            let (h, body) = send($b, $o, $c, $body);
+            let h: Vec<(&str, &str)> = h.iter().map(|(k, v)| (*k, v.as_str())).collect();
+            env.send("POST", "/api/admin/do", &h, &body).await
+        }};
+    }
+    assert_eq!(post!(&boss, None, true, action).0, 403, "no origin");
+    assert_eq!(post!(&boss, Some("https://evil.example"), true, action).0, 403, "another page");
+    assert_eq!(post!(&boss, Some(&origin), false, action).0, 403, "no csrf token");
+    assert_eq!(env.send("POST", "/api/admin/do", &[("Origin", &origin)], action).await.0, 401, "not signed in");
+    assert_eq!(post!(&ana, Some(&origin), true, action).0, 403, "signed in, not an administrator");
+    assert_eq!(post!(&boss, Some(&origin), true, "not json").0, 400);
+    assert_eq!(post!(&boss, Some(&origin), true, "[1]").0, 400, "an action is an object");
+    let (status, body) = post!(&boss, Some(&origin), true, r#"{"action":"user_add","name":"bad"}"#);
+    assert_eq!(status, 400);
+    assert!(body.contains("\"ok\":false") && body.contains("not a valid account name"), "{body}");
+    let (status, body) = post!(&boss, Some(&origin), true, action);
+    assert_eq!(status, 200);
+    assert!(body.contains("\"ok\":true") && body.contains("user_disable"), "{body}");
 }

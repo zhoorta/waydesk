@@ -540,6 +540,9 @@ pub enum HelperReq {
     /// Read-only information for the account that logged in on this connection: its own row, or everybody's when it is an administrator
     /// (`admininfo.rs`). Nothing is changed by it.
     Info { kind: InfoKind },
+    /// A change an administrator asked for: JSON of one `adminaction::AdminAction` (at most 1 KiB). The helper checks the administrator and the
+    /// action, then has the runner (`waydesk-admin serve-request`) do it; the answer is the runner's JSON (`HelperResp::Info`).
+    Admin { json: String },
     Bye,
 }
 
@@ -604,6 +607,10 @@ impl HelperReq {
                     InfoKind::Role => 4,
                 });
             }
+            HelperReq::Admin { json } => {
+                o.u8(7);
+                o.str(json);
+            }
             HelperReq::Bye => o.u8(255),
         }
         o.0
@@ -626,6 +633,7 @@ impl HelperReq {
                     t => return Err(ProtoError::UnknownTag(t)),
                 },
             },
+            7 => HelperReq::Admin { json: i.str()? },
             255 => HelperReq::Bye,
             t => return Err(ProtoError::UnknownTag(t)),
         };
@@ -873,6 +881,7 @@ mod tests {
             HelperReq::Info { kind: InfoKind::Sessions },
             HelperReq::Info { kind: InfoKind::Status },
             HelperReq::Info { kind: InfoKind::Role },
+            HelperReq::Admin { json: r#"{"action":"user_add","name":"frida"}"#.into() },
             HelperReq::Bye,
         ];
         for r in reqs {

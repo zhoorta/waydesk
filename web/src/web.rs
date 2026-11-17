@@ -78,6 +78,8 @@ pub struct App {
     /// The last answers to the administrators' pages, kept a few seconds: a status costs the machine a second of measuring, and several admins (or
     /// one page that refreshes) must not multiply that.
     pub admin_cache: std::sync::Mutex<std::collections::HashMap<&'static str, (Instant, String)>>,
+    /// Changes asked for by administrators, per address.
+    pub admin_rate: RateLimiter,
 }
 
 /// How long an administrators' answer is reused.
@@ -89,6 +91,7 @@ impl App {
             portal: Portal::new(cfg.idle, cfg.absolute, 4096, 5),
             auth,
             admin_cache: Default::default(),
+            admin_rate: RateLimiter::new(30, Duration::from_secs(60)),
             tokens: Tokens::new(Duration::from_secs(30)),
             token_rate: RateLimiter::new(cfg.rate_per_minute, Duration::from_secs(60)),
             ws_rate: RateLimiter::new(cfg.rate_per_minute.saturating_mul(3), Duration::from_secs(60)),
@@ -142,6 +145,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/api/login", post(login).layer(axum::extract::DefaultBodyLimit::max(4096)))
         .route("/api/me", get(me))
         .route("/api/mine", get(mine))
+        .route("/api/admin/do", post(admin_do).layer(axum::extract::DefaultBodyLimit::max(2048)))
         .route("/api/admin/{kind}", get(admin_page))
         .route("/api/logout", post(logout))
         .route("/api/session", post(session_token).layer(axum::extract::DefaultBodyLimit::max(4096)))
@@ -330,6 +334,35 @@ fn admin_kind(name: &str) -> Option<(&'static str, portal::InfoKind)> {
         "sessions" => Some(("sessions", portal::InfoKind::Sessions)),
         "status" => Some(("status", portal::InfoKind::Status)),
         _ => None,
+    }
+}
+
+/// A change an administrator asks for. The browser sends one JSON action (`{"action":"user_disable","name":"eva"}`, the closed list in
+/// `src/adminaction.rs`); the portal checks the origin, the CSRF token and a rate, and passes it to the helper, which decides whether the account
+/// is an administrator and whether the action is one it knows. Nothing the browser sends is put on a command line here or anywhere before the
+/// helper has checked it.
+async fn admin_do(State(app): State<Arc<App>>, Extension(ClientAddr(peer)): Extension<ClientAddr>, Extension(PublicHost(host)): Extension<PublicHost>, headers: HeaderMap, body: axum::body::Bytes) -> Response {
+    let (id, signed) = match changing(&app, &headers, &host) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    let ip = peer.ip();
+    if !app.admin_rate.hit(ip, Instant::now()) {
+        return text(StatusCode::TOO_MANY_REQUESTS, "too many changes, wait a minute\n");
+    }
+    // Compact JSON of an object, nothing else: what the helper receives is what was checked here for shape.
+    let Some(action) = serde_json::from_slice::<serde_json::Value>(&body).ok().filter(serde_json::Value::is_object).map(|v| v.to_string()) else { return text(StatusCode::BAD_REQUEST, "bad request\n") };
+    let Some(ticket) = app.portal.ticket(&id) else { return text(StatusCode::UNAUTHORIZED, "not signed in\n") };
+    let (auth, account, source) = (app.auth.clone(), signed.account.clone(), signed.ip.to_string());
+    let answer = tokio::task::spawn_blocking(move || auth.admin_do(&ticket, &account, &source, &action)).await;
+    // Whatever changed, the next look at the lists is a fresh one.
+    app.admin_cache.lock().unwrap().clear();
+    match answer {
+        Ok(Ok(body)) => json(StatusCode::OK, format!("{body}\n")),
+        Ok(Err(why)) if why.contains("only administrators") => text(StatusCode::FORBIDDEN, "administrators only\n"),
+        // A refusal in words (a name that is not valid, "the server could not do this now"): shown to the administrator as it is.
+        Ok(Err(why)) if why.starts_with("helper: ") => json(StatusCode::BAD_REQUEST, format!("{}\n", serde_json::json!({ "ok": false, "error": &why["helper: ".len()..] }))),
+        _ => text(StatusCode::BAD_GATEWAY, "the server could not be asked\n"),
     }
 }
 
