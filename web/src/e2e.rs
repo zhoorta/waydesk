@@ -23,9 +23,26 @@ const X224_CONFIRM: [u8; 11] = [3, 0, 0, 11, 6, 0xD0, 0, 0, 0x12, 0x34, 0];
 /// Stands in for the root helper: the password of an account is `pw-` and its name, and nobody named `locked` gets in.
 struct FakeAuth;
 
+/// How many times the stand-in helper was asked for a list or the status (the answers are kept a few seconds).
+static INFO_CALLS: AtomicUsize = AtomicUsize::new(0);
+
 impl crate::portal::Authenticator for FakeAuth {
     fn check(&self, account: &str, password: &str, _source: &str) -> Result<bool, String> {
         Ok(account != "locked" && password == format!("pw-{account}"))
+    }
+
+    /// The account `boss` administers the machine; everybody else does not. A role question is not counted.
+    fn info(&self, _ticket: &str, account: &str, _source: &str, kind: crate::portal::InfoKind) -> Result<String, String> {
+        use crate::portal::InfoKind::*;
+        if kind == Role {
+            return Ok(format!("{{\"admin\":{}}}", account == "boss"));
+        }
+        INFO_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(match kind {
+            Users => r#"[{"name":"ana","session":"running"}]"#.into(),
+            Sessions => "[]".into(),
+            _ => r#"{"machine":{}}"#.into(),
+        })
     }
 }
 
@@ -740,4 +757,33 @@ async fn the_stream_needs_a_cookie_this_origin_a_key_and_small_messages() {
     let env = start("stream-nokey", Opts::default()).await;
     let b = env.browser("ana").await;
     assert!(stream_ws(&env, Some(&b.cookie), Some(&env.origin())).await.is_err());
+}
+
+#[tokio::test]
+async fn the_administrators_pages_are_for_administrators_and_their_answers_are_kept_a_few_seconds() {
+    let env = start("adminpages", Opts::default()).await;
+    let boss = env.browser("boss").await;
+    let ana = env.browser("ana").await;
+    let cookie = |b: &Browser| [("Cookie", b.cookie.clone())];
+
+    // who is an administrator is in the answer to /api/me, from the helper
+    let (_, me) = env.http("GET", "/api/me", &[("Cookie", &boss.cookie)]).await;
+    assert!(me.contains("\"admin\":true"), "{me}");
+    let (_, me) = env.http("GET", "/api/me", &[("Cookie", &ana.cookie)]).await;
+    assert!(me.contains("\"admin\":false"), "{me}");
+
+    assert_eq!(env.http("GET", "/api/admin/users", &[]).await.0, 401, "not signed in");
+    let c = cookie(&ana);
+    assert_eq!(env.http("GET", "/api/admin/users", &[("Cookie", &c[0].1)]).await.0, 403, "signed in, not an administrator");
+    assert_eq!(env.http("GET", "/api/admin/status", &[("Cookie", &c[0].1)]).await.0, 403);
+    assert_eq!(env.http("GET", "/api/admin/other", &[("Cookie", &boss.cookie)]).await.0, 404, "only the known pages");
+    assert_eq!(env.http("GET", "/api/admin/users/../status", &[("Cookie", &boss.cookie)]).await.0, 404);
+
+    let before = INFO_CALLS.load(std::sync::atomic::Ordering::SeqCst);
+    let (status, body) = env.http("GET", "/api/admin/users", &[("Cookie", &boss.cookie)]).await;
+    assert_eq!(status, 200);
+    assert!(body.contains("\"name\":\"ana\""), "{body}");
+    let (status, again) = env.http("GET", "/api/admin/users", &[("Cookie", &boss.cookie)]).await;
+    assert_eq!((status, again), (200, body), "the second request is answered from the kept answer");
+    assert_eq!(INFO_CALLS.load(std::sync::atomic::Ordering::SeqCst) - before, 1, "the helper was asked once");
 }

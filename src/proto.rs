@@ -550,6 +550,8 @@ pub enum InfoKind {
     Sessions,
     /// Administrators only.
     Status,
+    /// `{"admin":true|false}`: whether the account administers the machine (asked on every request, never kept).
+    Role,
 }
 
 /// From the helper to the daemon.
@@ -599,6 +601,7 @@ impl HelperReq {
                     InfoKind::Users => 1,
                     InfoKind::Sessions => 2,
                     InfoKind::Status => 3,
+                    InfoKind::Role => 4,
                 });
             }
             HelperReq::Bye => o.u8(255),
@@ -619,6 +622,7 @@ impl HelperReq {
                     1 => InfoKind::Users,
                     2 => InfoKind::Sessions,
                     3 => InfoKind::Status,
+                    4 => InfoKind::Role,
                     t => return Err(ProtoError::UnknownTag(t)),
                 },
             },
@@ -868,6 +872,7 @@ mod tests {
             HelperReq::Info { kind: InfoKind::Users },
             HelperReq::Info { kind: InfoKind::Sessions },
             HelperReq::Info { kind: InfoKind::Status },
+            HelperReq::Info { kind: InfoKind::Role },
             HelperReq::Bye,
         ];
         for r in reqs {

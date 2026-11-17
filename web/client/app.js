@@ -1,6 +1,7 @@
 // The Waydesk web client: a login form, then the remote desktop in the page. The RDP login is made inside the connection by the client
 // (the page sends the password only into it); the gateway hands out a one-time token for starting the session.
 import { Desk, supported as streamSupported } from './desk.js';
+import { render as renderAdmin, stop as stopAdmin, known as adminView } from './admin.js';
 
 // The desktop is the daemon's own browser stream (desk.js): H.264 to the browser's decoder, input back. `?rdp=1` uses the RDP client instead
 // (the IronRDP browser client, loaded only then), to compare the two or where the browser cannot decode H.264.
@@ -81,6 +82,7 @@ function show(view) {
     $('cardtitle').textContent = me.account + ' · desktop';
     $('who').textContent = 'Your desktop is ready.';
     showState();
+    route();
     // The stream needs no password: the server holds a ticket for this sign-in. Only the RDP fallback asks for it.
     const askPassword = !useStream && heldPassword === '';
     $('askpass').hidden = !askPassword;
@@ -110,6 +112,28 @@ async function showState() {
     }));
     el.hidden = el.childElementCount === 0;
   } catch { /* the card stays as it is */ }
+}
+// The page under the top bar: "My desktop" or, for an administrator, one of the admin pages (the address after # says which).
+function route() {
+  const view = location.hash.slice(1);
+  const admin = Boolean(me && me.admin) && adminView(view);
+  $('adminnav').hidden = !(me && me.admin);
+  $('mypage').hidden = admin;
+  $('adminpage').hidden = !admin;
+  for (const a of document.querySelectorAll('.topbar nav a')) {
+    if (a.dataset.view === (admin ? view : 'desktop')) a.setAttribute('aria-current', 'page');
+    else a.removeAttribute('aria-current');
+  }
+  if (admin) renderAdmin(view, $('adminpage'), () => { me = null; show('login'); say('Your sign-in ended. Sign in again.', true); });
+  else stopAdmin();
+}
+window.addEventListener('hashchange', () => { if (me && !$('desk').hidden) route(); });
+// Whether the account administers the machine is the server's answer (it asks the helper); the pages ask again on every request.
+async function learnRole() {
+  try {
+    const r = await fetch('/api/me', { cache: 'no-store' });
+    if (r.ok) me.admin = (await r.json()).admin === true;
+  } catch { /* no admin pages then */ }
 }
 const showSession = (on) => show(on ? 'session' : (me ? 'desk' : 'login'));
 
@@ -190,8 +214,10 @@ $('form').addEventListener('submit', async (e) => {
     $('pass').value = '';
     $('code').value = '';
     say('');
+    await learnRole();
     show('desk');
-    openDesktop();
+    // A person who went to an admin page first (and was asked to sign in) lands there; everybody else gets the desktop, as before.
+    if (!(me.admin && adminView(location.hash.slice(1)))) openDesktop();
   } catch (err) {
     me = null;
     heldPassword = '';
@@ -215,6 +241,7 @@ $('signout').addEventListener('click', async () => {
   try { await fetch('/api/logout', { method: 'POST', cache: 'no-store', headers: { 'X-CSRF-Token': me.csrf } }); } catch { /* the cookie ends by itself */ }
   me = null;
   heldPassword = '';
+  stopAdmin();
   show('login');
   say('Signed out.');
 });

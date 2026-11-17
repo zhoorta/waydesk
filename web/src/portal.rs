@@ -43,6 +43,12 @@ pub trait Authenticator: Send + Sync {
     fn info(&self, _ticket: &str, _account: &str, _source: &str, _kind: InfoKind) -> Result<String, String> {
         Err("no helper".into())
     }
+
+    /// Whether the account administers the machine, as the helper sees it now.
+    fn is_admin(&self, ticket: &str, account: &str, source: &str) -> Result<bool, String> {
+        let answer = self.info(ticket, account, source, InfoKind::Role)?;
+        Ok(serde_json::from_str::<serde_json::Value>(&answer).ok().and_then(|v| v.get("admin").and_then(|a| a.as_bool())).unwrap_or(false))
+    }
 }
 
 /// The root helper of the daemon (`waydesk-server --helper`). Its socket opens only for the daemon's account, so the portal runs as that account.

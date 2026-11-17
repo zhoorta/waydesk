@@ -40,6 +40,7 @@ fn args(kind: InfoKind) -> &'static [&'static str] {
         InfoKind::Users => &["users", "list", "--json"],
         InfoKind::Sessions => &["sessions", "list", "--json"],
         InfoKind::Status => &["status", "--json"],
+        InfoKind::Role => &[],
     }
 }
 
@@ -52,6 +53,9 @@ pub fn own_rows(json: &str, name: &str) -> Result<String> {
 
 /// What the account may be told, or why not. `exe` is `waydesk-admin`.
 pub fn answer(kind: InfoKind, name: &str, admin: bool, exe: &Path) -> Result<String> {
+    if kind == InfoKind::Role {
+        return Ok(format!("{{\"admin\":{admin}}}"));
+    }
     ensure!(admin || kind != InfoKind::Status, "only administrators may ask for the status");
     let out = run(exe, args(kind))?;
     if admin || kind == InfoKind::Status { Ok(out) } else { own_rows(&out, name) }
@@ -127,6 +131,13 @@ mod tests {
         assert!(own_rows("not json", "alice").is_err());
         // a row without a name belongs to nobody
         assert_eq!(own_rows(r#"[{"uid":1}]"#, "alice").unwrap(), "[]");
+    }
+
+    #[test]
+    fn the_role_is_answered_without_running_anything() {
+        let nothing = Path::new("/nonexistent/waydesk-admin");
+        assert_eq!(answer(InfoKind::Role, "alice", true, nothing).unwrap(), r#"{"admin":true}"#);
+        assert_eq!(answer(InfoKind::Role, "alice", false, nothing).unwrap(), r#"{"admin":false}"#);
     }
 
     #[test]

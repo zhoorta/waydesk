@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::extract::ws::WebSocketUpgrade;
-use axum::extract::{Extension, State};
+use axum::extract::{Extension, Path as UrlPath, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode, Uri};
 use axum::middleware;
 use axum::response::{IntoResponse, Response};
@@ -75,13 +75,20 @@ pub struct App {
     pub guesses: Guesses,
     pub portal: Portal,
     pub auth: Arc<dyn Authenticator>,
+    /// The last answers to the administrators' pages, kept a few seconds: a status costs the machine a second of measuring, and several admins (or
+    /// one page that refreshes) must not multiply that.
+    pub admin_cache: std::sync::Mutex<std::collections::HashMap<&'static str, (Instant, String)>>,
 }
+
+/// How long an administrators' answer is reused.
+const ADMIN_CACHE_SECS: u64 = 3;
 
 impl App {
     pub fn new(cfg: Config, daemon_tls: Arc<rustls::ClientConfig>, auth: Arc<dyn Authenticator>) -> Arc<Self> {
         Arc::new(Self {
             portal: Portal::new(cfg.idle, cfg.absolute, 4096, 5),
             auth,
+            admin_cache: Default::default(),
             tokens: Tokens::new(Duration::from_secs(30)),
             token_rate: RateLimiter::new(cfg.rate_per_minute, Duration::from_secs(60)),
             ws_rate: RateLimiter::new(cfg.rate_per_minute.saturating_mul(3), Duration::from_secs(60)),
@@ -135,6 +142,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/api/login", post(login).layer(axum::extract::DefaultBodyLimit::max(4096)))
         .route("/api/me", get(me))
         .route("/api/mine", get(mine))
+        .route("/api/admin/{kind}", get(admin_page))
         .route("/api/logout", post(logout))
         .route("/api/session", post(session_token).layer(axum::extract::DefaultBodyLimit::max(4096)))
         .route("/ws", get(ws_handler))
@@ -299,9 +307,65 @@ fn second_factor(app: &App, ip: IpAddr, account: &str, code: &str, now: Instant)
 }
 
 async fn me(State(app): State<Arc<App>>, headers: HeaderMap) -> Response {
-    match signed_in(&app, &headers) {
-        Some((_, signed)) => json(StatusCode::OK, signed_json(&signed)),
-        None => text(StatusCode::UNAUTHORIZED, "not signed in\n"),
+    let Some((id, signed)) = signed_in(&app, &headers) else { return text(StatusCode::UNAUTHORIZED, "not signed in\n") };
+    // Whether the account administers the machine is the helper's answer now (the page only uses it to show the admin menu; every admin request asks again).
+    let admin = match app.portal.ticket(&id) {
+        Some(ticket) => {
+            let (auth, account, source) = (app.auth.clone(), signed.account.clone(), signed.ip.to_string());
+            tokio::task::spawn_blocking(move || auth.is_admin(&ticket, &account, &source)).await.ok().and_then(Result::ok).unwrap_or(false)
+        }
+        None => false,
+    };
+    json(StatusCode::OK, signed_json_with_role(&signed, admin))
+}
+
+fn signed_json_with_role(signed: &Signed, admin: bool) -> String {
+    format!("{{\"account\":{},\"csrf\":\"{}\",\"admin\":{admin}}}\n", serde_json::Value::from(signed.account.as_str()), signed.csrf)
+}
+
+/// The path names of the administrators' pages and what the helper is asked for.
+fn admin_kind(name: &str) -> Option<(&'static str, portal::InfoKind)> {
+    match name {
+        "users" => Some(("users", portal::InfoKind::Users)),
+        "sessions" => Some(("sessions", portal::InfoKind::Sessions)),
+        "status" => Some(("status", portal::InfoKind::Status)),
+        _ => None,
+    }
+}
+
+/// Read-only data for the administrators' pages: the helper's lists and status. Whether the account is an administrator is asked of the helper on
+/// every request (a person taken out of the group loses the pages at once); the answer itself is kept a few seconds.
+async fn admin_page(State(app): State<Arc<App>>, UrlPath(kind): UrlPath<String>, headers: HeaderMap) -> Response {
+    let Some((name, info_kind)) = admin_kind(&kind) else { return text(StatusCode::NOT_FOUND, "not found\n") };
+    let Some((id, signed)) = signed_in(&app, &headers) else { return text(StatusCode::UNAUTHORIZED, "not signed in\n") };
+    let Some(ticket) = app.portal.ticket(&id) else { return text(StatusCode::UNAUTHORIZED, "not signed in\n") };
+    let (auth, account, source) = (app.auth.clone(), signed.account.clone(), signed.ip.to_string());
+    let t2 = ticket.clone();
+    let (a2, acc2, src2) = (auth.clone(), account.clone(), source.clone());
+    match tokio::task::spawn_blocking(move || a2.is_admin(&t2, &acc2, &src2)).await {
+        Ok(Ok(true)) => {}
+        Ok(Ok(false)) => {
+            warn!(account, kind = name, "an account that is not an administrator asked for an administrators' page");
+            return text(StatusCode::FORBIDDEN, "administrators only\n");
+        }
+        _ => return text(StatusCode::BAD_GATEWAY, "the server could not be asked\n"),
+    }
+    let now = Instant::now();
+    if let Some((at, body)) = app.admin_cache.lock().unwrap().get(name) {
+        if now.duration_since(*at) < Duration::from_secs(ADMIN_CACHE_SECS) {
+            return json(StatusCode::OK, body.clone());
+        }
+    }
+    match tokio::task::spawn_blocking(move || auth.info(&ticket, &account, &source, info_kind)).await {
+        Ok(Ok(body)) => {
+            app.admin_cache.lock().unwrap().insert(name, (now, body.clone()));
+            json(StatusCode::OK, body)
+        }
+        Ok(Err(why)) => {
+            warn!(kind = name, "the helper could not answer: {why}");
+            text(StatusCode::BAD_GATEWAY, "the server could not be asked\n")
+        }
+        Err(_) => text(StatusCode::BAD_GATEWAY, "the server could not be asked\n"),
     }
 }
 

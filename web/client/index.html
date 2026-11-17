@@ -37,10 +37,17 @@
   <div id="desk" hidden>
     <header class="topbar">
       <img src="logo-dark.svg" alt="Waydesk" width="119" height="26">
-      <nav aria-label="Portal"><a href="#" aria-current="page">My desktop</a></nav>
+      <nav aria-label="Portal">
+        <a href="#desktop" data-view="desktop">My desktop</a>
+        <span id="adminnav" hidden><span class="divider" aria-hidden="true">|</span>
+          <a href="#overview" data-view="overview">Overview</a>
+          <a href="#users" data-view="users">Users</a>
+          <a href="#sessions" data-view="sessions">Sessions</a></span>
+      </nav>
       <div class="who"><b id="account"></b><button type="button" id="signout" class="btn sm">Sign out</button></div>
     </header>
-    <main class="page">
+    <main class="page" id="adminpage" hidden></main>
+    <main class="page" id="mypage">
       <h1>My desktop</h1>
       <section class="win card">
         <div class="bar"><span class="t" id="cardtitle">desktop</span><span class="cap" aria-hidden="true"><i>&#x2013;</i><i>&#x25a1;</i><i>&#x2715;</i></span></div>
