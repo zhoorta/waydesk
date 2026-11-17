@@ -520,3 +520,98 @@ rises to 40 and is back at 18 within 20 seconds of the noise stopping). Several 
 Other GPUs than these two (AMD through VAAPI should work and was not tried; Intel Arc was not seen, and the UHD 770 only in a short test); a card with its own memory under many users; how fast applications are with and without the GPU, apart from
 WebGL; the delay between a click and its picture and the frame rate each user really receives (the page's own frame rate was read, not what arrived at the client); runs longer than the 45 minutes each ramp took; clients far away
 over a slow link with many users (a link of 4 Mbit/s was met by accident and the encoder followed it down to 1 Mbit/s); more than one data centre.
+
+## Browser: the thin stream against the IronRDP client under a bad link (2026-11-17)
+
+Same box, same session, same page, same Chrome: `desk.stackcare.pt` (Hetzner, 2 vCPU shared, no GPU, Debian 13, software OpenH264), the portal's own
+stream (`desk.js`, WebCodecs) against the patched IronRDP browser client (`?rdp=1`: IronRDP 0bd400f plus the 46 tabby-rdp patches, rebuilt from
+source and byte-identical to the shipped `vendor/`; H.264 over EGFX). Both are TCP/WebSocket. The client is headless Chrome on a Mac in Portugal (~80 ms
+RTT, 75 Mbit/s down to the box); the impairment is `tc netem` on the box's eth0 (egress, so it hits what the client receives). The workload is a
+Firefox window running a canvas animation (40 moving squares, a counter) at 640x360 inside the 1280x758 session; 25 s per run after a 3 s settle.
+Visible fps = how often a 16x16 downsample of the client's canvas changed (per animation frame, so it caps near 20 here, the animation and the
+encoder cap it); down = WebSocket payload bytes the page received.
+
+| scenario | stream fps | IronRDP fps | stream down (kbit/s) | IronRDP down (kbit/s) | longest stall, stream / IronRDP |
+|---|---|---|---|---|---|
+| no impairment | 18.0 | 19.5 | 2564 | 1166 | 135 ms / 133 ms |
+| +100 ms delay | 10.5 | 15.6 | 2243 | 945 | 336 ms / 233 ms |
+| 1 % loss | 6.2 | 16.3 | 1862 | 1065 | 651 ms / 286 ms |
+| 3 % loss + 100 ms | 0.8 | 7.9 | 752 | 606 | 3698 ms / 621 ms |
+| 1 Mbit/s, 20 ms, queue 40 pkts | 0.5 | 10.7 | 1034 | 673 | 4714 ms / 773 ms |
+| 600 kbit/s, 110 ms, queue 60 pkts (a poor mobile link) | 0.3 | 6.4 | 647 | 444 | 24016 ms / 1350 ms |
+
+**Result: on a clean link they are equal; on a bad one the thin stream is clearly worse, and it is not close.** The stream sends about twice the bytes
+(2.5 against 1.2 Mbit/s) for the same picture, and it did not slow down when the link did: in none of these runs did the daemon log `bitrate for the
+browser's link`, so the link-adaptive flow control (a3d2bf8) never engaged, and under a cap the encoder kept sending what the link could not carry
+(stalls of 5-24 s). IronRDP's frame acknowledgements and its smaller frames let it degrade instead of freezing.
+
+**Read with care.** One run per cell (an earlier pass gave 13.1 and 6.0 fps for the stream at 1 % loss: the noise is large, but not the size of
+these gaps); a synthetic animation, not real work; a 2 vCPU box at 50-60 % CPU in every cell, so the clean-link frame rate is the box's, not the
+protocol's; netem delays and drops at the sender, which is harsher on TCP than a real path with the same numbers. A first pass of the capped
+scenarios was thrown away: netem's default queue (1000 packets) is 12 s at 1 Mbit/s and my own SSH commands waited behind it, and a stale removal timer
+cleared rules mid-run (queues are now 40-60 packets, one tracked timer per run, `netem_active_at_end` recorded). Not measured: press-to-picture delay,
+CPU at the client, real full-screen video, Safari and Firefox.
+
+**What it means for the decision** (`docs/PORTAL-DESIGN.md`: "if the thin stream does not measure up ... the IronRDP bundle goes into the same
+portal"): as it stands the thin stream does not measure up on a lossy or slow link. The first thing to find is why the flow control did not
+engage (the kernel numbers are those of the daemon-to-portal loopback socket; the portal may be buffering a slow browser link instead of backing it up,
+which would hide it from the daemon). If that is fixed and the numbers are re-run, the stream may close the gap; if not, the IronRDP client is the
+better default for people on mobile or lossy links, and the stream's benefit (no 5.8 MB bundle, no 46 patches) has to be weighed against that.
+
+**Tried and ruled out (same day).** The guess that the portal's kernel send buffer toward the browser (`tcp_wmem` max 4 MB, no `TCP_NOTSENT_LOWAT`) hides
+the slow link from the daemon: `TCP_NOTSENT_LOWAT` of 128 KB on the browser-facing socket was built and run on the same box; it changed nothing that
+matters (mobile 0.2 fps, 1 Mbit/s 0.6, 1 % loss 2.8, 3 % loss + 100 ms 0.1, stalls 2-13 s) and the daemon still logged no `bitrate for the browser's link`.
+Reverted. The cause is still unknown; the next step is to log, per acknowledgement, what `Flow` sees (the socket's queue, `delivery_rate`, bytes in
+flight, `capacity`), not to guess again.
+
+**Correction (same day, later).** The fps and stall columns of the table above come from a sampler that shrank the canvas to 16x16 with a cheap scaler
+reading only a few source pixels per cell: it misses most motion, so those two columns are undercounts and **are not numbers to quote**. Only the
+byte and message columns are sound, and they show the stream sending ~75 messages/s against IronRDP's ~21 (smaller frames, about 4 KB against 7 KB), not
+"twice the bytes for the same picture". The ordering under bad links (stream far worse) was also seen as multi-second gaps in the page's own picture, but
+it needs re-measuring with a sound sampler (32x32 with high-quality smoothing, in the harness now) and the same workload for both clients.
+Not usable either: a run with the session worker at `--bitrate 800000 --quality 38` (the worker takes `WAYDESK_SESSION_ARGS`, not `WAYDESK_ARGS`, when
+the helper starts sessions); restarting the session replaced the long-running animation with a Firefox that renders at ~10 fps, so the workload changed.
+What the instrumented daemon did show is solid: with the default encoder settings (40 Mbit/s target, QP <= 20, no frame skipping) the loopback socket to the
+portal never looks full (delivery rate ~5 GB/s, application limited, queue ~0, window 4 frames, 20-30 KB in flight), so `Flow` never learns a capacity
+and never lowers the bitrate; whether a lower bitrate hint would be honoured by the encoder at QP <= 20 is not tested.
+
+### Second pass, 2026-11-17 evening: sound was the problem, not the video (supersedes the table and conclusion above)
+
+Three things were wrong in the first pass, all found the same evening:
+
+1. **Sound is on by default in the thin stream** (`muted = false`; the daemon sends sound from the moment the stream opens: raw PCM, 44.1 kHz stereo, 20 ms
+   chunks, about 800 kbit/s here, silence included) on the same TCP connection as the video and outside the video's credit window. The IronRDP page has no
+   sound. With sound on, the video on a clean 75 Mbit/s link fell to **0.4 frames/s** in one test; muted, the same session gave 18.9 fps at 926 kbit/s of video.
+   Most of the stream's bytes and messages in the first pass (75 messages/s against IronRDP's 21) were audio, which also explains why the video flow
+   control never saw a full link (audio is not in it).
+2. The frame sampler undercounted (see the correction above); now 32x32 with high-quality smoothing. The animation's real rate is read from its window title
+   and logged per run (30 fps; the box was at 70-82 % CPU with it, shared 2 vCPU, so absolute numbers are CPU-bound and noisy).
+3. A restart of the session had replaced the 60 fps animation by one running about 10 fps.
+
+Fair comparison, stream **muted** against IronRDP, one run each, 25 s, same animation (30 fps):
+
+| scenario | stream fps | IronRDP fps | stream down (kbit/s) | IronRDP down (kbit/s) |
+|---|---|---|---|---|
+| no impairment | 13.9 | 11.4 | 644 | 494 |
+| +100 ms delay | 6.2 | (run failed) | 423 | |
+| 1 % loss | 3.6 | (run failed) | 721 | |
+| 3 % loss + 100 ms | 3.5 | 3.0 | 310 | 190 |
+| 1 Mbit/s, 20 ms | 5.8 | 8.5 | 552 | 388 |
+| 600 kbit/s, 110 ms (mobile) | 0.0 | 5.1 | 214 | 237 |
+
+With sound muted the two are in the same range on a clean link and at 3 % loss; IronRDP is ahead at the 1 Mbit/s cap (8.5 against 5.8) and clearly on the
+mobile profile (the stream showed no picture change at all in 25 s there, perhaps the first keyframe not arriving in time at 600 kbit/s: not checked). The two
+IronRDP cells (delay, 1 % loss) did not run (the page did not finish loading in 60 s on the loaded box). One run per cell; the differences at 3 % loss and on
+a clean link are inside the noise. **So the earlier verdict that the stream is far worse than IronRDP was mostly the audio.**
+
+What to do (not done): make sound **off until the page asks for it** (the daemon sends `AudioOn` at connection; the page should send it, or send it
+after the first user gesture, when the browser can play it at all), and put sound under the same flow control as the video (or compress it, Opus,
+instead of 1.4 Mbit/s PCM); then re-run the matrix with sound on to see what the video does beside real audio; check the mobile first-frame case
+(keyframe size at a low bitrate; the encoder was left at 40 Mbit/s target and QP <= 20, which a slow link cannot carry, and whether it honours a lower bitrate
+is still untested); run each cell at least twice; use a larger box so the animation does not take the encoder's CPU.
+
+**Sound off by default (done, same evening, uncommitted).** The daemon no longer sends `AudioOn` when a stream opens (`sound` starts false in `webstream::pump`), and the page
+starts muted and asks for sound (`ToServer::Audio`) when the person clicks the button, creating the audio context inside that click. Checked on the wire
+with headless Chrome against the box: no click, 20 video fps and no sound messages (126 KB/s video); after the click, sound messages at 49/s (169 KB/s of
+PCM, about 1.4 Mbit/s) and 16 video fps on the clean link. That PCM rate is what a user who turns sound on pays: Opus and flow control for it are still to do.
+Not checked by ear (headless has no audio device); it worked before the change and the context is now created in the click.
