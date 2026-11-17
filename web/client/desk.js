@@ -69,7 +69,7 @@ export class Desk {
     this.metaUsed = false;
     this.underMeta = new Set(); // keys sent while Command was held (a Mac sends no key-up for them)
     this.audio = null; // { ctx, next } once sound has come
-    this.muted = false;
+    this.muted = true; // sound is off until the person turns it on (the daemon sends none until asked)
     this.mic = null; // { stream, ctx } while the microphone is on
     this.micWanted = false;
     this.tapped = new Set(); // keys sent as a whole tap (their key-up is not sent again)
@@ -139,23 +139,28 @@ export class Desk {
 
   // Sound: each 20 ms chunk is scheduled right after the one before it, with a small cushion at the start so that a late message does not make a
   // gap. When the page falls behind (a background tab, a busy moment) chunks are dropped instead of the sound lagging for ever.
+  // The audio context, made on the first call; called from the click that turns sound on, where a browser lets it start.
+  ensureAudio() {
+    if (this.audio) return true;
+    const AC = globalThis.AudioContext || globalThis.webkitAudioContext;
+    if (!AC) return false;
+    let ctx;
+    try { ctx = new AC({ sampleRate: 44100, latencyHint: 'interactive' }); } catch { return false; }
+    this.audio = { ctx, next: 0 };
+    // A page may only make sound after the person did something in it: the first click or key starts it.
+    const start = () => { if (ctx.state !== 'running') ctx.resume().catch(() => {}); };
+    for (const type of ['pointerdown', 'keydown']) {
+      const fn = () => start();
+      window.addEventListener(type, fn, { capture: true });
+      this.listeners.push([window, type, fn, { capture: true }]);
+    }
+    start();
+    return true;
+  }
+
   play(bytes) {
     if (this.muted || bytes.length < 4) return;
-    const AC = globalThis.AudioContext || globalThis.webkitAudioContext;
-    if (!AC) return;
-    if (!this.audio) {
-      let ctx;
-      try { ctx = new AC({ sampleRate: 44100, latencyHint: 'interactive' }); } catch { return; }
-      this.audio = { ctx, next: 0 };
-      // A page may only make sound after the person did something in it: the first click or key starts it.
-      const start = () => { if (ctx.state !== 'running') ctx.resume().catch(() => {}); };
-      for (const type of ['pointerdown', 'keydown']) {
-        const fn = () => start();
-        window.addEventListener(type, fn, { capture: true });
-        this.listeners.push([window, type, fn, { capture: true }]);
-      }
-      start();
-    }
+    if (!this.ensureAudio()) return;
     const { ctx } = this.audio;
     if (ctx.state !== 'running') return;
     const frames = bytes.length >> 2;
@@ -179,6 +184,7 @@ export class Desk {
   /** Sound on or off (off also stops the daemon sending it). */
   setMuted(muted) {
     this.muted = muted;
+    if (!muted) this.ensureAudio(); // inside the click that asked for sound
     this.send([10, muted ? 0 : 1]);
     if (muted && this.audio) this.audio.next = 0;
   }

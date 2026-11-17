@@ -4,6 +4,8 @@ What changed, newest first. The numbered releases are the ones in the apt reposi
 
 ## Unreleased
 
+**Browser stream: sound is off until the person turns it on.** The page used to start with sound on and the daemon sent raw PCM (about 800 kbit/s, silence included) on the connection that carries the picture, whether or not anything was played; on a slow or lossy link that starved the video (0.4 frames/s on a clean link in one test, 18.9 with sound muted). The page now starts muted ("Sound off") and asks for sound when the button is pressed; the audio context is made inside that click.
+
 **`waydesk-admin config check` no longer shares the administrator's terminal** with the account's programs (it runs them in a session of its own, without a controlling terminal).
 
 **A fifth security pass** (`docs/SECURITY-REVIEW.md`, findings 19 to 22), on what 0.4 and 0.5 added. Every failed login is now answered 4 s after it began, whatever failed: an unknown account was answered sooner than a wrong password, which told a guesser which names may log in. The status files of the sessions move from one directory open to every account (`/run/waydesk/status/UID.json`, sticky) to a folder per account that the helper makes (`/run/waydesk/status/UID/status.json`, 0700), so an account can no longer take another's file names first; sessions started before the upgrade show their status in `waydesk-admin status` once they restart. The power rule lets administrators through on Debian and Ubuntu too (the group `sudo`; it knew only `wheel`). A full table of failed-login counters keeps how often a key was locked, so lockouts keep getting longer.

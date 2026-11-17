@@ -204,8 +204,8 @@ function openStream() {
     micEnded: () => { $('mic').textContent = 'Mic off'; say('The microphone stopped.'); },
   });
   current = { el: canvas, desk };
-  muted = false;
-  $('mute').textContent = 'Sound on';
+  muted = true;
+  $('mute').textContent = 'Sound off';
   $('mic').textContent = 'Mic off';
   if (params.get('debug') === '1') globalThis.__desk = desk; // for looking at the decoder's numbers in the console
   heldPassword = '';
@@ -290,7 +290,7 @@ async function openDesktop() {
 
 
 $('end').addEventListener('click', () => (current && current.desk ? current.desk.disconnect() : end('Disconnected.')));
-let muted = false;
+let muted = true; // sound is off until asked for
 $('mute').addEventListener('click', () => {
   muted = !muted;
   $('mute').textContent = muted ? 'Sound off' : 'Sound on';

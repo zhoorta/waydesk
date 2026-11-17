@@ -518,12 +518,12 @@ where
         let _ = clip_tx.send(data);
     }));
     link.send(Down::ClipboardOn);
-    // The session's sound, until the browser says it does not want it: chunks are dropped, not queued, when the connection is behind.
+    // The session's sound is wired up but off: the page asks for it (ToServer::Audio) when the person turns it on, so that a page that plays nothing
+    // does not receive 800 kbit/s of PCM on the connection that carries the picture. Chunks are dropped, not queued, when the connection is behind.
     let (audio_tx, audio_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(AUDIO_QUEUE);
     link.set_audio_sink(Some(Box::new(move |pcm| {
         let _ = audio_tx.try_send(pcm);
     })));
-    link.send(Down::AudioOn);
 
     let result = pump(rd, wr, &link, clip_rx, audio_rx, fd, max_bitrate).await;
     link.send(Down::AudioOff);
@@ -574,7 +574,7 @@ where
     let mut resize_at: Option<tokio::time::Instant> = None;
     let mut size = link.size();
     let started = Instant::now();
-    let mut sound = true;
+    let mut sound = false;
     let mut clip_rate = Rate { window: Instant::now(), count: 0 };
     let mut mic_rate = Rate { window: Instant::now(), count: 0 };
     let mut mic = false;
