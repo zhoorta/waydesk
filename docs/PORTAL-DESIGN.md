@@ -22,6 +22,35 @@ A sysadmin installs it with `apt install waydesk-portal`, edits one file and sta
 - Risks: a second front end to test and keep in step with RDP; browser input goes straight into the daemon, so sizes and rates are validated (reuse `check_frame`) and the session is bound to the account the portal asserted.
 - WebTransport only as a later optional upgrade; WebRTC rejected (no reverse proxy, ICE is wasted client to server).
 
+## Without the portal (the CLI alone stays complete)
+
+**Decision (2026-11-17): the portal is optional.** `waydesk` (daemon, `waydesk-admin`, helper) is a complete product on its own; `waydesk-portal` is a separate package that depends on it and adds a front end. A person with one computer who only wants RDP installs `waydesk`, runs `waydesk-setup-admin`, and connects with any RDP client over a VPN or the LAN. Nothing in the daemon requires the portal, a database or a web server.
+
+What the portal adds, and so what is missing without it: browser access (no client, no VPN), the per-person *My desktops* page, one place to assign people to servers, single sign-on and a combined audit view.
+
+Rules that keep both ways working:
+
+1. **Every portal action is also a `waydesk-admin` command.** The portal's `AdminReq` calls the same functions the CLI calls. A feature is not done until the CLI has it.
+2. **One source of truth per host.** System accounts and the host's configuration hold users and assignments. The portal reads and writes the same data, so starting with the CLI and adding the portal later migrates nothing.
+3. **Packaging:** `waydesk` alone, `waydesk-portal` optional, same version number.
+
+Several servers without the portal, from least to most work:
+
+1. **Declarative users file (first).** `/etc/waydesk/users.toml` lists this host's accounts (desktop, GPU, memory limit, groups). `waydesk-admin apply` reconciles the host to it and prints the diff (`--dry-run` first). Ansible, Salt or a git repo pushes one file per host, so "alice may use gpu-1" is a line in that host's file. Large organisations keep their own configuration management instead of a second control plane.
+2. **Fleet monitoring (first).** `waydesk-admin status --json` gets a documented schema and an optional Prometheus-format endpoint, so Zabbix, Grafana or the StackCare hub can show all servers.
+3. **Fan-out over SSH (if small teams ask).** `waydesk-admin --hosts web-1,web-2 users list` merges the output of the same command run on each host; names and tags come from `~/.config/waydesk/hosts`. No new daemon.
+4. **Directory accounts (with the directory work).** With LDAP/sssd the accounts are the same on every host; each host only has `allowed_group`, so assigning a person means adding them to a directory group. The portal's directory sync is the same mechanism with a page on top.
+
+## Three sizes, one design
+
+The portal switches on only what the installation needs (mockup: `web/mockup/index.html`, size switcher at the bottom left).
+
+- **Personal:** one computer, one person who is also the admin. Pages: My desktop, Computers, My account, Settings. Adding a computer shows a one-line install command with a single-use join code (the new host dials out; no inbound port).
+- **Team (about 3 servers, 9 people):** adds Overview, Servers, Users, Sessions, Audit. Users have a *Servers* list; desktop, GPU and memory are set per server. *My desktops* shows one card per assigned server (running, not started, under maintenance, offline).
+- **Organization (about 14 servers, 480 people):** adds Groups (one level, no nesting, optionally kept in step with a directory group), sign-in sources (single sign-on, directory sync, local accounts), roles (administrator, operator, auditor), pools (tags) and a placement rule, bulk actions, paging and a fleet overview. Audit can be forwarded to syslog.
+
+Multi-server model (stage 2): the portal owns the users; assigning a person to a server creates a system account there with a password nobody sees; the portal reaches it through tickets; native RDP clients use an app password the portal issues. Servers enrol by dialling out with a single-use join code (1 hour). One running desktop per person per server; a person may run desktops on several servers at once. Open: whether OIDC/LDAP come in stage 2 or 3 (leaning: local accounts first, data model ready for both).
+
 ## Pages
 
 People (every account in the login group):

@@ -1,0 +1,452 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Waydesk portal: mockup</title>
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<meta name="theme-color" content="#06121c">
+<style>
+/* Same tokens as site/style.css: one palette, one type scale, one spacing scale. UI text in sans, values and commands in mono. */
+:root {
+  --bg: #06121c; --panel: rgba(12,16,22,.92); --bar: #0a0c10; --line: #2a323c;
+  --fg: #e8e3da; --dim: #a8aeb4; --muted: #b9bfc5; --copper: #ee9a45;
+  --ok: #9fd88c; --warn: #e8c06a; --bad: #e08a78;
+  --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --mono: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Mono", Menlo, Consolas, monospace;
+  --fs-xs: 13px; --fs-s: 14px; --fs-m: 15px; --fs-l: 18px; --fs-h2: 24px; --fs-xl: 32px;
+  --s1: 4px; --s2: 8px; --s3: 16px; --s4: 24px; --s5: 32px; --s6: 48px;
+  --r-win: 12px; --r-bar: 18px; --r-pill: 9px;
+  --shadow: 16px 22px 46px rgba(0,0,0,.72), 5px 8px 14px rgba(0,0,0,.55), 0 0 0 1px rgba(0,0,0,.4);
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html { background: var(--bg); }
+body {
+  margin: 0; min-height: 100vh; color: var(--fg); font: var(--fs-m)/1.55 var(--sans); -webkit-font-smoothing: antialiased;
+  background:
+    radial-gradient(900px 520px at 50% 30%, rgba(24,160,170,.26) 0, transparent 66%),
+    radial-gradient(1100px 700px at 90% -5%, rgba(20,150,142,.5) 0, transparent 60%),
+    radial-gradient(900px 650px at -5% 42%, rgba(22,84,168,.5) 0, transparent 60%),
+    radial-gradient(1000px 600px at 55% 112%, rgba(15,111,148,.45) 0, transparent 60%), var(--bg);
+  background-attachment: fixed;
+}
+a { color: var(--copper); text-underline-offset: 3px; }
+:focus-visible { outline: 2px solid var(--copper); outline-offset: 2px; }
+code, .mono { font-family: var(--mono); font-size: var(--fs-s); }
+code { background: rgba(255,255,255,.06); border: 1px solid var(--line); border-radius: 4px; padding: 0 var(--s1); }
+h1 { font-size: var(--fs-xl); line-height: 1.2; margin: 0 0 var(--s2); }
+h1 em { font-style: normal; color: var(--copper); }
+h2 { font-size: var(--fs-l); margin: 0 0 var(--s3); }
+h3 { font-size: var(--fs-m); margin: var(--s4) 0 var(--s2); }
+p { margin: var(--s2) 0; }
+.dim { color: var(--dim); } .muted { color: var(--muted); } .ok { color: var(--ok); } .warn { color: var(--warn); } .bad { color: var(--bad); }
+.col { max-width: 1200px; margin: 0 auto; padding: 0 var(--s4) var(--s6); }
+
+/* top bar, as on the site */
+header { position: sticky; top: var(--s2); z-index: 5; margin-top: var(--s2); display: flex; align-items: center; flex-wrap: wrap; gap: var(--s2) var(--s4);
+  padding: var(--s3) var(--s4); background: rgba(7,10,14,.86); backdrop-filter: blur(8px); border: 1px solid rgba(255,255,255,.1); border-radius: var(--r-bar); box-shadow: 0 10px 28px rgba(0,0,0,.55); }
+.logo img { height: 26px; display: block; }
+nav { display: flex; flex-wrap: wrap; gap: var(--s1) var(--s3); font-size: var(--fs-s); }
+nav a { color: #d0d4d9; text-decoration: none; padding: var(--s1) 0; border-bottom: 2px solid transparent; }
+nav a:hover { color: var(--copper); }
+nav a[aria-current] { color: var(--copper); border-bottom-color: var(--copper); }
+.who { margin-left: auto; display: flex; align-items: center; gap: var(--s3); font-size: var(--fs-s); color: var(--dim); }
+.who b { color: var(--fg); font-weight: 600; }
+.tag { display: inline-block; padding: 0 var(--s2); border: 1px solid rgba(255,255,255,.18); border-radius: var(--r-pill); font-size: var(--fs-xs); color: var(--dim); white-space: nowrap; }
+.tag.ok { color: var(--ok); border-color: rgba(159,216,140,.4); } .tag.warn { color: var(--warn); border-color: rgba(232,192,106,.4); } .tag.bad { color: var(--bad); border-color: rgba(224,138,120,.4); }
+
+/* windows */
+.win { background: var(--panel); backdrop-filter: blur(10px); border: 1px solid rgba(255,255,255,.11); border-radius: var(--r-win); box-shadow: var(--shadow); overflow: hidden; }
+.win > .bar { display: flex; align-items: center; gap: var(--s2); height: 36px; padding: 0 var(--s2) 0 var(--s3); background: var(--bar); color: var(--dim); font-size: var(--fs-xs); }
+.win > .bar .t { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.win > .bar .act { color: var(--dim); }
+.cap { display: flex; gap: 1px; }
+.cap i { display: block; width: 30px; height: 18px; font-style: normal; font-size: var(--fs-xs); line-height: 18px; text-align: center; color: #737a82; }
+.cap i:first-child { border-radius: var(--r-pill) 0 0 var(--r-pill); } .cap i:last-child { border-radius: 0 var(--r-pill) var(--r-pill) 0; }
+.win > .body { padding: var(--s4); }
+.win > .body > :first-child { margin-top: 0; } .win > .body > :last-child { margin-bottom: 0; }
+.page { margin-top: var(--s5); display: grid; gap: var(--s4); }
+.page > .head { display: flex; align-items: end; gap: var(--s3); flex-wrap: wrap; }
+.page > .head h1 { margin: 0; font-size: 26px; } .page > .head .sp { flex: 1; }
+
+/* controls */
+.btn { display: inline-flex; align-items: center; gap: var(--s2); padding: var(--s2) var(--s3); border: 1px solid rgba(255,255,255,.18); border-radius: 8px; background: rgba(255,255,255,.05); color: var(--fg); font: inherit; font-size: var(--fs-s); cursor: pointer; text-decoration: none; }
+.btn:hover { border-color: var(--copper); }
+.btn.primary { background: var(--copper); border-color: var(--copper); color: #1a1006; font-weight: 600; }
+.btn.primary:hover { filter: brightness(1.08); }
+.btn.danger { color: var(--bad); } .btn.danger:hover { border-color: var(--bad); }
+.btn.sm { padding: 2px var(--s2); font-size: var(--fs-xs); border-radius: 6px; }
+.btn svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+label { display: grid; gap: var(--s1); color: var(--muted); font-size: var(--fs-s); }
+input, select { padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: rgba(0,0,0,.35); color: var(--fg); font: inherit; }
+input:focus, select:focus { outline: 2px solid var(--copper); border-color: transparent; }
+.hint { font-size: var(--fs-xs); color: var(--dim); }
+.row { display: flex; gap: var(--s3); flex-wrap: wrap; align-items: end; }
+.row > label { flex: 1; min-width: 160px; }
+
+/* tiles, meters, tables */
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: var(--s3); }
+.tile { border: 1px solid var(--line); border-radius: 8px; padding: var(--s3); background: rgba(255,255,255,.03); }
+.tile .k { font-size: var(--fs-xs); color: var(--dim); }
+.tile .big { font-size: 26px; font-weight: 700; color: var(--copper); line-height: 1.2; margin: var(--s1) 0; }
+.tile .big small { font-size: var(--fs-s); font-weight: 400; color: var(--dim); }
+.meter { height: 6px; border-radius: 3px; background: rgba(255,255,255,.08); overflow: hidden; margin-top: var(--s2); }
+.meter > i { display: block; height: 100%; background: var(--ok); } .meter > i.w { background: var(--warn); }
+.two { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr); gap: var(--s4); align-items: start; }
+.tw { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: var(--fs-s); min-width: 36rem; }
+th, td { text-align: left; padding: 10px var(--s3) 10px 0; border-bottom: 1px solid var(--line); vertical-align: middle; }
+th { color: var(--dim); font-weight: 400; font-size: var(--fs-xs); border-bottom-color: var(--dim); white-space: nowrap; }
+td.n, th.n { text-align: right; padding-right: 0; white-space: nowrap; }
+td .acts { display: flex; gap: var(--s2); justify-content: flex-end; }
+tr:last-child td { border-bottom: 0; }
+.dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--ok); margin-right: var(--s2); } .dot.off { background: #5a626b; } .dot.warn { background: var(--warn); }
+dl.kv { display: grid; grid-template-columns: max-content 1fr; gap: var(--s2) var(--s4); font-size: var(--fs-s); margin: 0; }
+dl.kv dt { color: var(--dim); } dl.kv dd { margin: 0; }
+.seg { display: inline-flex; border: 1px solid rgba(255,255,255,.18); border-radius: 8px; overflow: hidden; }
+.seg button { padding: 6px var(--s3); border: 0; background: none; color: var(--dim); font: inherit; font-size: var(--fs-s); cursor: pointer; }
+.seg button[aria-pressed="true"] { background: rgba(238,154,69,.16); color: var(--copper); }
+.notice { border: 1px solid rgba(232,192,106,.4); border-left: 3px solid var(--warn); border-radius: 6px; padding: var(--s2) var(--s3); font-size: var(--fs-s); background: rgba(0,0,0,.25); }
+pre { margin: var(--s2) 0 0; padding: var(--s2) var(--s3); background: rgba(0,0,0,.35); border: 1px solid var(--line); border-left: 3px solid var(--copper); border-radius: 6px; overflow-x: auto; font: var(--fs-s)/1.5 var(--mono); }
+.p { color: var(--copper); user-select: none; }
+
+/* sign in */
+.signin { min-height: 100vh; display: grid; place-items: center; padding: var(--s4); }
+.signin .win { width: min(26rem, 100%); }
+.signin .logo img { height: 34px; margin: 0 auto var(--s4); display: block; }
+.signin form { display: grid; gap: var(--s3); }
+.signin .foot { text-align: center; font-size: var(--fs-xs); color: var(--dim); margin-top: var(--s3); }
+
+/* my desktop */
+.desk { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr); gap: var(--s4); align-items: start; }
+.preview { aspect-ratio: 16/10; border-radius: 8px; border: 1px solid var(--line); position: relative; overflow: hidden;
+  background: radial-gradient(300px 200px at 70% 20%, rgba(24,160,170,.5), transparent 70%), radial-gradient(300px 220px at 10% 80%, rgba(22,84,168,.55), transparent 70%), #0b1822; }
+.preview .w1, .preview .w2 { position: absolute; border-radius: 6px; background: rgba(12,16,22,.92); border: 1px solid rgba(255,255,255,.12); box-shadow: 6px 10px 20px rgba(0,0,0,.55); }
+.preview .w1 { left: 8%; top: 12%; width: 52%; height: 56%; } .preview .w2 { left: 34%; top: 30%; width: 50%; height: 46%; }
+.preview .w1::before, .preview .w2::before { content: ""; display: block; height: 14px; background: var(--bar); border-radius: 6px 6px 0 0; }
+.preview .dock { position: absolute; bottom: 6px; left: 50%; transform: translateX(-50%); display: flex; gap: 5px; padding: 4px 8px; background: rgba(7,10,14,.8); border-radius: 10px; }
+.preview .dock i { width: 14px; height: 14px; border-radius: 4px; background: #46515d; } .preview .dock i:nth-child(2) { background: var(--copper); }
+.preview .tint { position: absolute; inset: 0 0 auto 0; padding: var(--s2) var(--s3); font-size: var(--fs-xs); color: var(--dim); background: linear-gradient(rgba(0,0,0,.7), transparent); }
+.bigopen { display: flex; gap: var(--s3); flex-wrap: wrap; margin-top: var(--s3); }
+.bigopen .btn.primary { padding: 12px var(--s4); font-size: var(--fs-m); }
+
+/* in a session: the toolbar that floats above the stream */
+.stage { position: relative; aspect-ratio: 16/9; background: #0b1822; border-radius: 0 0 var(--r-win) var(--r-win); overflow: hidden;
+  background-image: radial-gradient(500px 300px at 75% 20%, rgba(24,160,170,.45), transparent 70%), radial-gradient(500px 360px at 10% 90%, rgba(22,84,168,.5), transparent 70%); }
+.stage .w { position: absolute; border-radius: 8px; background: rgba(12,16,22,.94); border: 1px solid rgba(255,255,255,.12); box-shadow: 12px 18px 36px rgba(0,0,0,.6); }
+.stage .w::before { content: ""; display: block; height: 24px; background: var(--bar); border-radius: 8px 8px 0 0; }
+.sbar { position: absolute; top: var(--s3); left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: var(--s1); padding: 6px var(--s2); background: rgba(7,10,14,.9); backdrop-filter: blur(8px); border: 1px solid rgba(255,255,255,.12); border-radius: var(--r-bar); box-shadow: 0 10px 28px rgba(0,0,0,.55); width: max-content; max-width: calc(100% - 16px); flex-wrap: wrap; justify-content: center; }
+.sbar .ib { display: inline-flex; align-items: center; gap: 6px; padding: 6px 10px; border: 0; border-radius: 10px; background: none; color: #d0d4d9; font: inherit; font-size: var(--fs-xs); cursor: pointer; }
+.sbar .ib:hover { background: rgba(255,255,255,.08); color: var(--copper); }
+.sbar .ib[aria-pressed="true"] { color: var(--copper); }
+.sbar .ib svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.sbar .sep { width: 1px; height: 20px; background: rgba(255,255,255,.14); margin: 0 var(--s1); }
+.sbar .stat { font-size: var(--fs-xs); color: var(--dim); padding: 0 var(--s2); white-space: nowrap; }
+
+.shell { }
+.mock-note { margin-top: var(--s6); font-size: var(--fs-xs); color: var(--dim); border-top: 1px solid rgba(255,255,255,.2); padding-top: var(--s3); display: flex; gap: var(--s3); flex-wrap: wrap; }
+.sw { position: fixed; right: var(--s3); bottom: var(--s3); z-index: 20; display: flex; gap: 1px; background: var(--bar); border: 1px solid rgba(255,255,255,.14); border-radius: 10px; padding: 3px; font-size: var(--fs-xs); }
+.sw a { color: var(--dim); text-decoration: none; padding: 4px 10px; border-radius: 7px; }
+.sw a[aria-current] { background: rgba(238,154,69,.18); color: var(--copper); }
+
+@media (max-width: 900px) { .two, .desk { grid-template-columns: minmax(0,1fr); } .who { margin-left: 0; } }
+@media (max-width: 560px) { .win > .body { padding: var(--s3); } h1 { font-size: 26px; } }
+
+.sw2 { left: var(--s3); right: auto; }
+.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: var(--s4); }
+.hostline { margin-top: var(--s3); display: flex; gap: var(--s2); align-items: center; }
+.preview.dimmed { filter: grayscale(1) brightness(.6); }
+.pager { display: flex; gap: var(--s2); align-items: center; margin-top: var(--s3); font-size: var(--fs-s); } .pager .sp { flex: 1; }
+.bulk { display: flex; gap: var(--s2); align-items: center; padding: var(--s2) var(--s3); border: 1px solid rgba(238,154,69,.4); border-radius: 10px; background: rgba(238,154,69,.08); font-size: var(--fs-s); flex-wrap: wrap; }
+.fleet { display: grid; grid-template-columns: repeat(7, 1fr); gap: 6px; } .fleet i { aspect-ratio: 1.6; border-radius: 5px; background: rgba(159,216,140,.55); } .fleet i.w { background: rgba(232,192,106,.7); } .fleet i.b { background: rgba(224,138,120,.8); }
+.or { display: flex; align-items: center; gap: var(--s2); color: var(--dim); font-size: var(--fs-xs); } .or::before, .or::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+input[type=checkbox] { accent-color: var(--copper); }
+select { padding: 8px 10px; }
+</style>
+</head>
+<body>
+
+<!-- icons -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="i-open" viewBox="0 0 24 24"><path d="M14 4h6v6M20 4l-8 8M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/></symbol>
+  <symbol id="i-full" viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></symbol>
+  <symbol id="i-snd" viewBox="0 0 24 24"><path d="M4 9v6h4l5 4V5L8 9H4zM17 8a5 5 0 0 1 0 8"/></symbol>
+  <symbol id="i-mic" viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></symbol>
+  <symbol id="i-clip" viewBox="0 0 24 24"><rect x="6" y="5" width="12" height="16" rx="2"/><path d="M9 5V4h6v1M9 11h6M9 15h6"/></symbol>
+  <symbol id="i-key" viewBox="0 0 24 24"><rect x="3" y="6" width="18" height="12" rx="2"/><path d="M7 10h.01M11 10h.01M15 10h.01M8 14h8"/></symbol>
+  <symbol id="i-swap" viewBox="0 0 24 24"><path d="M4 8h14l-3-3M20 16H6l3 3"/></symbol>
+  <symbol id="i-off" viewBox="0 0 24 24"><path d="M12 3v9M6.3 6.8a8 8 0 1 0 11.4 0"/></symbol>
+</svg>
+
+<div id="app"></div>
+<nav class="sw" id="sw" aria-label="Mockup pages"></nav>
+<nav class="sw sw2" id="sw2" aria-label="Size of the installation"></nav>
+
+<script>
+const ico = n => `<svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-${n}"/></svg>`;
+const cap = '<span class="cap" aria-hidden="true"><i>&#x2013;</i><i>&#x25a1;</i><i>&#x2715;</i></span>';
+const win = (title, body, extra = '') => `<section class="win"><div class="bar"><span class="t">${title}</span>${extra}${cap}</div><div class="body">${body}</div></section>`;
+const chip = (t, c = '') => `<span class="tag ${c}">${t}</span>`;
+const bar = (p, w) => `<div class="meter"><i class="${w ? 'w' : ''}" style="width:${p}%"></i></div>`;
+const dot = c => `<span class="dot ${c || ''}"></span>`;
+
+/* The same portal at three sizes. Nothing is switched on that the size does not need. */
+const MODES = {
+  solo: { label: 'Personal', note: 'one computer, one person', box: 'Computer', boxes: 'Computers',
+    nav: [['desktop', 'My desktop'], ['servers', 'Computers'], ['account', 'My account'], ['settings', 'Settings']], admin: [] },
+  team: { label: 'Team', note: '3 servers, 9 people', box: 'Server', boxes: 'Servers',
+    nav: [['desktop', 'My desktop'], ['account', 'My account']], admin: ['overview', 'servers', 'users', 'sessions', 'settings', 'audit'] },
+  org: { label: 'Organization', note: '14 servers, 482 people, directory sign-in', box: 'Server', boxes: 'Servers',
+    nav: [['desktop', 'My desktop'], ['account', 'My account']], admin: ['overview', 'servers', 'users', 'groups', 'sessions', 'settings', 'audit'] },
+};
+const TITLES = { desktop: 'My desktop', account: 'My account', overview: 'Overview', servers: 'Servers', users: 'Users', groups: 'Groups', sessions: 'Sessions', settings: 'Settings', audit: 'Audit' };
+let mode = 'team', view = 'signin';
+const M = () => MODES[mode];
+const isAdmin = () => mode === 'solo' || true;
+
+function topbar(active) {
+  const m = M();
+  const a = h => `<a href="#${mode}/${h}" ${active === h ? 'aria-current="page"' : ''}>${h === 'servers' ? m.boxes : TITLES[h]}</a>`;
+  const people = m.nav.map(([h]) => a(h)).join('');
+  const adm = m.admin.map(a).join('');
+  return `<header>
+    <a class="logo" href="#${mode}/desktop"><img src="logo-dark.svg" alt="Waydesk" width="119" height="26"></a>
+    <nav aria-label="Portal">${people}${adm ? '<span class="dim" aria-hidden="true">|</span>' + adm : ''}</nav>
+    <div class="who"><span><b>${mode === 'solo' ? 'jose' : 'admin'}</b> ${mode === 'solo' ? '' : chip('administrator')}</span><a class="btn sm" href="#${mode}/signin">Sign out</a></div>
+  </header>`;
+}
+const frame = (active, inner) => `<div class="col shell">${topbar(active)}<main class="page">${inner}</main>
+  <div class="mock-note"><span>Mockup, not wired to anything. Data is made up.</span><span>Same palette, type and windows as waydesk.dev.</span></div></div>`;
+
+/* ---------- data per size ---------- */
+const HOSTS = {
+  solo: [['home-pc', 'ok', 'up', 1, 1, 38, '2.1 / 16 GB', '-', '0.5.0', 'now', '']],
+  team: [['web-1', 'ok', 'up', 4, 6, 54, '14 / 32 GB', '-', '0.5.0', 'now', ''], ['web-2', 'ok', 'up', 2, 6, 28, '9 / 32 GB', '-', '0.5.0', 'now', ''], ['gpu-1', 'warn', 'draining', 1, 4, 71, '40 / 64 GB', 'RTX 4000', '0.5.0', 'now', '']],
+  org: [['ams-01', 'ok', 'up', 21, 24, 82, '112 / 128 GB', '-', '0.5.0', 'now', 'finance'], ['ams-02', 'ok', 'up', 17, 24, 66, '90 / 128 GB', '-', '0.5.0', 'now', 'finance'], ['fra-01', 'ok', 'up', 12, 24, 51, '70 / 128 GB', '-', '0.5.0', 'now', 'support'], ['fra-02', 'ok', 'up', 20, 24, 77, '101 / 128 GB', '-', '0.5.0', 'now', 'support'], ['gpu-01', 'ok', 'up', 6, 8, 64, '88 / 256 GB', 'L40S x2', '0.5.0', 'now', 'design, ai'], ['gpu-02', 'warn', 'draining', 2, 8, 31, '40 / 256 GB', 'L40S x2', '0.4.9', 'now', 'design'], ['dev-01', 'ok', 'up', 9, 16, 44, '60 / 128 GB', '-', '0.5.0', 'now', 'engineering'], ['dev-02', 'bad', 'unreachable', 0, 16, 0, '-', '-', '0.5.0', '14 min ago', 'engineering']],
+};
+const hostRow = h => `<tr><td><b>${h[0]}</b></td><td>${dot(h[2] === 'up' ? '' : h[2] === 'draining' ? 'warn' : 'off')}${h[2]}</td>
+  <td style="min-width:130px"><span class="mono">${h[3]} / ${h[4]}</span>${bar(Math.round(h[3] / h[4] * 100), h[3] / h[4] > .8)}</td><td class="mono">${h[6]}</td><td>${h[7]}</td>
+  ${mode === 'org' ? `<td>${h[10].split(', ').filter(Boolean).map(t => chip(t)).join(' ')}</td>` : ''}<td class="mono">${h[8]}</td><td class="${h[2] === 'unreachable' ? 'bad' : 'dim'}">${h[9]}</td>
+  <td class="n"><div class="acts"><button class="btn sm">${h[2] === 'draining' ? 'Resume' : 'Drain'}</button><button class="btn sm danger">Remove</button></div></td></tr>`;
+
+const pager = (a, b, n) => `<div class="pager"><span class="dim">${a}–${b} of ${n}</span><span class="sp"></span><button class="btn sm">Previous</button><button class="btn sm">Next</button></div>`;
+
+const views = {
+signin: () => `<div class="signin"><div>
+  <a class="logo" href="#${mode}/desktop"><img src="logo-dark.svg" alt="Waydesk" width="159" height="35"></a>
+  ${win('sign in', `<form onsubmit="location.hash='${mode}/desktop';return false">
+    ${mode === 'org' ? `<a class="btn" style="justify-content:center" href="#org/desktop">Sign in with Acme single sign-on</a><div class="or"><span>or a local account</span></div>` : ''}
+    <label>Account <input autocomplete="username" value="${mode === 'solo' ? 'jose' : 'alice'}" autocapitalize="none"></label>
+    <label>Password <input type="password" autocomplete="current-password" value="correct horse"></label>
+    <label>Code from your authenticator app <input inputmode="numeric" placeholder="6 digits, if you set one up" autocomplete="one-time-code"></label>
+    <button class="btn primary" style="justify-content:center">Sign in</button>
+    <p class="hint" style="margin:0">${mode === 'solo' ? 'The account and password of your computer.' : 'One sign-in for all your servers.'} Nothing is stored in the browser.</p>
+  </form>`)}
+  <p class="foot">${mode === 'org' ? 'desktops.acme.example' : 'desk.example.org'} · Waydesk 0.5.0 · <a href="#${mode}/signin">help</a></p>
+</div></div>`,
+
+desktop: () => {
+  const one = (name, state, tagc, line, btn, via) => win(`${name}`, `
+    <div class="preview ${state === 'offline' ? 'dimmed' : ''}"><div class="w1"></div><div class="w2"></div><div class="dock"><i></i><i></i><i></i><i></i></div><div class="tint">${line}</div></div>
+    <div class="hostline"><span>${chip(state, tagc)} ${via ? `<span class="hint">${via}</span>` : ''}</span></div>
+    <div class="bigopen" style="margin-top:12px">${btn}</div>`);
+  const open = `<a class="btn primary" href="#${mode}/session">${ico('open')} Open desktop</a><a class="btn" href="#${mode}/session">${ico('full')} Fullscreen</a>`;
+  if (mode === 'solo') return frame('desktop', `
+    <div class="head"><h1>My desktop</h1><span class="sp"></span>${chip('running', 'ok')}</div>
+    <div class="desk">${win('home-pc · desktop', `
+      <div class="preview"><div class="w1"></div><div class="w2"></div><div class="dock"><i></i><i></i><i></i><i></i></div><div class="tint">Last seen 2 min ago · 1920×1080</div></div>
+      <div class="bigopen">${open}<button class="btn danger">${ico('off')} End session</button></div>
+      <p class="hint" style="margin-top:12px">Your programs keep running when you close this tab.</p>`)}
+      <div style="display:grid;gap:24px">${win('details', `<dl class="kv"><dt>Computer</dt><dd>home-pc · Debian 13</dd><dt>Desktop</dt><dd>Plasma</dd><dt>Started</dt><dd>today 08:41</dd><dt>Memory</dt><dd>2.1 GB of 16 GB</dd></dl>${bar(13)}`)}
+      ${win('another computer?', `<p class="muted" style="font-size:14px">Add a second one (office, laptop, a rented server) and both show up here.</p><a class="btn" href="#solo/servers">Add a computer</a>`)}</div></div>`);
+  const cards = mode === 'team'
+    ? [one('web-1', 'running', 'ok', 'Last seen 2 min ago · 1920×1080', open + `<button class="btn danger sm">End</button>`, 'last used'),
+       one('gpu-1', 'not started', '', 'Starts in about 20 seconds', `<a class="btn primary" href="#team/session">${ico('open')} Start and open</a>`, 'GPU, 12 GB'),
+       one('web-2', 'under maintenance', 'warn', 'Back at about 14:00', `<button class="btn" disabled>Open desktop</button>`, 'drained by an admin')]
+    : [one('Design · gpu-01', 'running', 'ok', 'Last seen 2 min ago · 2560×1440', open + `<button class="btn danger sm">End</button>`, 'via group <b>Design team</b> · last used'),
+       one('Office · fra-01', 'not started', '', 'Starts in about 20 seconds', `<a class="btn primary" href="#org/session">${ico('open')} Start and open</a>`, 'via group <b>Everyone</b>'),
+       one('Engineering · dev-02', 'server offline', 'bad', 'Unreachable since 14 min', `<button class="btn" disabled>Open desktop</button>`, 'via group <b>Engineering</b>')];
+  return frame('desktop', `<div class="head"><h1>My desktops</h1><span class="sp"></span><span class="hint">${mode === 'org' ? 'Assigned by your groups. You can have one running desktop per server.' : 'You can have one running desktop per server.'}</span></div>
+    <div class="cards">${cards.join('')}</div>`);
+},
+
+session: () => `<div class="col shell" style="max-width:1400px">${topbar('desktop')}<main class="page">
+  ${win((mode === 'solo' ? 'home-pc' : mode === 'team' ? 'web-1' : 'gpu-01') + ' · alice · connected', `
+    <div class="stage" style="margin:-24px">
+      <div class="w" style="left:6%;top:16%;width:46%;height:54%"></div>
+      <div class="w" style="left:30%;top:30%;width:44%;height:48%"></div>
+      <div class="sbar" role="toolbar" aria-label="Session controls">
+        ${mode === 'solo' ? '' : `<button class="ib">${ico('swap')} Switch server</button><span class="sep"></span>`}
+        <button class="ib" aria-pressed="true">${ico('snd')} Sound</button>
+        <button class="ib" aria-pressed="false">${ico('mic')} Mic</button>
+        <button class="ib">${ico('clip')} Clipboard</button>
+        <button class="ib">${ico('key')} Ctrl+Alt+Del</button>
+        <span class="sep"></span>
+        <span class="stat">${dot()}45 ms · 6 Mbit/s · 30 fps</span>
+        <span class="sep"></span>
+        <button class="ib">${ico('full')} Fullscreen</button>
+        <button class="ib" style="color:var(--bad)">${ico('off')} Disconnect</button>
+      </div>
+    </div>`, '<span class="act">toolbar hides in fullscreen; mouse to the top edge brings it back</span>')}
+</main></div>`,
+
+account: () => frame('account', `
+  <div class="head"><h1>My account</h1></div>
+  <div class="two">
+    ${win('password', mode === 'org' ? `<p class="muted" style="font-size:14px">You sign in with Acme single sign-on, so your password is managed there.</p><a class="btn" href="#org/account">Open the Acme account page</a>
+      <h3>Password for a remote-desktop app</h3><p class="muted" style="font-size:14px">For the Windows App or Remmina. Shown once, works for your servers only.</p><button class="btn">Create app password</button>`
+      : `<form onsubmit="return false" style="display:grid;gap:16px;max-width:28rem">
+      <label>Current password <input type="password" value="••••••••••"></label><label>New password <input type="password"></label><label>New password again <input type="password"></label>
+      <div><button class="btn primary">Change password</button></div></form>`)}
+    ${win('two-step sign-in', `<p>${chip(mode === 'org' ? 'managed by single sign-on' : 'not set up', mode === 'org' ? '' : 'warn')}</p>
+      <p class="muted" style="font-size:14px">${mode === 'org' ? 'Your organisation asks for it at the single sign-on page.' : 'Ask for a code from an authenticator app after the password.'}</p>${mode === 'org' ? '' : '<button class="btn">Set up</button>'}`)}
+  </div>`),
+
+overview: () => {
+  const H = HOSTS[mode];
+  const tiles = mode === 'org'
+    ? [['Sessions', '87', 'of 152', 57], ['Servers', '12', 'of 14 up', 86, 1], ['Memory (fleet)', '58', '%', 58, 1], ['GPU encode (fleet)', '44', '%', 44]]
+    : [['Sessions', '7', 'of 16', 44], ['Servers', '2', 'of 3 up', 100], ['Memory (fleet)', '63', '%', 63, 1], ['GPU encode', '71', '%', 71, 1]];
+  const strip = mode === 'org'
+    ? `<div class="fleet" role="img" aria-label="14 servers: 12 up, 1 draining, 1 unreachable">${Array.from({ length: 14 }, (_, i) => `<i class="${i === 5 ? 'w' : i === 7 ? 'b' : ''}" title="srv ${i + 1}"></i>`).join('')}</div><p class="hint" style="margin-top:8px">One square per server. Amber: draining. Red: unreachable.</p>` : '';
+  const attention = mode === 'org'
+    ? `<tr><td>${chip('down', 'bad')}</td><td>dev-02 unreachable for 14 min, 0 sessions affected</td><td class="n"><a href="#org/servers">Open</a></td></tr>
+       <tr><td>${chip('capacity', 'warn')}</td><td>ams-01 at 88% of sessions</td><td class="n"><a href="#org/servers">Open</a></td></tr>
+       <tr><td>${chip('version', 'warn')}</td><td>gpu-02 runs 0.4.9, the rest 0.5.0</td><td class="n"><a href="#org/servers">Open</a></td></tr>
+       <tr><td>${chip('cert', 'warn')}</td><td>Portal certificate renews in 9 days (automatic)</td><td class="n"><a href="#org/settings">Open</a></td></tr>`
+    : `<tr><td>${chip('draining', 'warn')}</td><td>gpu-1 is being drained, 1 session left</td><td class="n"><a href="#team/servers">Open</a></td></tr>
+       <tr><td>${chip('two-step', 'warn')}</td><td>3 of 9 accounts have no second step</td><td class="n"><a href="#team/users">Open</a></td></tr>`;
+  return frame('overview', `
+  <div class="head"><h1>Overview</h1><span class="sp"></span><span class="muted" style="font-size:14px">updated 5 s ago</span></div>
+  <div class="tiles">${tiles.map(t => `<div class="tile"><div class="k">${t[0]}</div><div class="big">${t[1]} <small>${t[2]}</small></div>${bar(t[3], t[4])}</div>`).join('')}</div>
+  <div class="two">
+    ${win('needs attention', `<div class="tw"><table style="min-width:0"><tbody>${attention}</tbody></table></div>`)}
+    ${win(mode === 'org' ? 'fleet' : 'servers', mode === 'org' ? strip : `<div class="tw"><table style="min-width:0"><tbody>${H.map(h => `<tr><td><b>${h[0]}</b></td><td>${dot(h[2] === 'up' ? '' : 'warn')}${h[2]}</td><td class="n mono">${h[3]} / ${h[4]}</td></tr>`).join('')}</tbody></table></div>`)}
+  </div>`);
+},
+
+servers: () => {
+  const H = HOSTS[mode], m = M();
+  const join = `<pre><span class="p">$</span> curl -fsSL https://${mode === 'org' ? 'desktops.acme.example' : 'desk.example.org'}/join | sudo sh -s -- --token wd_join_7Kq2mVx9…</pre>`;
+  const add = win(mode === 'solo' ? 'add another computer' : 'add a server', `<p class="muted" style="font-size:14px;max-width:70ch">Run this on the new machine (Debian, Ubuntu or Arch with Waydesk installed). It connects <b>out</b> to this portal, so the server needs no open port and no VPN. The code works once and expires in 1 hour.</p>${join}
+    <div class="row" style="margin-top:12px"><button class="btn primary">New code</button><span class="hint">${mode === 'org' ? 'Codes can carry tags (pool, region) that new servers inherit.' : 'The server shows up below as soon as it connects.'}</span></div>`);
+  const th = `<th>${m.box}</th><th>State</th><th>Sessions</th><th>Memory</th><th>GPU</th>${mode === 'org' ? '<th>Pools</th>' : ''}<th>Version</th><th>Seen</th><th class="n"></th>`;
+  return frame('servers', `
+  <div class="head"><h1>${m.boxes}</h1><span class="sp"></span>${mode === 'org' ? '<input placeholder="Search servers" style="width:12rem"><select><option>all pools</option><option>finance</option><option>design</option><option>support</option><option>engineering</option></select>' : ''}</div>
+  ${win(`${m.boxes.toLowerCase()} · ${mode === 'org' ? 14 : H.length}`, `<div class="tw"><table><thead><tr>${th}</tr></thead><tbody>${H.map(hostRow).join('')}</tbody></table></div>${mode === 'org' ? pager(1, 8, 14) : ''}`)}
+  ${add}
+  ${mode === 'org' ? win('placement', `<p class="muted" style="font-size:14px;max-width:70ch">When a person has several servers in a pool, start the session on the one with the most room. People who have only one server are not affected.</p><div class="seg" role="group"><button aria-pressed="true">Person chooses</button><button aria-pressed="false">Most room</button><button aria-pressed="false">Same as last time</button></div>`) : ''}`);
+},
+
+users: () => {
+  if (mode === 'solo') { location.hash = 'solo/desktop'; return ''; }
+  const org = mode === 'org';
+  const rows = org
+    ? [['alice', 'Design team', 'gpu-01', 'directory', 'ok', 'active'], ['bruno', 'Engineering', 'dev-01, dev-02', 'directory', 'ok', 'active'], ['carla', 'Everyone, Finance', 'ams-01, ams-02', 'directory', 'ok', 'active'], ['dev.bot', '-', 'dev-01', 'local', 'ok', 'active'], ['eva', 'Support', 'fra-01, fra-02', 'directory', 'bad', 'disabled']]
+    : [['alice', '', 'web-1, gpu-1', 'local', 'ok', 'active'], ['bruno', '', 'web-1', 'local', 'ok', 'active'], ['carla', '', 'web-2', 'local', 'ok', 'active'], ['dev1', '', 'web-1, web-2, gpu-1', 'local', 'ok', 'active'], ['eva', '', 'web-2', 'local', 'bad', 'disabled']];
+  const total = org ? 482 : 9;
+  return frame('users', `
+  <div class="head"><h1>Users</h1><span class="sp"></span><input placeholder="Search accounts" style="width:14rem">
+    ${org ? '<select><option>all groups</option><option>Design team</option><option>Engineering</option></select><select><option>all servers</option></select><select><option>any source</option><option>directory</option><option>local</option></select>' : ''}<button class="btn primary">Add user</button></div>
+  ${org ? `<div class="bulk"><b>3 selected</b><button class="btn sm">Assign servers</button><button class="btn sm">Add to group</button><button class="btn sm">Disable</button><button class="btn sm danger">End sessions</button></div>` : ''}
+  ${win(`accounts · ${total}`, `<div class="tw"><table><thead><tr>${org ? '<th style="width:20px"></th>' : ''}<th>Account</th>${org ? '<th>Groups</th>' : ''}<th>${M().boxes}</th>${org ? '<th>Source</th>' : ''}<th>Two-step</th><th>Status</th><th class="n"></th></tr></thead><tbody>
+    ${rows.map((r, i) => `<tr>${org ? `<td><input type="checkbox" ${i < 3 ? 'checked' : ''} style="width:auto"></td>` : ''}<td><b>${r[0]}</b></td>${org ? `<td>${r[1].split(', ').filter(x => x !== '-').map(g => chip(g)).join(' ') || '<span class="dim">-</span>'}</td>` : ''}<td>${r[2].split(', ').map(s => chip(s)).join(' ')}</td>${org ? `<td class="dim">${r[3]}</td>` : ''}<td>${i % 2 ? chip('off') : chip('on', 'ok')}</td><td>${chip(r[5], r[4])}</td>
+    <td class="n"><div class="acts"><button class="btn sm">Edit</button>${org && r[3] === 'directory' ? '' : '<button class="btn sm">Reset password</button>'}<button class="btn sm ${r[4] === 'bad' ? '' : 'danger'}">${r[4] === 'bad' ? 'Enable' : 'Disable'}</button></div></td></tr>`).join('')}
+    </tbody></table></div>${pager(1, 5, total)}`)}
+  ${win('edit alice · ' + M().boxes.toLowerCase(), `<p class="muted" style="font-size:14px;max-width:70ch">${org ? 'Servers come from groups, or are added to this person on their own. Settings on the group apply unless changed here.' : 'Tick the servers this person may use. Desktop, graphics and memory are set per server.'}</p>
+    <div class="tw"><table style="min-width:40rem"><thead><tr><th style="width:20px"></th><th>${M().box}</th>${org ? '<th>From</th>' : ''}<th>Desktop</th><th>GPU</th><th>Memory</th></tr></thead><tbody>
+    ${(org ? [['gpu-01', 'group Design team', 'Plasma', 'shared', '12 GB', 1], ['fra-01', 'group Everyone', 'Plasma', 'none', '6 GB', 1], ['dev-01', '', 'Sway', 'none', '8 GB', 0]]
+           : [['web-1', '', 'Plasma', 'none', '6 GB', 1], ['gpu-1', '', 'Hyprland', 'shared', '12 GB', 1], ['web-2', '', 'Plasma', 'none', '6 GB', 0]])
+      .map(r => `<tr><td><input type="checkbox" ${r[5] ? 'checked' : ''} style="width:auto"></td><td><b>${r[0]}</b></td>${org ? `<td class="dim">${r[1] || 'added directly'}</td>` : ''}<td><select><option>${r[2]}</option></select></td><td><select><option>${r[3]}</option></select></td><td><input value="${r[4]}" style="width:6rem"></td></tr>`).join('')}
+    </tbody></table></div><div class="row" style="margin-top:12px"><button class="btn primary">Save</button><span class="hint">A new account is created on each server that is ticked, with a password that nobody sees.</span></div>`)}`);
+},
+
+groups: () => frame('groups', `
+  <div class="head"><h1>Groups</h1><span class="sp"></span><button class="btn primary">New group</button></div>
+  <div class="two">
+  ${win('groups · 7', `<div class="tw"><table style="min-width:0"><thead><tr><th>Group</th><th class="n">People</th><th>Servers</th><th>Source</th></tr></thead><tbody>
+    ${[['Everyone', 482, 'fra-01, fra-02', 'directory'], ['Design team', 36, 'gpu-01, gpu-02', 'directory'], ['Engineering', 118, 'dev-01, dev-02', 'directory'], ['Finance', 24, 'ams-01, ams-02', 'directory'], ['Support', 61, 'fra-01, fra-02', 'directory'], ['Contractors', 12, 'dev-01', 'local'], ['Admins', 3, 'all', 'local']]
+      .map((g, i) => `<tr ${i === 1 ? 'style="background:rgba(238,154,69,.07)"' : ''}><td><b>${g[0]}</b></td><td class="n mono">${g[1]}</td><td>${g[2].split(', ').map(s => chip(s)).join(' ')}</td><td class="dim">${g[3]}</td></tr>`).join('')}</tbody></table></div>`)}
+  ${win('Design team', `<dl class="kv"><dt>People</dt><dd>36, kept in step with the directory group <code>CN=Design</code></dd><dt>Servers</dt><dd>${chip('gpu-01')} ${chip('gpu-02')}</dd><dt>Desktop</dt><dd>Plasma</dd><dt>Graphics</dt><dd>shared GPU</dd><dt>Memory</dt><dd>12 GB</dd><dt>Two-step</dt><dd>required</dd></dl>
+    <p class="hint" style="margin-top:16px">Adding a person to the directory group gives them a desktop on these servers at their next sign-in. Removing them ends their access and, after 7 days, archives the home folder.</p>
+    <div class="row" style="margin-top:12px"><button class="btn">Edit group</button><button class="btn">Members</button></div>`)}
+  </div>`),
+
+sessions: () => frame('sessions', `
+  <div class="head"><h1>Sessions</h1><span class="sp"></span>${mode === 'org' ? '<select><option>all servers</option></select><input placeholder="Search" style="width:12rem">' : ''}${chip(mode === 'org' ? '87 of 152' : '7 of 16', 'ok')}</div>
+  ${win('running sessions', `<div class="tw"><table><thead><tr><th>Account</th><th>${M().box}</th><th>State</th><th>Since</th><th>Connected from</th><th>Client</th><th class="n">Memory</th><th class="n"></th></tr></thead><tbody>
+    ${(mode === 'org'
+      ? [['alice', 'gpu-01', 'connected', '08:41', '85.240.12.7', 'browser', '4.1 GB'], ['bruno', 'dev-01', 'connected', '09:02', '10.20.0.23', 'Windows App', '1.4 GB'], ['carla', 'ams-01', 'disconnected', 'yesterday', '12 min ago', '-', '3.0 GB'], ['dev.bot', 'dev-01', 'connected', '07:55', '10.20.5.9', 'Remmina', '4.8 GB']]
+      : [['alice', 'web-1', 'connected', '08:41', '85.240.12.7', 'browser', '2.1 GB'], ['bruno', 'web-1', 'connected', '09:02', '10.0.0.23', 'Windows App', '1.4 GB'], ['carla', 'web-2', 'disconnected', 'yesterday', '12 min ago', '-', '3.0 GB'], ['dev1', 'gpu-1', 'connected', '07:55', '85.240.12.9', 'Remmina', '4.8 GB']])
+      .map(r => `<tr><td><b>${r[0]}</b></td><td>${chip(r[1])}</td><td>${dot(r[2] === 'connected' ? '' : 'off')}${r[2]}</td><td>${r[3]}</td><td class="mono">${r[4]}</td><td>${r[5]}</td><td class="n mono">${r[6]}</td><td class="n"><div class="acts"><button class="btn sm danger">End</button></div></td></tr>`).join('')}
+  </tbody></table></div>${mode === 'org' ? pager(1, 4, 87) : ''}`)}
+  <p class="hint">Ending a session closes the user's programs. The user is warned first and can save for 60 seconds.</p>`),
+
+settings: () => {
+  const solo = mode === 'solo', org = mode === 'org';
+  return frame('settings', `
+  <div class="head"><h1>Settings</h1></div>
+  <div class="two">
+    <div style="display:grid;gap:24px">
+    ${win('access', `<h3 style="margin-top:0">Who can reach this portal</h3>
+      <div class="seg" role="group"><button aria-pressed="${solo ? 'true' : 'false'}">Everyone</button><button aria-pressed="${solo ? 'false' : 'true'}">Allowlist</button><button aria-pressed="false">Closed</button></div>
+      ${solo ? '<p class="hint" style="margin-top:12px">Everyone with the password and code. Fine for one person with two-step on.</p>' : `<h3>Allowed ranges</h3>
+      <div class="tw"><table style="min-width:0"><tbody><tr><td class="mono">${org ? '203.0.113.0/24' : '85.240.0.0/16'}</td><td class="dim">office</td><td class="n"><button class="btn sm danger">Remove</button></td></tr>
+        <tr><td class="mono">10.0.0.0/24</td><td class="dim">VPN</td><td class="n"><button class="btn sm danger">Remove</button></td></tr></tbody></table></div>
+      <div class="row" style="margin-top:12px"><label>Add range <input placeholder="203.0.113.0/24"></label><button class="btn">Add</button></div>
+      <p class="notice" style="margin-top:16px">Your address <code>85.240.12.7</code> stays inside the list. To undo from the console: <code>waydesk-admin access open</code></p>`}`)}
+    ${win('two-step sign-in', `<div class="seg" role="group"><button aria-pressed="false">Off</button><button aria-pressed="${solo ? 'true' : 'false'}">Optional</button><button aria-pressed="${solo ? 'false' : 'true'}">Required</button></div>
+      <p class="hint" style="margin-top:12px">${solo ? 'Recommended: required, with your phone as the authenticator.' : 'Required: accounts without a code are asked to set one up at the next sign-in.'}</p>`)}
+    ${org ? win('sign-in sources', `<div class="tw"><table style="min-width:0"><tbody>
+      <tr><td><b>Acme single sign-on</b><div class="hint">OpenID Connect · login.acme.example</div></td><td>${chip('active', 'ok')}</td><td class="n"><button class="btn sm">Edit</button></td></tr>
+      <tr><td><b>Directory sync</b><div class="hint">LDAP · ldaps://dc1.acme.example · every 15 min</div></td><td>${chip('active', 'ok')}</td><td class="n"><button class="btn sm">Edit</button></td></tr>
+      <tr><td><b>Local accounts</b><div class="hint">for service and break-glass accounts</div></td><td>${chip('4 accounts')}</td><td class="n"><button class="btn sm">Edit</button></td></tr></tbody></table></div>`) : ''}
+    ${org ? win('who can do what', `<div class="tw"><table style="min-width:0"><thead><tr><th>Role</th><th>Can</th><th class="n">People</th></tr></thead><tbody>
+      <tr><td><b>Administrator</b></td><td class="dim">everything</td><td class="n mono">3</td></tr>
+      <tr><td><b>Operator</b></td><td class="dim">users, groups, sessions; not settings</td><td class="n mono">9</td></tr>
+      <tr><td><b>Auditor</b></td><td class="dim">read the audit log and the overview</td><td class="n mono">2</td></tr></tbody></table></div>`) : ''}
+    </div>
+    <div style="display:grid;gap:24px">
+    ${win('certificate', `<dl class="kv"><dt>Name</dt><dd class="mono">${org ? 'desktops.acme.example' : 'desk.example.org'}</dd><dt>Issuer</dt><dd>Let's Encrypt</dd><dt>Valid until</dt><dd class="ok">2027-02-03 · 78 days</dd><dt>Renewal</dt><dd>automatic</dd></dl>
+      <p class="muted" style="font-size:14px;margin-top:16px">${solo ? 'The RDP port is <b>closed</b> to the internet; only this portal is public.' : 'RDP ports on all servers are <b>closed</b> to the internet; servers connect out to the portal.'}</p>`)}
+    ${org ? win('audit and backup', `<dl class="kv"><dt>Audit log</dt><dd>kept 400 days</dd><dt>Forward to</dt><dd class="mono">syslog://siem.acme.example:6514</dd><dt>Portal database</dt><dd>backed up nightly</dd></dl>`) : ''}
+    </div>
+  </div>`);
+},
+
+audit: () => frame('audit', `
+  <div class="head"><h1>Audit</h1><span class="sp"></span><a class="btn" href="#${mode}/audit">Export CSV</a></div>
+  ${win('filter', `<form class="row" onsubmit="return false"><label>Account <input placeholder="any"></label><label>Address <input placeholder="any"></label>
+    ${mode === 'solo' ? '' : `<label>${M().box} <select><option>all</option></select></label>`}
+    <label>Kind <select><option>all</option><option>sign-in</option><option>refused</option><option>session</option><option>admin</option></select></label>
+    <label>From <input type="date" value="2026-11-17"></label><button class="btn primary">Search</button></form>`)}
+  ${win('events · 6', `<div class="tw"><table><thead><tr><th>Time</th><th>Kind</th><th>Account</th>${mode === 'solo' ? '' : `<th>${M().box}</th>`}<th>Address</th><th>What</th></tr></thead><tbody>
+    ${[['11:52:08', 'session', 'ok', 'alice', 'browser stream opened'], ['11:52:07', 'sign-in', 'ok', 'alice', 'password + code'], ['11:40:31', 'refused', 'bad', 'root', 'not allowed to sign in'], ['11:12:19', 'admin', 'warn', 'admin', 'assigned <code>gpu-01</code> to group Design team'], ['10:03:44', 'refused', 'bad', 'bruno', 'wrong password (2 of 5)'], ['09:02:10', 'sign-in', 'ok', 'bruno', 'password']]
+      .map((r, i) => `<tr><td class="mono">${r[0]}</td><td>${chip(r[1], r[2])}</td><td>${r[3]}</td>${mode === 'solo' ? '' : `<td>${i === 4 || i === 5 ? chip(mode === 'org' ? 'dev-01' : 'web-1') : i === 3 ? '<span class="dim">portal</span>' : chip(mode === 'org' ? 'gpu-01' : 'web-1')}</td>`}<td class="mono">${['85.240.12.7', '85.240.12.7', '185.220.101.4', '85.240.12.7', '10.0.0.23', '10.0.0.23'][i]}</td><td>${r[4]}</td></tr>`).join('')}</tbody></table></div>`)}`),
+};
+
+function render() {
+  const h = location.hash.slice(1).split('/');
+  mode = MODES[h[0]] ? h[0] : 'team';
+  view = views[h[1]] ? h[1] : 'signin';
+  document.getElementById('app').innerHTML = views[view]();
+  const pages = ['signin', 'desktop', 'session', ...M().admin.filter(x => !['desktop'].includes(x)), ...(mode === 'solo' ? ['servers', 'settings', 'account'] : ['account'])];
+  const uniq = [...new Set(pages)];
+  document.getElementById('sw').innerHTML = uniq.map(p => `<a href="#${mode}/${p}" ${p === view ? 'aria-current' : ''}>${p === 'session' ? 'in session' : p === 'signin' ? 'sign in' : p === 'servers' ? M().boxes.toLowerCase() : p}</a>`).join('');
+  document.getElementById('sw2').innerHTML = Object.entries(MODES).map(([k, v]) => `<a href="#${k}/${view}" ${k === mode ? 'aria-current' : ''} title="${v.note}">${v.label}</a>`).join('');
+  document.title = `Waydesk portal: mockup, ${mode} ${view}`;
+  window.scrollTo(0, 0);
+}
+addEventListener('hashchange', render);
+document.addEventListener('click', e => {
+  const b = e.target.closest('.seg button');
+  if (b) b.parentElement.querySelectorAll('button').forEach(x => x.setAttribute('aria-pressed', x === b));
+  const ib = e.target.closest('.sbar .ib[aria-pressed]');
+  if (ib) ib.setAttribute('aria-pressed', ib.getAttribute('aria-pressed') !== 'true');
+});
+render();
+</script>
+</body>
+</html>
