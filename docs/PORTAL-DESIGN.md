@@ -118,6 +118,34 @@ No other hosts, no SSO or LDAP login, no per-group policy, no session recording,
 4. Helper `AdminReq`, read-only first (overview, users, sessions), then writes.
 5. Settings, audit view, packaging (`.deb`, unit, `waydesk-admin portal enable|status`, docs).
 
+## Stage 3: several servers (decided 2026-11-18)
+
+**Decision (José, 2026-11-18): the portal owns the users.** Identity moves from "a system account on this host" to a portal user record; system accounts on servers become something the portal creates and manages. The host-account sign-in stays for the Personal size (one computer, no fleet), so nothing that works today is removed.
+
+```
+browser --HTTPS--> portal (control plane, own machine or the first server)
+                     ^  one outbound, long-lived TLS link per server, opened BY the server
+server: waydesk-agent (new unit, root helper's peer) --dials--> portal, authenticates with a per-server key
+```
+
+- **Enrolment.** An administrator presses *Add server*; the portal shows `waydesk-admin enrol https://portal.example.com CODE`. The code is random (160 bit), single use, valid 1 hour, bound to nothing else. The server presents it with the portal certificate's fingerprint (pinned from the command line, so a wrong portal is refused) and receives a long-lived **server key**, stored hashed in the portal and root-only on the server. Revoking a server deletes the hash. No inbound port on the server.
+- **Link.** One framed message stream over the TLS link (same length-prefixed JSON style as the helper protocol, a hard size limit, a version in the hello, pings every 20 s, the portal marks a server *offline* after 60 s of silence). The portal sends requests (`Info`, `Admin`, `Audit`, `OpenStream`), the agent answers; the agent only ever calls the **same closed action list** the local helper already enforces (`adminaction.rs`). The agent adds no new power: it is the helper's request set carried over a socket the server dialled.
+- **Desktops.** `OpenStream` makes the agent dial a second, single-use connection back to the portal with a one-time token; the portal splices the browser WebSocket to it. The portal is a relay (its bandwidth is the limit; stated in the sizing notes). Native RDP clients still connect straight to the server with the app password.
+- **Users and assignment.** Portal user: name, display name, password (argon2id, never shown), TOTP, state, role (user / administrator, operator and auditor in stage 4), assignments. Assigning a person to a server asks the agent to create the system account (same name rules, a random password nobody sees); unassigning disables it (removal stays a command-line act, as today). Desktop, GPU and memory limit are per assignment. One running desktop per person per server.
+- **App password** for native RDP clients: issued by the portal, shown once, set on the person's accounts through the agent; rotating it rotates it on every server.
+- **Audit.** Agents send their audit lines up (batches, sequence numbers, resumable); the portal keeps them with a `server` field; the Audit page gets a Server filter and column; syslog forwarding is stage 4.
+- **The first server is not special.** On the portal's own machine the agent runs locally over a Unix socket instead of TLS, so *Personal* and *Team* are the same code path.
+
+**Slices, in this order, each deployed and tested on the test box before the next:**
+
+1. **Registry + enrolment:** `fleet.rs` (servers, join codes, server keys: data model, hashing, expiry, all unit tested), Servers page (list, add, revoke, state), `waydesk-admin enrol`. No streams yet.
+2. **Agent link:** the dial-out link, hello and pins, ping/offline state, `Info` and `Admin` carried through it; Overview and Sessions get a server column and a server picker.
+3. **Portal users:** user store, argon2 sign-in, TOTP moved onto portal users, assignment creates/disables accounts through the agent, app password.
+4. **Desktop relay:** `OpenStream`, one card per assigned server on *My desktops* (running, not started, maintenance, offline).
+5. **Audit from servers, fleet Overview, security pass** (this is a new network trust boundary: the key, the join code and the link get their own section in `SECURITY-REVIEW.md` and mutation-style tests).
+
+**Open:** persistence is a JSON file per collection, written through a temporary file (like the TOTP records) for slices 1 to 3; SQLite when the user count makes that slow (a 480-person organisation is fine for reads, writes are rare). OIDC and LDAP wait for stage 4; the user record has an `origin` field (`local` now) so they can be added without a migration.
+
 ## Later
 
 - **Stage 2, several hosts:** each host dials out to the portal with a single-use join token that carries the portal's certificate fingerprint; entitlements per user or group; audit events from all hosts; the list shows hosts with state. Data model to copy from ghost's Veil: devices, entitlements, join tokens, placements.

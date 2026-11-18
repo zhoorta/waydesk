@@ -4,6 +4,7 @@
 //! its list, within rate limits (`limits.rs`). It has no second factor yet: the login is the account's password, checked by the daemon, as with RDP.
 
 mod bridge;
+mod fleet;
 #[cfg(test)]
 mod e2e;
 mod limits;
