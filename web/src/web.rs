@@ -77,7 +77,7 @@ pub struct App {
     pub auth: Arc<dyn Authenticator>,
     /// The last answers to the administrators' pages, kept a few seconds: a status costs the machine a second of measuring, and several admins (or
     /// one page that refreshes) must not multiply that.
-    pub admin_cache: std::sync::Mutex<std::collections::HashMap<&'static str, (Instant, String)>>,
+    pub admin_cache: std::sync::Mutex<std::collections::HashMap<String, (Instant, String)>>,
     /// Changes asked for by administrators, per address.
     pub admin_rate: RateLimiter,
     /// Password changes, per address (a wrong old password is also slowed and counted by the helper).
@@ -89,6 +89,9 @@ pub struct App {
     pub fleet: crate::fleet::Fleet,
     /// Servers enrolling with a join code, per address (the endpoint is public).
     pub enrol_rate: RateLimiter,
+    /// The links the servers dialled, and how often an address may try to open one.
+    pub links: crate::link::Links,
+    pub agent_rate: RateLimiter,
 }
 
 pub struct PendingTotp {
@@ -116,6 +119,8 @@ impl App {
             // A file that cannot be read stops the portal at start: starting with an empty list would hide the servers and the next save would overwrite them.
             fleet: crate::fleet::Fleet::open(cfg.totp_dir.join("fleet.json")).expect("the fleet file could not be read"),
             enrol_rate: RateLimiter::new(10, Duration::from_secs(60)),
+            links: crate::link::Links::new(),
+            agent_rate: RateLimiter::new(30, Duration::from_secs(60)),
             tokens: Tokens::new(Duration::from_secs(30)),
             token_rate: RateLimiter::new(cfg.rate_per_minute, Duration::from_secs(60)),
             ws_rate: RateLimiter::new(cfg.rate_per_minute.saturating_mul(3), Duration::from_secs(60)),
@@ -178,6 +183,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/api/admin/totp", post(admin_totp).layer(axum::extract::DefaultBodyLimit::max(1024)))
         .route("/api/admin/audit", get(admin_audit))
         .route("/api/admin/servers", get(servers_list).post(servers_do).layer(axum::extract::DefaultBodyLimit::max(1024)))
+        .route("/agent", get(agent_ws))
         .route("/api/enrol", post(enrol).layer(axum::extract::DefaultBodyLimit::max(512)))
         .route("/api/admin/{kind}", get(admin_page))
         .route("/api/logout", post(logout))
@@ -376,7 +382,7 @@ fn admin_kind(name: &str) -> Option<(&'static str, portal::InfoKind)> {
 /// `src/adminaction.rs`); the portal checks the origin, the CSRF token and a rate, and passes it to the helper, which decides whether the account
 /// is an administrator and whether the action is one it knows. Nothing the browser sends is put on a command line here or anywhere before the
 /// helper has checked it.
-async fn admin_do(State(app): State<Arc<App>>, Extension(ClientAddr(peer)): Extension<ClientAddr>, Extension(PublicHost(host)): Extension<PublicHost>, headers: HeaderMap, body: axum::body::Bytes) -> Response {
+async fn admin_do(State(app): State<Arc<App>>, Extension(ClientAddr(peer)): Extension<ClientAddr>, Extension(PublicHost(host)): Extension<PublicHost>, Query(which): Query<WhichServer>, headers: HeaderMap, body: axum::body::Bytes) -> Response {
     let (id, signed) = match changing(&app, &headers, &host) {
         Ok(v) => v,
         Err(r) => return r,
@@ -387,6 +393,27 @@ async fn admin_do(State(app): State<Arc<App>>, Extension(ClientAddr(peer)): Exte
     }
     // Compact JSON of an object, nothing else: what the helper receives is what was checked here for shape.
     let Some(action) = serde_json::from_slice::<serde_json::Value>(&body).ok().filter(serde_json::Value::is_object).map(|v| v.to_string()) else { return text(StatusCode::BAD_REQUEST, "bad request\n") };
+    let remote = match which.server.as_deref() {
+        None | Some("") => None,
+        Some(sid) if valid_server_id(sid) => Some(sid.to_string()),
+        Some(_) => return text(StatusCode::BAD_REQUEST, "bad request\n"),
+    };
+    if let Some(server) = remote {
+        // The signed-in account has to administer THIS machine (the portal's own helper says so); the server's agent then checks the action against the
+        // closed list again, and its runner writes the audit line there, naming this account and address.
+        if let Err(r) = require_admin(&app, &id, &signed).await {
+            return r;
+        }
+        let request = serde_json::json!({ "do": serde_json::from_str::<serde_json::Value>(&action).unwrap_or_default(), "actor": signed.account, "source": signed.ip.to_string() });
+        let answer = app.links.request(&server, request, crate::link::CHANGE_TIMEOUT).await;
+        app.admin_cache.lock().unwrap().clear();
+        return match answer {
+            // The runner's own JSON: {"ok":true,"result":...} or {"ok":false,"error":...}.
+            Ok(body) => json(StatusCode::OK, format!("{body}\n")),
+            Err(crate::link::LinkError::Refused(why)) => json(StatusCode::BAD_REQUEST, format!("{}\n", serde_json::json!({ "ok": false, "error": why }))),
+            Err(e) => link_error(e),
+        };
+    }
     let Some(ticket) = app.portal.ticket(&id) else { return text(StatusCode::UNAUTHORIZED, "not signed in\n") };
     let (auth, account, source) = (app.auth.clone(), signed.account.clone(), signed.ip.to_string());
     let answer = tokio::task::spawn_blocking(move || auth.admin_do(&ticket, &account, &source, &action)).await;
@@ -682,7 +709,12 @@ async fn servers_list(State(app): State<Arc<App>>, headers: HeaderMap) -> Respon
     if let Err(r) = require_admin(&app, &id, &signed).await {
         return r;
     }
-    json(StatusCode::OK, format!("{}\n", serde_json::json!({ "servers": app.fleet.list(unix_now()), "portal": app.cfg.public_origin })))
+    // A link that is up is online whatever `last_seen` says; one that is down is offline at once.
+    let mut servers = app.fleet.list(unix_now());
+    for v in servers.iter_mut().filter(|v| v.state == "online" || v.state == "offline") {
+        v.state = if app.links.online(&v.id) { "online" } else { "offline" };
+    }
+    json(StatusCode::OK, format!("{}\n", serde_json::json!({ "servers": servers, "portal": app.cfg.public_origin, "pin": cert_pin(&app.cfg) })))
 }
 
 #[derive(serde::Deserialize)]
@@ -726,7 +758,10 @@ async fn servers_do(State(app): State<Arc<App>>, Extension(ClientAddr(peer)): Ex
             Err(e) => return fail(format!("{e:#}")),
         },
         "revoke" => match app.fleet.revoke(&req.id) {
-            Ok(()) => (crate::portal::NOTE_SERVER_REVOKED, req.id.clone(), serde_json::json!({})),
+            Ok(()) => {
+                app.links.drop_link(&req.id);
+                (crate::portal::NOTE_SERVER_REVOKED, req.id.clone(), serde_json::json!({}))
+            }
             Err(e) => return fail(format!("{e:#}")),
         },
         "remove" => match app.fleet.remove(&req.id) {
@@ -772,9 +807,100 @@ async fn enrol(State(app): State<Arc<App>>, Extension(ClientAddr(peer)): Extensi
     }
 }
 
+#[derive(serde::Deserialize, Default)]
+struct WhichServer {
+    server: Option<String>,
+}
+
+fn link_error(e: crate::link::LinkError) -> Response {
+    use crate::link::LinkError::*;
+    match e {
+        Offline => json(StatusCode::SERVICE_UNAVAILABLE, "{\"ok\":false,\"error\":\"That server is offline.\"}\n".into()),
+        Timeout => json(StatusCode::GATEWAY_TIMEOUT, "{\"ok\":false,\"error\":\"That server did not answer in time.\"}\n".into()),
+        BadAnswer => json(StatusCode::BAD_GATEWAY, "{\"ok\":false,\"error\":\"That server sent an answer the portal does not accept.\"}\n".into()),
+        Refused(why) => json(StatusCode::BAD_GATEWAY, format!("{}\n", serde_json::json!({ "ok": false, "error": why }))),
+    }
+}
+
+/// SHA-256 (hex) of the portal's own certificate, which a server pins when it enrols. Nothing when a reverse proxy holds the certificate (the server
+/// then trusts the usual authorities).
+fn cert_pin(cfg: &Config) -> Option<String> {
+    use rustls::pki_types::pem::PemObject as _;
+    use sha2::Digest as _;
+    if cfg.plain_http {
+        return None;
+    }
+    let leaf = rustls::pki_types::CertificateDer::pem_file_iter(&cfg.cert).ok()?.next()?.ok()?;
+    Some(data_encoding::HEXLOWER.encode(&sha2::Sha256::digest(leaf.as_ref())))
+}
+
+/// A server's agent dials this: `/agent`, upgraded to a WebSocket. The first frame proves which server it is (id and key, checked against the
+/// fleet); after that the portal sends requests and the agent answers (see `link.rs`). Public, so limited per address and with a short wait for the hello.
+async fn agent_ws(State(app): State<Arc<App>>, Extension(ClientAddr(peer)): Extension<ClientAddr>, ws: WebSocketUpgrade) -> Response {
+    if !app.agent_rate.hit(peer.ip(), Instant::now()) {
+        return text(StatusCode::TOO_MANY_REQUESTS, "too many attempts, wait a minute\n");
+    }
+    ws.max_message_size(crate::link::MAX_FRAME).max_frame_size(crate::link::MAX_FRAME).on_upgrade(move |socket| agent_link(socket, peer.ip(), app))
+}
+
+async fn agent_link(mut socket: axum::extract::ws::WebSocket, ip: IpAddr, app: Arc<App>) {
+    use axum::extract::ws::Message;
+    let hello = match tokio::time::timeout(Duration::from_secs(10), socket.recv()).await {
+        Ok(Some(Ok(Message::Text(t)))) if t.len() <= 1024 => t,
+        _ => return,
+    };
+    let v: serde_json::Value = serde_json::from_str(hello.as_str()).unwrap_or_default();
+    let (server, key) = (v["server"].as_str().unwrap_or(""), v["key"].as_str().unwrap_or(""));
+    if v["t"] != "hello" || v["version"].as_u64() != Some(crate::link::VERSION) || !valid_server_id(server) || key.len() != 64 || !app.fleet.authenticate(server, key) {
+        warn!(%ip, "a server link was refused: wrong hello, version or key");
+        tokio::time::sleep(app.cfg.fail_delay).await;
+        let _ = socket.send(Message::Close(None)).await;
+        return;
+    }
+    let server = server.to_string();
+    let mut link = app.links.attach(&server);
+    info!(%ip, server, "a server link is up");
+    app.fleet.touch(&server, unix_now());
+    if socket.send(Message::Text("{\"t\":\"ready\"}".into())).await.is_err() {
+        app.links.detach(&server, link.gen);
+        return;
+    }
+    let mut ping = tokio::time::interval(Duration::from_secs(20));
+    let mut last = Instant::now();
+    loop {
+        tokio::select! {
+            frame = socket.recv() => match frame {
+                Some(Ok(Message::Text(t))) => {
+                    last = Instant::now();
+                    app.fleet.touch(&server, unix_now());
+                    app.links.answer(&link, t.as_str());
+                }
+                Some(Ok(Message::Pong(_))) | Some(Ok(Message::Ping(_))) => {
+                    last = Instant::now();
+                    app.fleet.touch(&server, unix_now());
+                }
+                Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
+                Some(Ok(Message::Binary(_))) => break,
+            },
+            out = link.outgoing.recv() => match out {
+                Some(frame) => if socket.send(Message::Text(frame.into())).await.is_err() { break },
+                None => break, // replaced by a newer link, or revoked
+            },
+            _ = ping.tick() => {
+                if last.elapsed() > Duration::from_secs(60) || socket.send(Message::Ping(Vec::new().into())).await.is_err() {
+                    break;
+                }
+            }
+        }
+    }
+    app.links.detach(&server, link.gen);
+    let _ = socket.send(Message::Close(None)).await;
+    info!(%ip, server, "a server link ended");
+}
+
 /// Read-only data for the administrators' pages: the helper's lists and status. Whether the account is an administrator is asked of the helper on
 /// every request (a person taken out of the group loses the pages at once); the answer itself is kept a few seconds.
-async fn admin_page(State(app): State<Arc<App>>, UrlPath(kind): UrlPath<String>, headers: HeaderMap) -> Response {
+async fn admin_page(State(app): State<Arc<App>>, UrlPath(kind): UrlPath<String>, Query(which): Query<WhichServer>, headers: HeaderMap) -> Response {
     // "settings" is the portal's own configuration, which needs no question to the helper; the rest are the helper's.
     let settings = kind == "settings";
     let Some((name, info_kind)) = (if settings { Some(("settings", portal::InfoKind::Role)) } else { admin_kind(&kind) }) else { return text(StatusCode::NOT_FOUND, "not found\n") };
@@ -794,15 +920,31 @@ async fn admin_page(State(app): State<Arc<App>>, UrlPath(kind): UrlPath<String>,
     if settings {
         return json(StatusCode::OK, format!("{}\n", settings_json(&app)));
     }
+    let remote = match which.server.as_deref() {
+        None | Some("") => None,
+        Some(id) if valid_server_id(id) => Some(id.to_string()),
+        Some(_) => return text(StatusCode::BAD_REQUEST, "bad request\n"),
+    };
+    let key = format!("{name}@{}", remote.as_deref().unwrap_or(""));
     let now = Instant::now();
-    if let Some((at, body)) = app.admin_cache.lock().unwrap().get(name) {
+    if let Some((at, body)) = app.admin_cache.lock().unwrap().get(&key) {
         if now.duration_since(*at) < Duration::from_secs(ADMIN_CACHE_SECS) {
             return json(StatusCode::OK, body.clone());
         }
     }
+    if let Some(server) = remote {
+        // Another server: its agent answers with the same JSON the command line prints there.
+        return match app.links.request(&server, serde_json::json!({ "kind": name }), crate::link::READ_TIMEOUT).await {
+            Ok(body) => {
+                app.admin_cache.lock().unwrap().insert(key, (now, body.clone()));
+                json(StatusCode::OK, body)
+            }
+            Err(e) => link_error(e),
+        };
+    }
     match tokio::task::spawn_blocking(move || auth.info(&ticket, &account, &source, info_kind)).await {
         Ok(Ok(body)) => {
-            app.admin_cache.lock().unwrap().insert(name, (now, body.clone()));
+            app.admin_cache.lock().unwrap().insert(key, (now, body.clone()));
             json(StatusCode::OK, body)
         }
         Ok(Err(why)) => {

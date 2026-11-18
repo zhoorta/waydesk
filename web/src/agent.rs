@@ -1,0 +1,404 @@
+//! waydesk-agent: the part of a server that dials the portal (stage 3, slice 2 of docs/PORTAL-DESIGN.md).
+//!
+//! `waydesk-agent enrol https://portal.example.com CODE [--pin SHA256]` shows the join code to the portal, receives this server's key and writes
+//! `/etc/waydesk/agent.json` (root only, mode 0600). `waydesk-agent run` keeps one outbound TLS link to the portal's `/agent` WebSocket open and
+//! answers its requests: the read-only lists and status (`waydesk-admin ... --json`, fixed arguments) and the closed list of changes
+//! (`adminaction.rs`, carried out by the runner behind `/run/waydesk-admin.sock`, which checks them again). Nothing else is reachable through it.
+//!
+//! The portal is trusted to name an administrator (the agent cannot know the portal's accounts), so what it can ask is what the closed list allows,
+//! and what the portal's certificate is: pinned by fingerprint when `--pin` is given, otherwise the usual authorities (a portal behind a proxy with
+//! a public certificate).
+
+#[path = "../../src/adminaction.rs"]
+#[allow(dead_code)]
+mod adminaction;
+mod link;
+
+use std::io::{BufRead as _, Read as _, Write as _};
+use std::os::unix::fs::OpenOptionsExt as _;
+use std::path::Path;
+use std::process::{Command, Stdio};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use anyhow::{bail, Context as _, Result};
+use futures_util::{SinkExt as _, StreamExt as _};
+use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+use rustls::{DigitallySignedStruct, SignatureScheme};
+use serde_json::{json, Value};
+use sha2::Digest as _;
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+use tokio::net::TcpStream;
+use tokio_tungstenite::tungstenite::Message;
+
+const CONFIG: &str = "/etc/waydesk/agent.json";
+const ADMIN_EXE: &str = "/usr/bin/waydesk-admin";
+const RUNNER_SOCKET: &str = "/run/waydesk-admin.sock";
+const USAGE: &str = "usage: waydesk-agent enrol https://PORTAL[:PORT] CODE [--pin SHA256-HEX]
+       waydesk-agent run
+       waydesk-agent status";
+
+#[derive(serde::Serialize, serde::Deserialize, Debug, PartialEq)]
+struct Config {
+    portal: String,
+    server: String,
+    key: String,
+    pin: Option<String>,
+}
+
+/// `https://host[:port]` -> (host, port). Nothing else is accepted: no path, no credentials, no plain HTTP.
+fn parse_portal(url: &str) -> Result<(String, u16)> {
+    let rest = url.strip_prefix("https://").context("the portal address must start with https://")?;
+    let rest = rest.strip_suffix('/').unwrap_or(rest);
+    if rest.is_empty() || rest.contains(['/', '@', '?', '#', ' ']) {
+        bail!("the portal address must be https://HOST or https://HOST:PORT");
+    }
+    let (host, port) = match rest.rsplit_once(':') {
+        Some((h, p)) if !h.ends_with(']') || h.starts_with('[') => (h.trim_matches(['[', ']']), p.parse::<u16>().context("bad port")?),
+        _ => (rest.trim_matches(['[', ']']), 443),
+    };
+    if host.is_empty() {
+        bail!("no host in the portal address");
+    }
+    Ok((host.to_string(), port))
+}
+
+/// Accepts the portal's certificate if its SHA-256 is the pin, and checks its signature (which proves the portal holds the key).
+#[derive(Debug)]
+struct Pinned {
+    pin: Vec<u8>,
+    algs: rustls::crypto::WebPkiSupportedAlgorithms,
+}
+
+impl ServerCertVerifier for Pinned {
+    fn verify_server_cert(&self, end_entity: &CertificateDer<'_>, _: &[CertificateDer<'_>], _: &ServerName<'_>, _: &[u8], _: UnixTime) -> Result<ServerCertVerified, rustls::Error> {
+        let got = sha2::Sha256::digest(end_entity.as_ref());
+        if subtle::ConstantTimeEq::ct_eq(got.as_slice(), self.pin.as_slice()).into() {
+            Ok(ServerCertVerified::assertion())
+        } else {
+            Err(rustls::Error::General("the portal presents another certificate than the pinned one".into()))
+        }
+    }
+    fn verify_tls12_signature(&self, message: &[u8], cert: &CertificateDer<'_>, dss: &DigitallySignedStruct) -> Result<HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls12_signature(message, cert, dss, &self.algs)
+    }
+    fn verify_tls13_signature(&self, message: &[u8], cert: &CertificateDer<'_>, dss: &DigitallySignedStruct) -> Result<HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature(message, cert, dss, &self.algs)
+    }
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.algs.supported_schemes()
+    }
+}
+
+fn tls_config(pin: Option<&str>) -> Result<Arc<rustls::ClientConfig>> {
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let builder = rustls::ClientConfig::builder_with_provider(provider.clone()).with_safe_default_protocol_versions()?;
+    let cfg = match pin {
+        Some(p) => {
+            let pin = data_encoding::HEXLOWER_PERMISSIVE.decode(p.replace(':', "").as_bytes()).context("the pin is SHA-256 in hexadecimal")?;
+            if pin.len() != 32 {
+                bail!("the pin is SHA-256 in hexadecimal (64 digits)");
+            }
+            builder.dangerous().with_custom_certificate_verifier(Arc::new(Pinned { pin, algs: provider.signature_verification_algorithms })).with_no_client_auth()
+        }
+        None => {
+            let mut roots = rustls::RootCertStore::empty();
+            roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+            builder.with_root_certificates(roots).with_no_client_auth()
+        }
+    };
+    Ok(Arc::new(cfg))
+}
+
+async fn connect(portal: &str, pin: Option<&str>) -> Result<tokio_rustls::client::TlsStream<TcpStream>> {
+    let (host, port) = parse_portal(portal)?;
+    let tcp = tokio::time::timeout(Duration::from_secs(15), TcpStream::connect((host.as_str(), port))).await.context("the portal did not answer")?.with_context(|| format!("cannot reach {host}:{port}"))?;
+    tcp.set_nodelay(true).ok();
+    let name = ServerName::try_from(host.clone()).context("not a usable host name")?;
+    let tls = tokio_rustls::TlsConnector::from(tls_config(pin)?);
+    tokio::time::timeout(Duration::from_secs(15), tls.connect(name, tcp)).await.context("the TLS handshake took too long")?.context("the TLS handshake failed (a wrong pin, or a certificate this server does not trust)")
+}
+
+/// One small POST, answered with a small body; `Connection: close`, so the end of the stream ends the answer.
+async fn post_json(portal: &str, pin: Option<&str>, path: &str, body: &str) -> Result<(u16, String)> {
+    let (host, _) = parse_portal(portal)?;
+    let mut tls = connect(portal, pin).await?;
+    let request = format!("POST {path} HTTP/1.1\r\nHost: {host}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+    tls.write_all(request.as_bytes()).await?;
+    let mut out = Vec::new();
+    tokio::time::timeout(Duration::from_secs(30), (&mut tls).take(64 * 1024).read_to_end(&mut out)).await.context("the portal did not answer")??;
+    let text = String::from_utf8_lossy(&out).into_owned();
+    let status = text.split_whitespace().nth(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+    Ok((status, text.split_once("\r\n\r\n").map(|(_, b)| b.to_string()).unwrap_or_default()))
+}
+
+fn load_config() -> Result<Config> {
+    let text = std::fs::read_to_string(CONFIG).with_context(|| format!("cannot read {CONFIG} (run `waydesk-agent enrol` first, as root)"))?;
+    serde_json::from_str(&text).with_context(|| format!("{CONFIG} is not valid"))
+}
+
+fn save_config(cfg: &Config, path: &Path) -> Result<()> {
+    let tmp = path.with_extension("tmp");
+    let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&tmp)?;
+    f.write_all(serde_json::to_string_pretty(cfg)?.as_bytes())?;
+    f.sync_all()?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
+
+async fn enrol(portal: &str, code: &str, pin: Option<String>) -> Result<()> {
+    parse_portal(portal)?;
+    let (status, body) = post_json(portal, pin.as_deref(), "/api/enrol", &json!({ "code": code }).to_string()).await?;
+    match status {
+        200 => {}
+        403 => bail!("the portal refused the code (wrong, used or expired): make a new one on the Servers page"),
+        429 => bail!("the portal says too many attempts: wait a minute"),
+        s => bail!("the portal answered {s}"),
+    }
+    let v: Value = serde_json::from_str(body.trim()).context("the portal's answer is not JSON")?;
+    let (server, key) = (v["server"].as_str().unwrap_or(""), v["key"].as_str().unwrap_or(""));
+    if server.is_empty() || key.len() != 64 {
+        bail!("the portal's answer is not what an enrolment looks like");
+    }
+    let cfg = Config { portal: portal.trim_end_matches('/').to_string(), server: server.to_string(), key: key.to_string(), pin };
+    std::fs::create_dir_all("/etc/waydesk")?;
+    save_config(&cfg, Path::new(CONFIG))?;
+    println!("enrolled as {server}; start the link with: systemctl enable --now waydesk-agent");
+    Ok(())
+}
+
+// ---- answering the portal ----
+
+/// The most a command may print, and the longest it may take.
+const MAX_OUTPUT: usize = link::MAX_ANSWER - 4096;
+const CLI_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// The fixed command line for a kind of read, and whether its output is JSON (the other two print sentences).
+fn read_args(kind: &str) -> Option<(&'static [&'static str], bool)> {
+    Some(match kind {
+        "users" => (&["users", "list", "--json"], true),
+        "sessions" => (&["sessions", "list", "--json"], true),
+        "status" => (&["status", "--json"], true),
+        "access" => (&["access", "show"], false),
+        "cert" => (&["cert", "status"], false),
+        _ => return None,
+    })
+}
+
+fn run_cli(args: &[&str]) -> Result<String> {
+    let mut child = Command::new(ADMIN_EXE).args(args).env_clear().env("PATH", "/usr/sbin:/usr/bin:/sbin:/bin").stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().context("cannot run waydesk-admin")?;
+    let mut stdout = child.stdout.take().context("no output pipe")?;
+    let reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = (&mut stdout).take(MAX_OUTPUT as u64 + 1).read_to_end(&mut buf);
+        buf
+    });
+    let deadline = Instant::now() + CLI_TIMEOUT;
+    let status = loop {
+        if let Some(st) = child.try_wait()? {
+            break st;
+        }
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!("it took too long");
+        }
+        std::thread::sleep(Duration::from_millis(40));
+    };
+    let out = reader.join().map_err(|_| anyhow::anyhow!("reading failed"))?;
+    if !status.success() {
+        bail!("the command failed");
+    }
+    if out.len() > MAX_OUTPUT {
+        bail!("the answer is too large");
+    }
+    Ok(String::from_utf8_lossy(&out).into_owned())
+}
+
+/// The runner's one-line answer for one action, asked on behalf of `actor` (an account of the portal's machine) from `source`.
+fn run_action(actor: &str, source: &str, action: &Value) -> Result<String> {
+    adminaction::AdminAction::from_json(action).map_err(|e| anyhow::anyhow!(e))?;
+    let mut sock = std::os::unix::net::UnixStream::connect(RUNNER_SOCKET).with_context(|| format!("cannot reach {RUNNER_SOCKET}"))?;
+    sock.set_read_timeout(Some(Duration::from_secs(100)))?;
+    sock.set_write_timeout(Some(Duration::from_secs(10)))?;
+    let line = json!({ "remote_actor": actor, "source": source, "do": action }).to_string();
+    sock.write_all(line.as_bytes())?;
+    sock.shutdown(std::net::Shutdown::Write)?;
+    let mut answer = String::new();
+    std::io::BufReader::new(sock).take(link::MAX_ANSWER as u64).read_line(&mut answer)?;
+    serde_json::from_str::<Value>(answer.trim()).context("the runner's answer is not JSON")?;
+    Ok(answer.trim().to_string())
+}
+
+/// What one request from the portal gets: the JSON text, or why not.
+fn handle(req: &Value) -> Result<String, String> {
+    if let Some(kind) = req.get("kind").and_then(Value::as_str) {
+        let (args, is_json) = read_args(kind).ok_or("not a request this agent answers")?;
+        let out = run_cli(args).map_err(|e| format!("{e:#}"))?;
+        return Ok(if is_json { out } else { json!({ "text": out.trim_end() }).to_string() });
+    }
+    if let Some(action) = req.get("do") {
+        let actor = req.get("actor").and_then(Value::as_str).filter(|a| adminaction::valid_name(a)).ok_or("bad actor name")?;
+        let source = req.get("source").and_then(Value::as_str).unwrap_or("");
+        if source.len() > 45 || !source.chars().all(|c| c.is_ascii_hexdigit() || c == '.' || c == ':') {
+            return Err("bad source address".into());
+        }
+        return run_action(actor, source, action).map_err(|e| format!("{e:#}"));
+    }
+    Err("not a request this agent answers".into())
+}
+
+/// One link: hello, then requests until the portal closes it or goes quiet. Ends with an error to be retried, or `Ok` when the portal closed it.
+async fn serve(cfg: &Config) -> Result<()> {
+    let tls = connect(&cfg.portal, cfg.pin.as_deref()).await?;
+    let (host, port) = parse_portal(&cfg.portal)?;
+    let url = if port == 443 { format!("wss://{host}/agent") } else { format!("wss://{host}:{port}/agent") };
+    let ws_cfg = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default().max_message_size(Some(link::MAX_FRAME)).max_frame_size(Some(link::MAX_FRAME));
+    let (ws, _) = tokio_tungstenite::client_async_with_config(url, tls, Some(ws_cfg)).await.context("the portal did not accept the link")?;
+    let (mut tx, mut rx) = ws.split();
+    tx.send(Message::Text(json!({ "t": "hello", "server": cfg.server, "key": cfg.key, "version": link::VERSION }).to_string().into())).await?;
+    match tokio::time::timeout(Duration::from_secs(15), rx.next()).await {
+        Ok(Some(Ok(Message::Text(t)))) if t.as_str().contains("\"ready\"") => {}
+        _ => bail!("the portal refused this server (revoked, or the key is not the portal's)"),
+    }
+    eprintln!("waydesk-agent: link up to {}", cfg.portal);
+    let (out_tx, mut out_rx) = tokio::sync::mpsc::channel::<String>(8);
+    let slots = Arc::new(tokio::sync::Semaphore::new(2));
+    let mut last = Instant::now();
+    let mut watch = tokio::time::interval(Duration::from_secs(10));
+    loop {
+        tokio::select! {
+            frame = rx.next() => match frame {
+                Some(Ok(Message::Text(t))) => {
+                    last = Instant::now();
+                    let Ok(req) = serde_json::from_str::<Value>(t.as_str()) else { continue };
+                    if req["t"] != "req" {
+                        continue;
+                    }
+                    let id = req["id"].as_u64().unwrap_or(0);
+                    let out_tx = out_tx.clone();
+                    let Ok(permit) = slots.clone().try_acquire_owned() else {
+                        let _ = out_tx.send(json!({ "t": "res", "id": id, "ok": false, "error": "this server is busy, try again" }).to_string()).await;
+                        continue;
+                    };
+                    tokio::spawn(async move {
+                        let answer = tokio::task::spawn_blocking(move || handle(&req)).await.unwrap_or_else(|_| Err("it failed".into()));
+                        drop(permit);
+                        let frame = match answer {
+                            Ok(j) => json!({ "t": "res", "id": id, "ok": true, "json": j }),
+                            Err(e) => json!({ "t": "res", "id": id, "ok": false, "error": e }),
+                        };
+                        let _ = out_tx.send(frame.to_string()).await;
+                    });
+                }
+                Some(Ok(Message::Ping(_))) | Some(Ok(Message::Pong(_))) => last = Instant::now(),
+                Some(Ok(Message::Close(_))) | None => return Ok(()),
+                Some(Ok(_)) => {}
+                Some(Err(e)) => bail!("the link broke: {e}"),
+            },
+            Some(frame) = out_rx.recv() => tx.send(Message::Text(frame.into())).await?,
+            _ = watch.tick() => if last.elapsed() > Duration::from_secs(70) { bail!("the portal went quiet") },
+        }
+    }
+}
+
+async fn run() -> Result<()> {
+    let cfg = load_config()?;
+    let mut wait = Duration::from_secs(2);
+    loop {
+        let started = Instant::now();
+        match serve(&cfg).await {
+            Ok(()) => eprintln!("waydesk-agent: the portal closed the link"),
+            Err(e) => eprintln!("waydesk-agent: {e:#}"),
+        }
+        // A link that lasted a while starts the waiting over; one that fails at once waits longer each time, up to a minute.
+        wait = if started.elapsed() > Duration::from_secs(60) { Duration::from_secs(2) } else { (wait * 2).min(Duration::from_secs(60)) };
+        tokio::time::sleep(wait).await;
+    }
+}
+
+#[tokio::main(flavor = "multi_thread", worker_threads = 2)]
+async fn main() -> Result<()> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    match args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
+        ["enrol", portal, code] => enrol_as_root(portal, code, None).await,
+        ["enrol", portal, code, "--pin", pin] => enrol_as_root(portal, code, Some(pin.to_string())).await,
+        ["run"] => run().await,
+        ["status"] => {
+            let cfg = load_config()?;
+            println!("portal {}\nserver {}\npin    {}", cfg.portal, cfg.server, cfg.pin.as_deref().unwrap_or("none (certificate authorities)"));
+            Ok(())
+        }
+        _ => {
+            eprintln!("{USAGE}");
+            std::process::exit(2);
+        }
+    }
+}
+
+async fn enrol_as_root(portal: &str, code: &str, pin: Option<String>) -> Result<()> {
+    if unsafe { libc::geteuid() } != 0 {
+        bail!("run this as root: it writes {CONFIG}");
+    }
+    enrol(portal, code, pin).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_portal_address_is_https_host_and_port_only() {
+        assert_eq!(parse_portal("https://portal.example.com").unwrap(), ("portal.example.com".into(), 443));
+        assert_eq!(parse_portal("https://portal.example.com:8443/").unwrap(), ("portal.example.com".into(), 8443));
+        assert_eq!(parse_portal("https://[::1]:8443").unwrap(), ("::1".into(), 8443));
+        for bad in ["http://x", "x", "https://", "https://u@x", "https://x/path", "https://x:99999", "https://x y"] {
+            assert!(parse_portal(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn only_the_known_reads_have_a_command_line() {
+        assert!(read_args("users").is_some() && read_args("status").is_some());
+        for bad in ["", "do", "../x", "users --json", "audit"] {
+            assert!(read_args(bad).is_none(), "{bad}");
+        }
+        assert!(handle(&json!({"kind":"rm"})).is_err());
+        assert!(handle(&json!({"nothing":1})).is_err());
+    }
+
+    #[test]
+    fn a_change_needs_a_valid_actor_source_and_action_before_anything_is_run() {
+        let ok_action = json!({"action":"session_end","name":"ana"});
+        for bad in [json!({"do":ok_action,"actor":"Bad Name","source":"1.2.3.4"}), json!({"do":ok_action,"actor":"boss","source":"1.2.3.4; id"}), json!({"do":ok_action,"source":"1.2.3.4"})] {
+            assert!(handle(&bad).is_err(), "{bad}");
+        }
+        // An action outside the closed list is refused here, before the runner is even asked.
+        assert!(run_action("boss", "1.2.3.4", &json!({"action":"user_remove","name":"ana"})).is_err());
+        assert!(run_action("boss", "1.2.3.4", &json!({"action":"user_enable","name":"Not Valid"})).is_err());
+    }
+
+    #[test]
+    fn the_key_file_is_private() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = std::env::temp_dir().join(format!("wd-agent-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("agent.json");
+        let cfg = Config { portal: "https://p".into(), server: "s-00000000".into(), key: "k".repeat(64), pin: None };
+        save_config(&cfg, &path).unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(serde_json::from_str::<Config>(&std::fs::read_to_string(&path).unwrap()).unwrap(), cfg);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_pin_is_sha256_in_hex() {
+        assert!(tls_config(Some(&"ab".repeat(32))).is_ok());
+        assert!(tls_config(Some(&"ab:".repeat(32).trim_end_matches(':').to_string())).is_ok());
+        for bad in ["", "zz", &"ab".repeat(31), &"ab".repeat(33)] {
+            assert!(tls_config(Some(bad)).is_err(), "{bad}");
+        }
+        assert!(tls_config(None).is_ok());
+    }
+}

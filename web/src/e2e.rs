@@ -1044,3 +1044,91 @@ async fn servers_are_added_by_administrators_and_enrol_once_with_a_code() {
     assert_eq!(post(&boss, format!("{{\"action\":\"revoke\",\"id\":\"{id}\"}}")).await.0, 200);
     assert_eq!(post(&boss, format!("{{\"action\":\"remove\",\"id\":\"{id}\"}}")).await.0, 200);
 }
+
+/// A server's agent as the portal sees it: connects to `/agent`, says hello, and answers what it is asked. The frames it was asked are kept.
+async fn agent(env: &Env, server: &str, key: &str) -> Result<Arc<std::sync::Mutex<Vec<serde_json::Value>>>, String> {
+    let req = format!("wss://{}/agent", env.host()).into_client_request().unwrap();
+    let (mut ws, _) = tokio_tungstenite::client_async(req, env.tls().await).await.map_err(|e| e.to_string())?;
+    ws.send(Message::Text(serde_json::json!({"t":"hello","server":server,"key":key,"version":1}).to_string().into())).await.unwrap();
+    match ws.next().await {
+        Some(Ok(Message::Text(t))) if t.as_str().contains("ready") => {}
+        other => return Err(format!("not ready: {other:?}")),
+    }
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let kept = seen.clone();
+    tokio::spawn(async move {
+        while let Some(Ok(m)) = ws.next().await {
+            if let Message::Text(t) = m {
+                let v: serde_json::Value = serde_json::from_str(t.as_str()).unwrap();
+                let id = v["id"].as_u64().unwrap();
+                let answer = if v.get("do").is_some() {
+                    serde_json::json!({"t":"res","id":id,"ok":true,"json":"{\"ok\":true,\"result\":{\"message\":\"done there\"}}"})
+                } else {
+                    serde_json::json!({"t":"res","id":id,"ok":true,"json":"[{\"name\":\"remote-ana\"}]"})
+                };
+                kept.lock().unwrap().push(v);
+                let _ = ws.send(Message::Text(answer.to_string().into())).await;
+            }
+        }
+    });
+    Ok(seen)
+}
+
+#[tokio::test]
+async fn a_server_dials_in_and_the_portal_asks_it_for_lists_and_changes() {
+    let env = start("agentlink", Opts::default()).await;
+    let boss = env.browser("boss").await;
+    let ana = env.browser("ana").await;
+    let origin = env.origin();
+    let field = |text: &str, name: &str| -> String {
+        let at = text.find(&format!("\"{name}\":\"")).unwrap() + name.len() + 4;
+        text[at..].split('"').next().unwrap().to_string()
+    };
+    let post = |path: &str, body: &str| {
+        let h = vec![("Cookie", boss.cookie.clone()), ("Origin", origin.clone()), ("X-CSRF-Token", boss.csrf.clone())];
+        let (env, path, body) = (&env, path.to_string(), body.to_string());
+        async move {
+            let h: Vec<(&str, &str)> = h.iter().map(|(k, v)| (*k, v.as_str())).collect();
+            env.send("POST", &path, &h, &body).await
+        }
+    };
+    let (_, added) = post("/api/admin/servers", r#"{"action":"add","name":"Far"}"#).await;
+    let (id, code) = (field(&added, "id"), field(&added, "code"));
+    let (_, enrolled) = env.send("POST", "/api/enrol", &[], &format!("{{\"code\":\"{code}\"}}")).await;
+    let key = field(&enrolled, "key");
+
+    // Nobody is connected: offline, in words. A wrong key or an unknown server never gets a link.
+    let (status, body) = env.send("GET", &format!("/api/admin/users?server={id}"), &[("Cookie", &boss.cookie)], "").await;
+    assert_eq!(status, 503, "{body}");
+    assert!(body.contains("offline"));
+    assert!(agent(&env, &id, &"0".repeat(64)).await.is_err(), "a wrong key");
+    assert!(agent(&env, "s-00000000", &key).await.is_err(), "an unknown server");
+
+    // The right key: a link. The list comes from the server's agent, not from the portal's own helper.
+    let seen = agent(&env, &id, &key).await.expect("link");
+    let (_, list) = env.send("GET", "/api/admin/servers", &[("Cookie", &boss.cookie)], "").await;
+    assert!(list.contains("\"online\""), "{list}");
+    let (status, body) = env.send("GET", &format!("/api/admin/users?server={id}"), &[("Cookie", &boss.cookie)], "").await;
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains("remote-ana") && !body.contains("\"ana\""), "{body}");
+    assert_eq!(seen.lock().unwrap()[0]["kind"], "users");
+    // Only administrators, and only a server id the fleet could have made.
+    assert_eq!(env.send("GET", &format!("/api/admin/users?server={id}"), &[("Cookie", &ana.cookie)], "").await.0, 403);
+    assert_eq!(env.send("GET", "/api/admin/users?server=../etc", &[("Cookie", &boss.cookie)], "").await.0, 400);
+    // A change goes to the server's agent with the account and address of the administrator who asked.
+    let (status, body) = post(&format!("/api/admin/do?server={id}"), r#"{"action":"user_disable","name":"eva"}"#).await;
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains("done there"), "{body}");
+    let asked = seen.lock().unwrap().last().cloned().unwrap();
+    assert_eq!(asked["actor"], "boss");
+    assert_eq!(asked["do"]["action"], "user_disable");
+    assert!(asked["source"].as_str().unwrap().contains('.') || asked["source"].as_str().unwrap().contains(':'));
+    // Not the portal's own helper: the stand-in helper's echo is not in the answer.
+    assert!(!body.contains("echo"));
+
+    // Revoking ends the link at once.
+    assert_eq!(post("/api/admin/servers", &format!("{{\"action\":\"revoke\",\"id\":\"{id}\"}}")).await.0, 200);
+    let (status, _) = env.send("GET", &format!("/api/admin/users?server={id}"), &[("Cookie", &boss.cookie)], "").await;
+    assert_eq!(status, 503);
+    assert!(agent(&env, &id, &key).await.is_err(), "the old key stays dead");
+}

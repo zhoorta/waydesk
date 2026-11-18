@@ -8,6 +8,15 @@ license = "AGPL-3.0-or-later"
 # Its own crate, not part of the daemon's package: the gateway has no use for Wayland, VA-API or NVENC, and the daemon has no use for a web stack.
 [workspace]
 
+[[bin]]
+name = "waydesk-web"
+path = "src/main.rs"
+
+# The part of a server that dials the portal (docs/PORTAL-DESIGN.md, stage 3). Its own program: a server with the daemon alone needs none of the web stack.
+[[bin]]
+name = "waydesk-agent"
+path = "src/agent.rs"
+
 [dependencies]
 anyhow = "1.0.104"
 axum = { version = "0.8.9", features = ["ws"] }
@@ -16,6 +25,7 @@ futures-util = "0.3.34"
 getrandom = "0.4.3"
 hmac = "0.13.0"
 hyper = "1.12.0"
+libc = "0.2"
 hyper-util = { version = "0.1.21", features = ["tokio", "server", "http1"] }
 ironrdp-rdcleanpath = "0.3.1"
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
@@ -27,9 +37,11 @@ socket2 = { version = "0.6.5", features = ["all"] }
 subtle = "2.6.1"
 tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread", "net", "time", "io-util", "sync", "signal", "fs"] }
 tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring", "tls12"] }
+tokio-tungstenite = { version = "0.30.0", default-features = false, features = ["handshake"] }
 tower = { version = "0.5.3", features = ["util"] }
 tower-service = "0.3.3"
 tracing = "0.1.44"
+webpki-roots = "1"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 
 [dev-dependencies]

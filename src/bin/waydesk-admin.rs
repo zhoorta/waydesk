@@ -355,21 +355,24 @@ fn serve_request() -> Result<()> {
         Ok(a) => a,
         Err(why) => return reply(json!({ "ok": false, "error": why })),
     };
-    // The actor has to be an administrator now, whatever the helper checked a moment ago.
-    let actor = req.get("actor_uid").and_then(|u| u.as_u64()).and_then(|u| u32::try_from(u).ok());
-    let is_admin = actor.is_some_and(|uid| accounts().is_ok_and(|all| all.iter().any(|a| a.uid == uid && in_group(a, sudo_group()))));
-    let Some(actor) = actor.filter(|_| is_admin) else { return reply(json!({ "ok": false, "error": "only administrators may do this" })) };
     let exe = std::env::current_exe().context("path of this program")?;
-    let out = Command::new(exe)
-        .args(action.args())
-        .env_clear()
-        .env("PATH", "/usr/sbin:/usr/bin:/sbin:/bin")
-        .env("SUDO_UID", actor.to_string())
-        .env("WAYDESK_VIA", "portal")
-        .env("WAYDESK_SOURCE", source)
-        .stdin(Stdio::null())
-        .output()
-        .context("cannot run waydesk-admin")?;
+    let mut command = Command::new(exe);
+    command.args(action.args()).env_clear().env("PATH", "/usr/sbin:/usr/bin:/sbin:/bin").env("WAYDESK_VIA", "portal").env("WAYDESK_SOURCE", source).stdin(Stdio::null());
+    if let Some(actor) = req.get("remote_actor") {
+        // From the server's agent (root, which dialled the portal): the administrator is an account of the PORTAL's machine, not one of this one, so
+        // there is no uid to check here; the audit line names the account. The name is held to the rule for account names, as everything else.
+        match actor.as_str().filter(|a| adminaction::valid_name(a)) {
+            Some(name) => command.env("WAYDESK_ACTOR", name),
+            None => return reply(json!({ "ok": false, "error": "bad actor name" })),
+        };
+    } else {
+        // The actor has to be an administrator now, whatever the helper checked a moment ago.
+        let actor = req.get("actor_uid").and_then(|u| u.as_u64()).and_then(|u| u32::try_from(u).ok());
+        let is_admin = actor.is_some_and(|uid| accounts().is_ok_and(|all| all.iter().any(|a| a.uid == uid && in_group(a, sudo_group()))));
+        let Some(actor) = actor.filter(|_| is_admin) else { return reply(json!({ "ok": false, "error": "only administrators may do this" })) };
+        command.env("SUDO_UID", actor.to_string());
+    }
+    let out = command.output().context("cannot run waydesk-admin")?;
     let stdout = String::from_utf8_lossy(&out.stdout);
     if out.status.success() {
         // `users add` and `users passwd` print JSON (with the new password); the others print a sentence.
@@ -1906,6 +1909,10 @@ fn audit_emit(name: &'static str, worked: bool, target: Option<String>, detail: 
     };
     // The portal's runner (`serve-request`) says so, and from which address.
     let via = if via == "sudo" && std::env::var("WAYDESK_VIA").as_deref() == Ok("portal") { "portal" } else { via };
+    // An administrator of another machine's portal, relayed by this machine's agent (no uid here): `serve-request` sets the name, and only when it
+    // runs as root; nobody else can reach this branch, because the audit line is only written by root at all.
+    let remote_actor = std::env::var("WAYDESK_ACTOR").ok().filter(|a| std::env::var("WAYDESK_VIA").as_deref() == Ok("portal") && std::env::var("SUDO_UID").is_err() && std::env::var("PKEXEC_UID").is_err() && a.len() <= 32);
+    let (via, uid) = if remote_actor.is_some() { ("portal", None) } else { (via, uid) };
     let mut e = audit::event(name, if worked { audit::Outcome::Ok } else { audit::Outcome::Fail }).str("via", via);
     if via == "portal" {
         if let Ok(source) = std::env::var("WAYDESK_SOURCE") {
@@ -1914,6 +1921,9 @@ fn audit_emit(name: &'static str, worked: bool, target: Option<String>, detail: 
     }
     if let Some(uid) = uid {
         e = e.num("actor_uid", uid.into()).str("actor", &audit::name_of(uid).unwrap_or_default());
+    }
+    if let Some(name) = &remote_actor {
+        e = e.str("actor", name).str("origin", "portal account");
     }
     if let Some(t) = &target {
         e = e.str("target", t);

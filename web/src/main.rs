@@ -5,6 +5,7 @@
 
 mod bridge;
 mod fleet;
+mod link;
 #[cfg(test)]
 mod e2e;
 mod limits;

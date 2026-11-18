@@ -1,0 +1,26 @@
+[Unit]
+Description=waydesk agent (keeps this server's link to the portal open)
+Documentation=file:///usr/share/doc/waydesk/README.md
+After=network-online.target waydesk-admin.socket
+Wants=network-online.target
+# Only runs once `waydesk-agent enrol` has written the key.
+ConditionPathExists=/etc/waydesk/agent.json
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/waydesk-agent run
+Restart=always
+RestartSec=5
+# Root, because the changes it relays are made by the runner (root only socket) and the lists need `waydesk-admin`; it dials out and listens on nothing.
+# What the portal can ask is the closed list in adminaction.rs plus five read-only commands, whatever the portal sends.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+MemoryMax=128M
+TasksMax=64
+
+[Install]
+WantedBy=multi-user.target

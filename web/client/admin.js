@@ -9,8 +9,27 @@ const table = (heads, rows, empty) => el('div', { class: 'tw' }, rows.length ===
 const cell = (content, cls = '') => el('td', { class: cls }, content);
 const sessionSince = (s) => (s ? s.replace(/^\w+ /, '').replace(/ [A-Z]{2,5}$/, '') : '');
 
-async function get(kind) {
-  const r = await fetch('/api/admin/' + kind, { cache: 'no-store' });
+// Which machine the pages are about: '' is the one the portal runs on, otherwise the id of a server that dialled in (see the picker). Kept for the tab.
+let server = '';
+try { server = sessionStorage.getItem('wd-server') || ''; } catch { /* no storage: the portal's own machine */ }
+const pick = (id) => { server = id; try { sessionStorage.setItem('wd-server', id); } catch { /* fine */ } };
+const q = () => (server ? '?server=' + encodeURIComponent(server) : '');
+
+// A select of the machines to look at, when any server has enrolled. Selecting one redraws the page.
+async function picker() {
+  let list = [];
+  try { list = (await get('servers', true)).servers || []; } catch { return null; }
+  const usable = list.filter((v) => v.state === 'online' || v.state === 'offline');
+  if (!usable.length) { if (server) pick(''); return null; }
+  if (server && !usable.some((v) => v.id === server)) pick('');
+  const s = el('select', { 'aria-label': 'Server' }, el('option', { value: '' }, 'This machine'), usable.map((v) => el('option', { value: v.id, selected: v.id === server }, v.name + (v.state === 'online' ? '' : ' (offline)'))));
+  s.value = server;
+  s.addEventListener('change', () => { pick(s.value); ctx.reload(); });
+  return s;
+}
+
+async function get(kind, local = false) {
+  const r = await fetch('/api/admin/' + kind + (local ? '' : q()), { cache: 'no-store' });
   if (r.status === 401) { const e = new Error('Your sign-in ended.'); e.signedOut = true; throw e; }
   if (r.status === 403) throw new Error('This page is for administrators.');
   if (!r.ok) throw new Error('The server could not be asked (' + r.status + ').');
@@ -23,7 +42,7 @@ async function get(kind) {
 let ctx = null;
 
 async function act(action) {
-  const r = await fetch('/api/admin/do', { method: 'POST', cache: 'no-store', headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': ctx.csrf() }, body: JSON.stringify(action) });
+  const r = await fetch('/api/admin/do' + q(), { method: 'POST', cache: 'no-store', headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': ctx.csrf() }, body: JSON.stringify(action) });
   if (r.status === 401) { ctx.signedOut(); throw new Error('Your sign-in ended.'); }
   if (r.status === 403) throw new Error('Only administrators can do this.');
   if (r.status === 429) throw new Error('Too many changes in a minute. Wait a little.');
@@ -115,6 +134,7 @@ async function endSession(name) {
 }
 
 // ---- servers ----
+let fleetInfo = { portal: null, pin: null };
 async function serverAct(body) {
   const r = await fetch('/api/admin/servers', { method: 'POST', cache: 'no-store', headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': ctx.csrf() }, body: JSON.stringify(body) });
   if (r.status === 401) { ctx.signedOut(); throw new Error('Your sign-in ended.'); }
@@ -129,9 +149,15 @@ async function serverAct(body) {
 
 // The join code is shown once, here; the portal keeps only its hash.
 function showCode(name, code, minutes) {
-  const box = el('code', { class: 'secret' }, code);
-  const copy = button('Copy', async () => { try { await navigator.clipboard.writeText(code); copy.textContent = 'Copied'; } catch { copy.textContent = 'Select and copy it'; } });
-  const d = modal('join code: ' + name, [el('p', {}, 'The code is shown once. It works once, for ' + minutes + ' minutes. The server shows it to this portal to enrol.'), box], [copy, button('Done', () => d.close(), 'primary')]);
+  // The address is the one this page was opened with unless the portal knows its public one; it has to be an address the server can reach.
+  const url = fleetInfo.portal || location.origin;
+  const cmd = 'waydesk-agent enrol ' + url + ' ' + code + (fleetInfo.pin ? ' --pin ' + fleetInfo.pin : '');
+  const copy = button('Copy command', async () => { try { await navigator.clipboard.writeText(cmd); copy.textContent = 'Copied'; } catch { copy.textContent = 'Select and copy it'; } });
+  const d = modal('join code: ' + name, [
+    el('p', {}, 'The code is shown once and works once, for ' + minutes + ' minutes. Run this on the server, as root:'),
+    el('code', { class: 'secret' }, cmd),
+    el('p', { class: 'hint' }, 'The pin makes the server trust this portal\u2019s certificate and no other. Check that the address is one the server can reach (not a tunnel on your own computer).'),
+  ], [copy, button('Done', () => d.close(), 'primary')]);
 }
 
 function addServer() {
@@ -202,7 +228,7 @@ const views = {
     for (const w of s.warnings || []) attention.push(['warning', 'warn', w]);
     const rows = sessionsNow.map((u) => el('tr', {}, cell(el('b', {}, u.name)), cell((u.video && u.video.compositor) || '-'), cell(u.video && u.video.encoder ? u.video.encoder : '-'), cell(gb(u.mem_mb || 0), 'n mono'), cell(Math.round(u.cpu_percent || 0) + '%', 'n mono')));
     return [
-      el('div', { class: 'head' }, el('h1', {}, 'Overview'), el('span', { class: 'sp' }), el('span', { class: 'muted small' }, 'refreshes every 10 s · same numbers as ', el('code', {}, 'waydesk-admin status'))),
+      el('div', { class: 'head' }, el('h1', {}, 'Overview'), el('span', { class: 'sp' }), await picker(), el('span', { class: 'muted small' }, 'refreshes every 10 s · same numbers as ', el('code', {}, 'waydesk-admin status'))),
       tiles,
       el('div', { class: 'two' },
         win('sessions now', table(['Account', 'Desktop', 'Encoder', '>Memory', '>CPU'], rows, 'Nobody is logged in.')),
@@ -240,7 +266,7 @@ const views = {
     const search = el('input', { type: 'search', placeholder: 'Search accounts', 'aria-label': 'Search accounts', style: 'width:14rem' });
     search.addEventListener('input', () => draw(search.value.trim().toLowerCase()));
     draw('');
-    return [el('div', { class: 'head' }, el('h1', {}, 'Users'), el('span', { class: 'sp' }), search, button('Add user', addUser, 'primary')), holder];
+    return [el('div', { class: 'head' }, el('h1', {}, 'Users'), el('span', { class: 'sp' }), await picker(), search, button('Add user', addUser, 'primary')), holder];
   },
 
   async audit() {
@@ -299,7 +325,7 @@ const views = {
   },
 
   async settings() {
-    const [s, access, cert] = await Promise.all([get('settings'), get('access'), get('cert')]);
+    const [s, access, cert] = await Promise.all([get('settings', true), get('access', true), get('cert', true)]);
     const p = s.portal || {};
     const pre = (text) => el('pre', { class: 'plainpre' }, text || '-');
     const policy = { off: 'off: the password is enough', optional: 'optional: asked of accounts that set one up', required: 'required: every account needs one' }[p.totp] || p.totp;
@@ -348,7 +374,8 @@ const views = {
   },
 
   async servers() {
-    const r = await get('servers');
+    const r = await get('servers', true);
+    fleetInfo = { portal: r.portal, pin: r.pin };
     const list = r.servers || [];
     const tone = { online: 'ok', offline: 'warn', waiting: '', expired: 'warn', revoked: 'bad' };
     const label = { online: 'online', offline: 'offline', waiting: 'waiting for the server', expired: 'code expired', revoked: 'revoked' };
@@ -380,7 +407,7 @@ const views = {
     });
     const a = s.admission || {};
     return [
-      el('div', { class: 'head' }, el('h1', {}, 'Sessions'), el('span', { class: 'sp' }), chip(rows.length + (a.max_active_users ? ' of ' + a.max_active_users : ' running'), 'ok')),
+      el('div', { class: 'head' }, el('h1', {}, 'Sessions'), el('span', { class: 'sp' }), await picker(), chip(rows.length + (a.max_active_users ? ' of ' + a.max_active_users : ' running'), 'ok')),
       win('running sessions', table(['Account', 'State', 'Since', 'Desktop', 'Encoder', '>Memory', '>CPU', ''], rows, 'No sessions running.')),
     ];
   },
