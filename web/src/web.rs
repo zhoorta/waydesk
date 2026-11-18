@@ -94,6 +94,8 @@ pub struct App {
     pub agent_rate: RateLimiter,
     /// Desktops waiting for their server's agent to dial back (`relay.rs`).
     pub relays: crate::relay::Relays,
+    /// The portal's own audit log (`audit.rs`).
+    pub audit: crate::audit::Audit,
     /// The portal's own accounts (`people.rs`), their two-step records (apart from the host accounts'), and the limits that protect their passwords.
     pub people: crate::people::People,
     pub pstore: Store,
@@ -130,6 +132,7 @@ impl App {
             links: crate::link::Links::new(),
             agent_rate: RateLimiter::new(30, Duration::from_secs(60)),
             relays: crate::relay::Relays::new(),
+            audit: crate::audit::Audit::open(cfg.totp_dir.join("audit.jsonl")),
             people: crate::people::People::open(cfg.totp_dir.join("people.json")).expect("the people file could not be read"),
             pstore: Store::new(&cfg.totp_dir.join("people")),
             pw_guesses: Guesses::new(20, 5, Duration::from_secs(600)),
@@ -195,6 +198,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/api/account/password", post(change_password).layer(axum::extract::DefaultBodyLimit::max(2048)))
         .route("/api/admin/totp", post(admin_totp).layer(axum::extract::DefaultBodyLimit::max(1024)))
         .route("/api/admin/audit", get(admin_audit))
+        .route("/api/admin/fleet", get(fleet_overview))
         .route("/api/admin/servers", get(servers_list).post(servers_do).layer(axum::extract::DefaultBodyLimit::max(1024)))
         .route("/agent", get(agent_ws))
         .route("/relay", get(relay_ws))
@@ -340,15 +344,28 @@ async fn login(State(app): State<Arc<App>>, Extension(ClientAddr(peer)): Extensi
     res
 }
 
+/// A place among the password hashes running now: waits a few seconds, and then says the portal is busy (a queue of waiting sign-ins is itself a way to
+/// hold memory, so it does not grow without end).
+async fn hash_slot(app: &App) -> Result<tokio::sync::SemaphorePermit<'_>, ()> {
+    match tokio::time::timeout(Duration::from_secs(5), app.hash_slots.acquire()).await {
+        Ok(Ok(p)) => Ok(p),
+        _ => Err(()),
+    }
+}
+
 /// Sign-in of a portal account. The same answer for every failure, the same delay, a lockout per account and per address, and a wrong password never
 /// spends a code. The hashing runs off the async threads and at most `hash_slots` at once.
 async fn portal_login(app: &Arc<App>, ip: IpAddr, account: String, password: String, code: &str, now: Instant) -> Response {
+    // A refusal takes `fail_delay` in all, hashing included, so that the time does not say whether the name is a portal person's.
+    let started = Instant::now();
+    let pause = |app: &Arc<App>| tokio::time::sleep(app.cfg.fail_delay.saturating_sub(started.elapsed()));
     if app.pw_guesses.blocked(ip, &account, now) {
         warn!(%ip, account, "portal sign-in refused: too many wrong passwords");
-        tokio::time::sleep(app.cfg.fail_delay).await;
+        app.audit.record("login", "refused", "", &ip.to_string(), &account, "locked out after too many wrong passwords");
+        pause(app).await;
         return refused();
     }
-    let Ok(_slot) = app.hash_slots.acquire().await else { return text(StatusCode::SERVICE_UNAVAILABLE, "busy\n") };
+    let Ok(_slot) = hash_slot(&app).await else { return text(StatusCode::SERVICE_UNAVAILABLE, "busy\n") };
     let (a2, name) = (app.clone(), account.clone());
     let verdict = tokio::task::spawn_blocking(move || a2.people.verify(&name, &password)).await;
     drop(_slot);
@@ -360,18 +377,21 @@ async fn portal_login(app: &Arc<App>, ip: IpAddr, account: String, password: Str
                 app.pw_guesses.failed(ip, &account, now);
             }
             warn!(%ip, account, "portal sign-in refused: {why}");
-            tokio::time::sleep(app.cfg.fail_delay).await;
+            app.audit.record("login", "refused", "", &ip.to_string(), &account, why);
+            pause(app).await;
             return refused();
         }
         Err(_) => return text(StatusCode::SERVICE_UNAVAILABLE, "cannot check passwords now\n"),
     }
     if let Some(why) = second_factor(app, ip, &account, code, now, true) {
         warn!(%ip, account, "portal sign-in refused: {why}");
-        tokio::time::sleep(app.cfg.fail_delay).await;
+        app.audit.record("login", "refused", "", &ip.to_string(), &account, why);
+        pause(app).await;
         return refused();
     }
     let Some((id, signed)) = app.portal.sign_in_as(&account, ip, String::new(), true, Instant::now()) else { return text(StatusCode::SERVICE_UNAVAILABLE, "busy\n") };
     info!(%ip, account, "portal account signed in");
+    app.audit.record("login", "ok", &account, &ip.to_string(), "", "");
     let mut res = json(StatusCode::OK, signed_json(&signed));
     if let Ok(v) = HeaderValue::from_str(&portal::set_cookie(Some(&id))) {
         res.headers_mut().insert(header::SET_COOKIE, v);
@@ -575,19 +595,21 @@ async fn change_portal_password(app: &Arc<App>, ip: IpAddr, account: &str, old: 
         tokio::time::sleep(app.cfg.fail_delay).await;
         return refuse(StatusCode::FORBIDDEN, "The current password is wrong.");
     }
-    let Ok(_slot) = app.hash_slots.acquire().await else { return refuse(StatusCode::SERVICE_UNAVAILABLE, "Busy, try again.") };
+    let Ok(_slot) = hash_slot(&app).await else { return refuse(StatusCode::SERVICE_UNAVAILABLE, "Busy, try again.") };
     let (a2, name) = (app.clone(), account.to_string());
     let done = tokio::task::spawn_blocking(move || a2.people.change_password(&name, &old, &new)).await;
     match done {
         Ok(Ok(())) => {
             app.pw_guesses.succeeded(ip, account);
             info!(account, "a portal account changed its own password");
+            app.audit.record("account.password", "ok", account, &ip.to_string(), "", "");
             json(StatusCode::OK, "{\"ok\":true}\n".into())
         }
         Ok(Err(e)) => {
             let why = format!("{e:#}");
             if why.contains("current password") {
                 app.pw_guesses.failed(ip, account, now);
+                app.audit.record("account.password", "refused", account, &ip.to_string(), "", "the current password was wrong");
                 tokio::time::sleep(app.cfg.fail_delay).await;
                 refuse(StatusCode::FORBIDDEN, "The current password is wrong.")
             } else {
@@ -607,7 +629,12 @@ struct CodeRequest {
 fn note(app: &Arc<App>, ticket: String, account: String, source: String, event: u8, target: String) {
     if ticket.is_empty() {
         // A portal account has no login at the helper to write a line under; the portal's own audit comes with the servers' (slice 5). The journal has it.
-        warn!(account, event, target, "an audit note of a portal account (journal only)");
+        let name = match event {
+            crate::portal::NOTE_TOTP_ENROLLED => "account.totp.enrolled",
+            crate::portal::NOTE_TOTP_REMOVED => "account.totp.removed",
+            _ => "account.note",
+        };
+        app.audit.record(name, "ok", &account, &source, &target, "");
         return;
     }
     let auth = app.auth.clone();
@@ -778,16 +805,40 @@ struct AuditParams {
     #[serde(default)]
     outcome: String,
     limit: Option<u16>,
+    /// Whose log: empty for the portal's own machine (the helper's), `portal` for the portal's own audit log, or the id of a server.
+    #[serde(default)]
+    source: String,
 }
 
 /// The audit log, filtered (an administrator's page). The helper checks the administrator and every filter; the portal only passes them on, cut to
 /// a sensible length first.
 async fn admin_audit(State(app): State<Arc<App>>, Query(q): Query<AuditParams>, headers: HeaderMap) -> Response {
     let Some((id, signed)) = signed_in(&app, &headers) else { return text(StatusCode::UNAUTHORIZED, "not signed in\n") };
-    let Some(ticket) = app.portal.ticket(&id) else { return text(StatusCode::UNAUTHORIZED, "not signed in\n") };
     if [&q.since, &q.user, &q.event, &q.outcome].iter().any(|s| s.len() > 64) {
         return text(StatusCode::BAD_REQUEST, "bad request\n");
     }
+    if !q.source.is_empty() {
+        // The portal's own log, or a server's (asked of its agent, which checks the filters again and runs the same command as the command line).
+        if q.source != "portal" && !valid_server_id(&q.source) {
+            return text(StatusCode::BAD_REQUEST, "bad request\n");
+        }
+        if let Err(r) = require_admin(&app, &id, &signed).await {
+            return r;
+        }
+        let query = crate::audit::Query { since: q.since.clone(), user: q.user.clone(), event: q.event.clone(), outcome: q.outcome.clone(), limit: q.limit.unwrap_or(200) };
+        if let Err(why) = query.validate() {
+            return json(StatusCode::BAD_REQUEST, format!("{}\n", serde_json::json!({ "ok": false, "error": why })));
+        }
+        if q.source == "portal" {
+            return json(StatusCode::OK, format!("{}\n", serde_json::Value::Array(app.audit.query(&query, unix_now()))));
+        }
+        let ask = serde_json::json!({ "kind": "audit", "query": { "since": query.since, "user": query.user, "event": query.event, "outcome": query.outcome, "limit": query.limit } });
+        return match app.links.request(&q.source, ask, crate::link::READ_TIMEOUT).await {
+            Ok(body) => json(StatusCode::OK, format!("{body}\n")),
+            Err(e) => link_error(e),
+        };
+    }
+    let Some(ticket) = app.portal.ticket(&id).filter(|t| !t.is_empty()) else { return json(StatusCode::CONFLICT, "{\"ok\":false,\"error\":\"Choose the portal or a server: a portal account has nothing on the portal\\u2019s own machine.\"}\n".into()) };
     let (auth, account, source) = (app.auth.clone(), signed.account.clone(), signed.ip.to_string());
     let answer = tokio::task::spawn_blocking(move || auth.audit(&ticket, &account, &source, (&q.since, &q.user, &q.event, &q.outcome, q.limit.unwrap_or(200)))).await;
     match answer {
@@ -877,6 +928,7 @@ async fn servers_do(State(app): State<Arc<App>>, Extension(ClientAddr(peer)): Ex
             }
             Err(e) => return fail(format!("{e:#}")),
         },
+        "remove" if !app.people.assigned_to(&req.id).is_empty() => return fail(format!("{} are still assigned to it: take them away first", app.people.assigned_to(&req.id).join(", "))),
         "remove" => match app.fleet.remove(&req.id) {
             Ok(()) => (crate::portal::NOTE_SERVER_REMOVED, req.id.clone(), serde_json::json!({})),
             Err(e) => return fail(format!("{e:#}")),
@@ -884,6 +936,7 @@ async fn servers_do(State(app): State<Arc<App>>, Extension(ClientAddr(peer)): Ex
         _ => return text(StatusCode::BAD_REQUEST, "bad request\n"),
     };
     warn!(admin = signed.account, action = req.action, server = target, "an administrator changed the servers");
+    app.audit.record(&format!("admin.server.{}", req.action), "ok", &signed.account, &signed.ip.to_string(), &target, if req.action == "add" { req.name.trim() } else { "" });
     note(&app, ticket, signed.account.clone(), signed.ip.to_string(), event, target);
     let mut out = extra;
     out["ok"] = serde_json::json!(true);
@@ -909,11 +962,13 @@ async fn enrol(State(app): State<Arc<App>>, Extension(ClientAddr(peer)): Extensi
     match app.fleet.enrol(&req.code, unix_now()) {
         Ok((server, key)) => {
             warn!(%ip, server, "a server enrolled");
+            app.audit.record("server.enrolled", "ok", "", &ip.to_string(), &server, "");
             json(StatusCode::OK, format!("{}\n", serde_json::json!({ "server": server, "key": key })))
         }
         Err(crate::fleet::EnrolError::Busy) => text(StatusCode::TOO_MANY_REQUESTS, "too many attempts, wait a minute\n"),
         Err(crate::fleet::EnrolError::BadCode) => {
             warn!(%ip, "enrolment refused: wrong, used or expired code");
+            app.audit.record("server.enrolled", "refused", "", &ip.to_string(), "", "wrong, used or expired code");
             tokio::time::sleep(app.cfg.fail_delay).await;
             text(StatusCode::FORBIDDEN, "code refused\n")
         }
@@ -966,6 +1021,7 @@ async fn agent_link(mut socket: axum::extract::ws::WebSocket, ip: IpAddr, app: A
     let (server, key) = (v["server"].as_str().unwrap_or(""), v["key"].as_str().unwrap_or(""));
     if v["t"] != "hello" || v["version"].as_u64() != Some(crate::link::VERSION) || !valid_server_id(server) || key.len() != 64 || !app.fleet.authenticate(server, key) {
         warn!(%ip, "a server link was refused: wrong hello, version or key");
+        app.audit.record("server.link", "refused", "", &ip.to_string(), if valid_server_id(server) { server } else { "" }, "wrong hello, version or key");
         tokio::time::sleep(app.cfg.fail_delay).await;
         let _ = socket.send(Message::Close(None)).await;
         return;
@@ -973,6 +1029,7 @@ async fn agent_link(mut socket: axum::extract::ws::WebSocket, ip: IpAddr, app: A
     let server = server.to_string();
     let mut link = app.links.attach(&server);
     info!(%ip, server, "a server link is up");
+    app.audit.record("server.link", "ok", "", &ip.to_string(), &server, "up");
     app.fleet.touch(&server, unix_now());
     if socket.send(Message::Text("{\"t\":\"ready\"}".into())).await.is_err() {
         app.links.detach(&server, link.gen);
@@ -1009,6 +1066,7 @@ async fn agent_link(mut socket: axum::extract::ws::WebSocket, ip: IpAddr, app: A
     app.links.detach(&server, link.gen);
     let _ = socket.send(Message::Close(None)).await;
     info!(%ip, server, "a server link ended");
+    app.audit.record("server.link", "ok", "", &ip.to_string(), &server, "ended");
 }
 
 /// One change on a server, asked of its agent as the person who asked for it: the runner's `result`, or why not, in words.
@@ -1052,11 +1110,29 @@ struct PeopleRequest {
     desktop: Option<String>,
     gpu: Option<String>,
     memory: Option<String>,
+    /// `unassign` only: drop the assignment even though the server could not be told (it is gone for good); the account there stays as it is.
+    #[serde(default)]
+    force: bool,
 }
 
 /// Changes to the portal's people: add, reset a password, make or stop being an administrator, switch off or on, remove, assign a server or take it away.
 /// Assigning makes the system account on the server (through its agent); nothing is half done: the assignment is recorded after the server did its part.
 async fn people_do(State(app): State<Arc<App>>, Extension(ClientAddr(peer)): Extension<ClientAddr>, Extension(PublicHost(host)): Extension<PublicHost>, headers: HeaderMap, body: axum::body::Bytes) -> Response {
+    let who = signed_in(&app, &headers).map(|(_, s)| s.account);
+    let asked = serde_json::from_slice::<PeopleRequest>(&body).ok();
+    let response = people_do_inner(State(app.clone()), Extension(ClientAddr(peer)), Extension(PublicHost(host)), headers, body).await;
+    // A change that was allowed to be tried is in the log, with how it went (never the password it may have made).
+    if let (Some(who), Some(req)) = (who, asked) {
+        let status = response.status();
+        if status != StatusCode::UNAUTHORIZED && status != StatusCode::FORBIDDEN && status != StatusCode::TOO_MANY_REQUESTS {
+            let detail = if req.action == "assign" { req.server.as_str() } else if req.action == "unassign" { req.server.as_str() } else { "" };
+            app.audit.record(&format!("admin.people.{}", req.action), if status == StatusCode::OK { "ok" } else { "fail" }, &who, &peer.ip().to_string(), &req.name, detail);
+        }
+    }
+    response
+}
+
+async fn people_do_inner(State(app): State<Arc<App>>, Extension(ClientAddr(peer)): Extension<ClientAddr>, Extension(PublicHost(host)): Extension<PublicHost>, headers: HeaderMap, body: axum::body::Bytes) -> Response {
     let (id, signed) = match changing(&app, &headers, &host) {
         Ok(v) => v,
         Err(r) => return r,
@@ -1083,7 +1159,7 @@ async fn people_do(State(app): State<Arc<App>>, Extension(ClientAddr(peer)): Ext
     warn!(admin = actor, action = req.action, person = req.name, server = req.server, "an administrator changed the portal's people");
     match req.action.as_str() {
         "add" => {
-            let Ok(_slot) = app.hash_slots.acquire().await else { return text(StatusCode::SERVICE_UNAVAILABLE, "busy\n") };
+            let Ok(_slot) = hash_slot(&app).await else { return text(StatusCode::SERVICE_UNAVAILABLE, "busy\n") };
             let (a2, name, display, admin) = (app.clone(), req.name.clone(), req.display.clone(), req.admin);
             match tokio::task::spawn_blocking(move || a2.people.add(&name, &display, admin, now)).await {
                 Ok(Ok(password)) => ok(serde_json::json!({ "name": req.name, "password": password })),
@@ -1092,7 +1168,7 @@ async fn people_do(State(app): State<Arc<App>>, Extension(ClientAddr(peer)): Ext
             }
         }
         "passwd" => {
-            let Ok(_slot) = app.hash_slots.acquire().await else { return text(StatusCode::SERVICE_UNAVAILABLE, "busy\n") };
+            let Ok(_slot) = hash_slot(&app).await else { return text(StatusCode::SERVICE_UNAVAILABLE, "busy\n") };
             let (a2, name) = (app.clone(), req.name.clone());
             match tokio::task::spawn_blocking(move || a2.people.set_password(&name, None)).await {
                 Ok(Ok(password)) => {
@@ -1192,7 +1268,10 @@ async fn people_do(State(app): State<Arc<App>>, Extension(ClientAddr(peer)): Ext
             }
             // The account on the server is switched off (never deleted: its files stay), and then the assignment goes.
             if let Err(why) = remote_do(&app, &req.server, &actor, &source, serde_json::json!({ "action": "user_disable", "name": req.name, "keep_session": false })).await {
-                return fail(format!("{why}: the account there was not switched off, so the assignment stays"));
+                if !req.force {
+                    return fail(format!("{why}: the account there was not switched off, so the assignment stays"));
+                }
+                warn!(admin = actor, person = req.name, server = req.server, "an assignment was dropped without the server: {why}");
             }
             match app.people.unassign(&req.name, &req.server) {
                 Ok(()) => ok(serde_json::json!({})),
@@ -1237,7 +1316,71 @@ async fn app_password(State(app): State<Arc<App>>, Extension(ClientAddr(peer)): 
     }
     let _ = app.people.mark_app_password(&me.name, unix_now());
     info!(account = me.name, servers = done.len(), "an app password was made");
+    app.audit.record("account.apppass", if failed.is_empty() { "ok" } else { "fail" }, &me.name, &source, "", &format!("set on {} server(s), not on {}", done.len(), failed.len()));
     json(StatusCode::OK, format!("{}\n", serde_json::json!({ "ok": true, "password": password, "servers": done, "failed": failed })))
+}
+
+/// The numbers of one server's status that the fleet page shows: sessions, memory and CPU use, warnings, whether it takes new sessions.
+pub fn fleet_summary(status: &serde_json::Value) -> serde_json::Value {
+    let m = &status["machine"];
+    let a = &status["admission"];
+    let total = m["mem_total_mb"].as_f64().unwrap_or(0.0);
+    let avail = m["mem_available_mb"].as_f64().unwrap_or(0.0);
+    let sessions = a["sessions"].as_u64().unwrap_or_else(|| status["users"].as_array().map_or(0, |u| u.iter().filter(|x| x["session"].is_string() && x["session"] != "none").count() as u64));
+    serde_json::json!({
+        "sessions": sessions,
+        "max_sessions": a["max_active_users"],
+        "mem_percent": if total > 0.0 { serde_json::json!(((total - avail) / total * 100.0).round()) } else { serde_json::Value::Null },
+        "cpu_percent": m["cpu_percent"],
+        "warnings": status["warnings"].as_array().map_or(0, Vec::len),
+        "open": a["open"],
+    })
+}
+
+/// All servers at a glance: each online server is asked for its status at the same time, and one that does not answer in time is shown as such.
+async fn fleet_overview(State(app): State<Arc<App>>, headers: HeaderMap) -> Response {
+    let Some((id, signed)) = signed_in(&app, &headers) else { return text(StatusCode::UNAUTHORIZED, "not signed in\n") };
+    if let Err(r) = require_admin(&app, &id, &signed).await {
+        return r;
+    }
+    let now = Instant::now();
+    if let Some((at, body)) = app.admin_cache.lock().unwrap().get("fleet@") {
+        if now.duration_since(*at) < Duration::from_secs(5) {
+            return json(StatusCode::OK, body.clone());
+        }
+    }
+    let list = app.fleet.list(unix_now());
+    let asked = list.iter().filter(|v| (v.state == "online" || v.state == "offline") && app.links.online(&v.id)).map(|v| {
+        let (app, id) = (app.clone(), v.id.clone());
+        async move {
+            let answer = app.links.request(&id, serde_json::json!({ "kind": "status" }), Duration::from_secs(8)).await;
+            (id, answer)
+        }
+    });
+    let answers: std::collections::HashMap<String, Result<String, crate::link::LinkError>> = futures_util::future::join_all(asked).await.into_iter().collect();
+    let servers: Vec<_> = list
+        .iter()
+        .map(|v| {
+            let live = app.links.online(&v.id);
+            let state = if matches!(v.state, "online" | "offline") { if live { "online" } else { "offline" } } else { v.state };
+            let mut row = serde_json::json!({ "id": v.id, "name": v.name, "state": state, "people": app.people.assigned_to(&v.id).len() });
+            match answers.get(&v.id) {
+                Some(Ok(body)) => {
+                    if let Ok(status) = serde_json::from_str::<serde_json::Value>(body) {
+                        if let (Some(r), Some(f)) = (row.as_object_mut(), fleet_summary(&status).as_object()) {
+                            r.extend(f.clone());
+                        }
+                    }
+                }
+                Some(Err(_)) => row["error"] = serde_json::json!("did not answer"),
+                None => {}
+            }
+            row
+        })
+        .collect();
+    let body = format!("{}\n", serde_json::json!({ "servers": servers, "people": app.people.list().len() }));
+    app.admin_cache.lock().unwrap().insert("fleet@".to_string(), (now, body.clone()));
+    json(StatusCode::OK, body)
 }
 
 /// Read-only data for the administrators' pages: the helper's lists and status. Whether the account is an administrator is asked of the helper on
@@ -1448,6 +1591,7 @@ fn remote_stream(app: &Arc<App>, ip: IpAddr, signed: Signed, server: &str, ws: W
     };
     let Some((token, agent)) = app.relays.expect(server) else { return text(StatusCode::SERVICE_UNAVAILABLE, "too many desktops are opening, try again\n") };
     info!(%ip, account = me.name, server, "remote stream requested");
+    app.audit.record("stream.open", "ok", &me.name, &ip.to_string(), server, "");
     let (app, server) = (app.clone(), server.to_string());
     ws.max_message_size(crate::stream::MAX_CLIPBOARD_FROM_BROWSER).max_frame_size(crate::stream::MAX_CLIPBOARD_FROM_BROWSER).on_upgrade(move |socket| crate::stream::run_remote(socket, ip, me.name, server, token, agent, app, guard))
 }

@@ -159,6 +159,13 @@ async fn post_json(portal: &str, pin: Option<&str>, path: &str, body: &str) -> R
 }
 
 fn load_config() -> Result<Config> {
+    use std::os::unix::fs::PermissionsExt as _;
+    // The key is a secret: a file that others can read is refused, not used.
+    if let Ok(m) = std::fs::metadata(CONFIG) {
+        if m.permissions().mode() & 0o077 != 0 {
+            bail!("{CONFIG} can be read by others: run `chmod 600 {CONFIG}`");
+        }
+    }
     let text = std::fs::read_to_string(CONFIG).with_context(|| format!("cannot read {CONFIG} (run `waydesk-agent enrol` first, as root)"))?;
     serde_json::from_str(&text).with_context(|| format!("{CONFIG} is not valid"))
 }
@@ -190,6 +197,28 @@ async fn enrol(portal: &str, code: &str, pin: Option<String>) -> Result<()> {
     std::fs::create_dir_all("/etc/waydesk")?;
     save_config(&cfg, Path::new(CONFIG))?;
     println!("enrolled as {server}; start the link with: systemctl enable --now waydesk-agent");
+    Ok(())
+}
+
+// ---- accounts the portal manages ----
+
+/// The accounts this agent made at the portal's request, one name per line. The portal can set the password of, and open a desktop as, only these: an
+/// account that was on the server before (a person who has their own login) is never taken over, even by a portal that asks.
+const MANAGED: &str = "/var/lib/waydesk-agent/managed";
+
+fn managed_contains(path: &str, name: &str) -> bool {
+    std::fs::read_to_string(path).is_ok_and(|t| t.lines().any(|l| l == name))
+}
+
+fn managed_add(path: &str, name: &str) -> Result<()> {
+    if managed_contains(path, name) {
+        return Ok(());
+    }
+    if let Some(dir) = Path::new(path).parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let mut f = std::fs::OpenOptions::new().append(true).create(true).mode(0o600).open(path)?;
+    writeln!(f, "{name}")?;
     Ok(())
 }
 
@@ -243,7 +272,17 @@ fn run_cli(args: &[&str]) -> Result<String> {
 
 /// The runner's one-line answer for one action, asked on behalf of `actor` (an account of the portal's machine) from `source`.
 fn run_action(actor: &str, source: &str, action: &Value) -> Result<String> {
-    adminaction::AdminAction::from_json(action).map_err(|e| anyhow::anyhow!(e))?;
+    run_action_with(actor, source, action, MANAGED)
+}
+
+fn run_action_with(actor: &str, source: &str, action: &Value, managed: &str) -> Result<String> {
+    let parsed = adminaction::AdminAction::from_json(action).map_err(|e| anyhow::anyhow!(e))?;
+    // A chosen password only for an account this agent made for the portal.
+    if let adminaction::AdminAction::UserSetPassword { name, .. } = &parsed {
+        if !managed_contains(managed, name) {
+            bail!("that account was not made by the portal, so the portal may not set its password");
+        }
+    }
     let mut sock = std::os::unix::net::UnixStream::connect(RUNNER_SOCKET).with_context(|| format!("cannot reach {RUNNER_SOCKET}"))?;
     sock.set_read_timeout(Some(Duration::from_secs(100)))?;
     sock.set_write_timeout(Some(Duration::from_secs(10)))?;
@@ -252,12 +291,46 @@ fn run_action(actor: &str, source: &str, action: &Value) -> Result<String> {
     sock.shutdown(std::net::Shutdown::Write)?;
     let mut answer = String::new();
     std::io::BufReader::new(sock).take(link::MAX_ANSWER as u64).read_line(&mut answer)?;
-    serde_json::from_str::<Value>(answer.trim()).context("the runner's answer is not JSON")?;
+    let v = serde_json::from_str::<Value>(answer.trim()).context("the runner's answer is not JSON")?;
+    // An account made now is one the portal manages from here on.
+    if let (adminaction::AdminAction::UserAdd { name }, true) = (&parsed, v["ok"] == true) {
+        if let Err(e) = managed_add(managed, name) {
+            eprintln!("waydesk-agent: could not record that {name} was made for the portal: {e}");
+        }
+    }
     Ok(answer.trim().to_string())
+}
+
+/// The audit log of this server for the portal's Audit page: the filters are checked here (the same rules as `waydesk-admin audit`), the command is
+/// run with them as separate arguments, and its lines come back as one JSON list, newest first.
+fn audit_list(q: &Value) -> Result<String, String> {
+    let text = |k: &str| q.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+    let (since, user, event, outcome) = (text("since"), text("user"), text("event"), text("outcome"));
+    let limit = q.get("limit").and_then(Value::as_u64).unwrap_or(0);
+    let since_ok = since.is_empty()
+        || (since.len() <= 4 && since.len() >= 2 && since.ends_with(['m', 'h', 'd', 'w']) && since[..since.len() - 1].chars().all(|c| c.is_ascii_digit()))
+        || (since.len() == 10 && since.chars().enumerate().all(|(i, c)| if i == 4 || i == 7 { c == '-' } else { c.is_ascii_digit() }));
+    if !since_ok || (!user.is_empty() && !adminaction::valid_name(&user)) || (!event.is_empty() && (event.len() > 32 || !event.chars().all(|c| c.is_ascii_lowercase() || c == '.'))) || !matches!(outcome.as_str(), "" | "ok" | "fail" | "refused") || limit == 0 || limit > 500 {
+        return Err("that is not a query this agent runs".into());
+    }
+    let limit = limit.to_string();
+    let mut args = vec!["audit", "--json", "--since", if since.is_empty() { "7d" } else { &since }, "--limit", &limit];
+    for (flag, value) in [("--user", &user), ("--event", &event), ("--outcome", &outcome)] {
+        if !value.is_empty() {
+            args.extend([flag, value.as_str()]);
+        }
+    }
+    let out = run_cli(&args).map_err(|e| format!("{e:#}"))?;
+    let mut rows: Vec<Value> = out.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()).filter(Value::is_object).collect();
+    rows.reverse();
+    Ok(Value::Array(rows).to_string())
 }
 
 /// What one request from the portal gets: the JSON text, or why not.
 fn handle(req: &Value) -> Result<String, String> {
+    if req.get("kind").and_then(Value::as_str) == Some("audit") {
+        return audit_list(req.get("query").unwrap_or(&Value::Null));
+    }
     if let Some(kind) = req.get("kind").and_then(Value::as_str) {
         let (args, is_json) = read_args(kind).ok_or("not a request this agent answers")?;
         let out = run_cli(args).map_err(|e| format!("{e:#}"))?;
@@ -371,6 +444,10 @@ async fn open_desktop(cfg: Arc<Config>, open: Value, id: u64, out: tokio::sync::
         let _ = out.send(answer(false, "not a request this agent answers")).await;
         return;
     };
+    if !managed_contains(MANAGED, account) {
+        let _ = out.send(answer(false, "that account was not made by the portal, so the portal may not open a desktop as it")).await;
+        return;
+    }
     let Ok(permit) = slots.try_acquire_owned() else {
         let _ = out.send(answer(false, "this server has too many desktops open through the portal")).await;
         return;
@@ -521,6 +598,10 @@ mod tests {
             assert!(read_args(bad).is_none(), "{bad}");
         }
         assert!(handle(&json!({"kind":"rm"})).is_err());
+        // The audit filters are the same rules as the command's: nothing else reaches its command line.
+        for bad in [json!({"since":"yesterday","limit":10}), json!({"user":"A b","limit":10}), json!({"event":"x;y","limit":10}), json!({"outcome":"maybe","limit":10}), json!({"limit":0}), json!({"limit":501}), json!({"user":"--limit","limit":5})] {
+            assert!(audit_list(&bad).is_err(), "{bad}");
+        }
         assert!(handle(&json!({"nothing":1})).is_err());
     }
 
@@ -533,6 +614,27 @@ mod tests {
         // An action outside the closed list is refused here, before the runner is even asked.
         assert!(run_action("boss", "1.2.3.4", &json!({"action":"user_remove","name":"ana"})).is_err());
         assert!(run_action("boss", "1.2.3.4", &json!({"action":"user_enable","name":"Not Valid"})).is_err());
+    }
+
+    #[test]
+    fn a_chosen_password_is_only_for_an_account_the_agent_made_and_the_list_is_kept() {
+        let dir = std::env::temp_dir().join(format!("wd-agent-managed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("managed").to_string_lossy().into_owned();
+        let setpw = json!({"action":"user_setpw","name":"alice","password":"a long enough password"});
+        // alice was on the server before the portal: refused before the runner is even asked.
+        let why = run_action_with("boss", "1.2.3.4", &setpw, &path).unwrap_err().to_string();
+        assert!(why.contains("not made by the portal"), "{why}");
+        managed_add(&path, "alice").unwrap();
+        managed_add(&path, "alice").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "alice\n");
+        assert!(managed_contains(&path, "alice") && !managed_contains(&path, "ali") && !managed_contains(&path, "bob"));
+        // Now it gets as far as the runner (which is not here): the refusal is about the socket, not about the account.
+        let why = run_action_with("boss", "1.2.3.4", &setpw, &path).unwrap_err().to_string();
+        assert!(why.contains("cannot reach"), "{why}");
+        use std::os::unix::fs::PermissionsExt as _;
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

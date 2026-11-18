@@ -3,6 +3,7 @@
 //! Safe as shipped: it listens on this machine only (`127.0.0.1:8443`), so an SSH tunnel reaches it, and it starts sessions only for addresses on
 //! its list, within rate limits (`limits.rs`). It has no second factor yet: the login is the account's password, checked by the daemon, as with RDP.
 
+mod audit;
 mod bridge;
 mod fleet;
 mod link;

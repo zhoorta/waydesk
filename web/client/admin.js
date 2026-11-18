@@ -13,6 +13,8 @@ const sessionSince = (s) => (s ? s.replace(/^\w+ /, '').replace(/ [A-Z]{2,5}$/, 
 let server = '';
 // A portal account has nothing on the portal's own machine: the pages are about a server, never "this machine".
 let portalOnly = false;
+// Whose audit log the page shows (null: not chosen yet).
+let auditSource = null;
 try { server = sessionStorage.getItem('wd-server') || ''; } catch { /* no storage: the portal's own machine */ }
 const pick = (id) => { server = id; try { sessionStorage.setItem('wd-server', id); } catch { /* fine */ } };
 const q = () => (server ? '?server=' + encodeURIComponent(server) : '');
@@ -196,7 +198,16 @@ function personServers(p, servers) {
     cell(button('Take away', async () => {
       d.close();
       if (!(await confirmBox('Take ' + nameOf(a.server) + ' from ' + p.name + '?', 'Their account on that server is switched off (not deleted). Their running session ends.', 'Take away', true))) return;
-      personDo({ action: 'unassign', name: p.name, server: a.server }, nameOf(a.server) + ' was taken from ' + p.name + '.');
+      try {
+        await peopleAct({ action: 'unassign', name: p.name, server: a.server });
+        ctx.flash(nameOf(a.server) + ' was taken from ' + p.name + '.', 'ok');
+      } catch (e) {
+        // A server that cannot be reached (gone for good) must not keep the assignment forever: the administrator may drop it without the server.
+        if (await confirmBox('Drop the assignment anyway?', e.message + ' Dropping it leaves the account on that server as it is.', 'Drop it', true)) {
+          try { await peopleAct({ action: 'unassign', name: p.name, server: a.server, force: true }); ctx.flash('The assignment was dropped.', 'ok'); } catch (x) { ctx.flash(x.message, 'bad'); }
+        }
+      }
+      ctx.reload();
     }, 'sm danger'), 'n'))))) : el('p', { class: 'muted' }, 'No server yet.');
   const server = el('select', { name: 'server' }, servers.map((v) => el('option', { value: v.id }, v.name + (v.online ? '' : ' (offline)'))));
   const select = (label, name, options) => el('label', {}, label, el('select', { name }, options.map(([v, t]) => el('option', { value: v }, t))));
@@ -330,6 +341,31 @@ const views = {
     ];
   },
 
+  async fleet() {
+    const r = await get('fleet', true);
+    const list = r.servers || [];
+    const online = list.filter((v) => v.state === 'online');
+    const sessions = list.reduce((n, v) => n + (v.sessions || 0), 0);
+    const tone = { online: 'ok', offline: 'warn', waiting: '', expired: 'warn', revoked: 'bad' };
+    const rows = list.map((v) => {
+      const mem = v.mem_percent, cpu = v.cpu_percent;
+      return el('tr', {},
+        cell(el('b', {}, v.name)),
+        cell(chip(v.error ? 'not answering' : v.state, v.error ? 'warn' : (tone[v.state] || ''))),
+        cell(v.sessions != null ? v.sessions + (v.max_sessions ? ' of ' + v.max_sessions : '') : '-', 'n mono'),
+        cell(mem != null ? [meter(mem, mem > 80), ' ' + Math.round(mem) + '%'] : '-', 'n'),
+        cell(cpu != null ? Math.round(cpu) + '%' : '-', 'n mono'),
+        cell(v.warnings ? chip(v.warnings + (v.warnings === 1 ? ' warning' : ' warnings'), 'warn') : el('span', { class: 'dim' }, '-')),
+        cell(String(v.people || 0), 'n mono'),
+        cell(v.state === 'online' ? button('Details', () => { pick(v.id); location.hash = '#overview'; }, 'sm') : null, 'n'));
+    });
+    return [
+      el('div', { class: 'head' }, el('h1', {}, 'Fleet'), el('span', { class: 'sp' }), el('span', { class: 'muted small' }, 'refreshes every 10 s')),
+      el('div', { class: 'tiles' }, tile('Servers', online.length, 'of ' + list.length + ' online', list.length ? (online.length / list.length) * 100 : null, list.length > 0 && online.length < list.length), tile('Sessions', sessions, 'running now', null), tile('People', r.people || 0, 'in the portal', null)),
+      win('servers', table(['Server', 'State', '>Sessions', 'Memory', '>CPU', 'Attention', '>People', ''], rows, 'No server yet. Add one on the Servers page.')),
+    ];
+  },
+
   async users() {
     const list = await get('users');
     const holder = el('div', {});
@@ -359,8 +395,13 @@ const views = {
     const holder = el('div', {});
     const field = (label, control) => el('label', {}, label, control);
     const sel = (name, options) => el('select', { name }, options.map(([v, t]) => el('option', { value: v }, t)));
+    // Whose log: this machine's (host administrators only), the portal's own, or a server's (asked of its agent).
+    let servers = [];
+    try { servers = (await get('servers', true)).servers.filter((v) => v.state === 'online' || v.state === 'offline'); } catch { /* only the portal's own then */ }
+    const source = sel('source', [].concat(portalOnly ? [] : [['', 'This machine']], [['portal', 'The portal itself']], servers.map((v) => [v.id, v.name + (v.state === 'online' ? '' : ' (offline)')])));
+    source.value = auditSource !== null && [...source.options].some((o) => o.value === auditSource) ? auditSource : (portalOnly ? 'portal' : '');
     const user = el('input', { name: 'user', placeholder: 'any', autocomplete: 'off', spellcheck: 'false', 'aria-label': 'Account' });
-    const kind = sel('event', [['', 'all'], ['login', 'sign-ins'], ['session', 'sessions'], ['connection', 'connections'], ['admin', 'changes (admin)'], ['gpu', 'graphics'], ['audit', 'the log itself']]);
+    const kind = sel('event', [['', 'all'], ['login', 'sign-ins'], ['session', 'sessions'], ['connection', 'connections'], ['admin', 'changes (admin)'], ['server', 'servers (portal)'], ['account', 'accounts (portal)'], ['stream', 'desktops (portal)'], ['gpu', 'graphics'], ['audit', 'the log itself']]);
     const outcome = sel('outcome', [['', 'any'], ['ok', 'ok'], ['fail', 'failed'], ['refused', 'refused']]);
     const since = sel('since', [['1h', 'last hour'], ['24h', 'last 24 hours'], ['7d', 'last 7 days'], ['4w', 'last 4 weeks']]);
     since.value = '24h';
@@ -389,6 +430,8 @@ const views = {
       }), 'No events match.')));
     const load = async () => {
       const q = new URLSearchParams({ since: since.value, limit: limit.value });
+      auditSource = source.value;
+      if (source.value) q.set('source', source.value);
       for (const [k, v] of [['user', user.value.trim()], ['event', kind.value], ['outcome', outcome.value]]) if (v) q.set(k, v);
       holder.replaceChildren(el('p', { class: 'muted' }, 'Loading\u2026'));
       try {
@@ -404,10 +447,10 @@ const views = {
         holder.replaceChildren(el('p', { class: 'bad' }, e.message));
       }
     };
-    const form = el('form', { class: 'row' }, field('Account', user), field('Event', kind), field('Outcome', outcome), field('Time', since), field('Show', limit), button('Search', () => form.requestSubmit(), 'primary'), button('Export CSV', () => csv()));
+    const form = el('form', { class: 'row' }, field('Log of', source), field('Account', user), field('Event', kind), field('Outcome', outcome), field('Time', since), field('Show', limit), button('Search', () => form.requestSubmit(), 'primary'), button('Export CSV', () => csv()));
     form.addEventListener('submit', (e) => { e.preventDefault(); load(); });
     await load();
-    return [el('div', { class: 'head' }, el('h1', {}, 'Audit'), el('span', { class: 'sp' }), el('span', { class: 'muted small' }, 'read only \u00b7 same records as ', el('code', {}, 'waydesk-admin audit'))), win('filter', form), holder];
+    return [el('div', { class: 'head' }, el('h1', {}, 'Audit'), el('span', { class: 'sp' }), el('span', { class: 'muted small' }, 'read only \u00b7 a server\u2019s records are those of ', el('code', {}, 'waydesk-admin audit'))), win('filter', form), holder];
   },
 
   async settings() {

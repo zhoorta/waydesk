@@ -1407,3 +1407,100 @@ async fn a_relay_needs_the_servers_key_and_a_live_token_for_that_server_and_work
     assert!(tokio::time::timeout(std::time::Duration::from_secs(2), waiting).await.unwrap().is_ok());
     assert!(dial(keys[0].0.clone(), keys[0].1.clone(), token).await, "once");
 }
+
+#[tokio::test]
+async fn the_portals_own_audit_log_and_a_servers_log_are_for_administrators_and_hold_no_secrets() {
+    let env = start("auditlog", Opts::default()).await;
+    let boss_pw = env.app.people.add("pboss", "", true, 0).unwrap();
+    let ana_pw = env.app.people.add("pana", "", false, 0).unwrap();
+    let boss = env.sign_in("pboss", &boss_pw, "").await.1.unwrap();
+    let ana = env.sign_in("pana", &ana_pw, "").await.1.unwrap();
+    assert_eq!(env.sign_in("pana", "a wrong password", "").await.0, 401);
+    let origin = env.origin();
+    let h = [("Cookie", boss.cookie.as_str()), ("Origin", origin.as_str()), ("X-CSRF-Token", boss.csrf.as_str())];
+    let (_, added) = env.send("POST", "/api/admin/people", &h, r#"{"action":"add","name":"pnew"}"#).await;
+    let first_password = {
+        let i = added.find("\"password\":\"").unwrap() + 12;
+        added[i..].split('"').next().unwrap().to_string()
+    };
+    let (_, srv) = env.send("POST", "/api/admin/servers", &h, r#"{"action":"add","name":"Far"}"#).await;
+    let at = |text: &str, name: &str| {
+        let i = text.find(&format!("\"{name}\":\"")).unwrap() + name.len() + 4;
+        text[i..].split('"').next().unwrap().to_string()
+    };
+    let (sid, code) = (at(&srv, "id"), at(&srv, "code"));
+    let (_, enrolled) = env.send("POST", "/api/enrol", &[], &format!("{{\"code\":\"{code}\"}}")).await;
+    let key = at(&enrolled, "key");
+    assert_eq!(env.send("POST", "/api/enrol", &[], "{\"code\":\"WRONGWRONG\"}").await.0, 403);
+
+    // The portal's own log: sign-ins (and the refusal), changes, enrolments; no password, code or key anywhere in it.
+    let (status, log) = env.send("GET", "/api/admin/audit?source=portal&since=1h", &[("Cookie", &boss.cookie)], "").await;
+    assert_eq!(status, 200, "{log}");
+    for expected in ["\"event\":\"login\"", "\"outcome\":\"refused\"", "admin.people.add", "admin.server.add", "server.enrolled", "\"actor\":\"pboss\""] {
+        assert!(log.contains(expected), "{expected} in {log}");
+    }
+    for secret in [boss_pw.as_str(), ana_pw.as_str(), first_password.as_str(), code.as_str(), key.as_str(), "a wrong password"] {
+        assert!(!log.contains(secret), "a secret in the log: {secret}");
+    }
+    let (_, filtered) = env.send("GET", "/api/admin/audit?source=portal&since=1h&event=admin.server", &[("Cookie", &boss.cookie)], "").await;
+    assert!(filtered.contains("admin.server.add") && !filtered.contains("admin.people.add"), "{filtered}");
+    // Only administrators; bad sources and filters are refused before anything is asked.
+    assert_eq!(env.send("GET", "/api/admin/audit?source=portal", &[("Cookie", &ana.cookie)], "").await.0, 403);
+    assert_eq!(env.send("GET", "/api/admin/audit?source=portal", &[], "").await.0, 401);
+    assert_eq!(env.send("GET", "/api/admin/audit?source=../x", &[("Cookie", &boss.cookie)], "").await.0, 400);
+    assert_eq!(env.send("GET", "/api/admin/audit?source=portal&event=x;y", &[("Cookie", &boss.cookie)], "").await.0, 400);
+    assert_eq!(env.send("GET", "/api/admin/audit", &[("Cookie", &boss.cookie)], "").await.0, 409, "a portal account has no log on the portal's machine");
+
+    // A server's log is asked of its agent with the filters.
+    let seen = agent(&env, &sid, &key).await.expect("link");
+    let (status, body) = env.send("GET", &format!("/api/admin/audit?source={sid}&since=2h&user=pana&limit=50"), &[("Cookie", &boss.cookie)], "").await;
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains("remote-ana"));
+    let asked = seen.lock().unwrap().last().cloned().unwrap();
+    assert_eq!((asked["kind"].as_str(), asked["query"]["user"].as_str(), asked["query"]["limit"].as_u64()), (Some("audit"), Some("pana"), Some(50)));
+    assert_eq!(env.send("GET", &format!("/api/admin/audit?source={sid}"), &[("Cookie", &ana.cookie)], "").await.0, 403);
+
+    // The fleet page: every server, who is assigned, and whether it answered.
+    let (status, fleet) = env.send("GET", "/api/admin/fleet", &[("Cookie", &boss.cookie)], "").await;
+    assert_eq!(status, 200, "{fleet}");
+    assert!(fleet.contains("\"state\":\"online\"") && fleet.contains("Far") && fleet.contains("\"people\":3"), "{fleet}");
+    assert_eq!(env.send("GET", "/api/admin/fleet", &[("Cookie", &ana.cookie)], "").await.0, 403);
+}
+
+#[test]
+fn the_fleet_summary_reads_what_the_status_has_and_nothing_else() {
+    let status = serde_json::json!({ "machine": { "mem_total_mb": 8000, "mem_available_mb": 2000, "cpu_percent": 12.5 }, "admission": { "sessions": 3, "max_active_users": 10, "open": true }, "warnings": ["a", "b"] });
+    let s = crate::web::fleet_summary(&status);
+    assert_eq!((s["sessions"].as_u64(), s["max_sessions"].as_u64(), s["mem_percent"].as_f64(), s["warnings"].as_u64(), s["open"].as_bool()), (Some(3), Some(10), Some(75.0), Some(2), Some(true)));
+    let nothing = crate::web::fleet_summary(&serde_json::json!([1, 2]));
+    assert_eq!((nothing["sessions"].as_u64(), nothing["mem_percent"].is_null()), (Some(0), true));
+}
+
+#[tokio::test]
+async fn a_server_with_people_is_not_removed_and_a_gone_server_can_be_dropped_by_force() {
+    let env = start("gone", Opts::default()).await;
+    let boss_pw = env.app.people.add("pboss", "", true, 0).unwrap();
+    env.app.people.add("pana", "", false, 0).unwrap();
+    let boss = env.sign_in("pboss", &boss_pw, "").await.1.unwrap();
+    let origin = env.origin();
+    let h = [("Cookie", boss.cookie.as_str()), ("Origin", origin.as_str()), ("X-CSRF-Token", boss.csrf.as_str())];
+    let (_, added) = env.send("POST", "/api/admin/servers", &h, r#"{"action":"add","name":"Far"}"#).await;
+    let sid = {
+        let i = added.find("\"id\":\"").unwrap() + 6;
+        added[i..].split('"').next().unwrap().to_string()
+    };
+    env.app.people.assign("pana", crate::people::Assignment { server: sid.clone(), desktop: None, gpu: None, memory: None }).unwrap();
+    let (status, body) = env.send("POST", "/api/admin/servers", &h, &format!(r#"{{"action":"remove","id":"{sid}"}}"#)).await;
+    assert_eq!(status, 400, "{body}");
+    assert!(body.contains("pana") && body.contains("take them away"), "{body}");
+    // The server is offline: taking the person away fails, with the reason, and the assignment stays...
+    let unassign = format!(r#"{{"action":"unassign","name":"pana","server":"{sid}"}}"#);
+    let (status, body) = env.send("POST", "/api/admin/people", &h, &unassign).await;
+    assert_eq!(status, 400, "{body}");
+    assert_eq!(env.app.people.get("pana").unwrap().servers.len(), 1);
+    // ...unless the administrator says the server is gone for good.
+    let (status, _) = env.send("POST", "/api/admin/people", &h, &format!(r#"{{"action":"unassign","name":"pana","server":"{sid}","force":true}}"#)).await;
+    assert_eq!(status, 200);
+    assert!(env.app.people.get("pana").unwrap().servers.is_empty());
+    assert_eq!(env.send("POST", "/api/admin/servers", &h, &format!(r#"{{"action":"remove","id":"{sid}"}}"#)).await.0, 200);
+}

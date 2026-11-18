@@ -16,6 +16,9 @@ RestartSec=5
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectHome=yes
+# The accounts it made for the portal (the portal may set the password of, and open a desktop as, only these).
+StateDirectory=waydesk-agent
+StateDirectoryMode=0700
 ProtectKernelModules=yes
 ProtectControlGroups=yes
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX

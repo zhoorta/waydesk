@@ -217,3 +217,63 @@ login path, the helper and the units again. Nothing here changes the stated depl
 
 - **Connections that have not logged in yet are limited per source address** (10; loopback exempt, `src/preauth.rs`). Before, one address could hold all 64 slots for the 30 s login window and keep everyone else out. Two unit tests (one address cannot use every slot, others are unaffected; slots come back once, loopback is exempt); not tried with a live flood.
 - **`config check` runs everything of the account in a session of its own** (`setsid --wait` before `timeout` and `runuser`, `run_as_command` in `waydesk-admin`), so it has no controlling terminal and cannot type into the administrator's shell with TIOCSTI. Checked in a container with a pseudo-terminal: a plain child reaches `/dev/tty`, the same child under `setsid --wait` does not; a unit test fixes the order of the command line.
+
+## Portal stage 3: servers, agents, people (2026-11-18)
+
+Same author and same limits as above: the code's author with an AI assistant, reading the new code and testing what could be tested; **not independent, not an audit.**
+Scope: everything stage 3 added (`docs/PORTAL-DESIGN.md`, "Stage 3"): the server registry and join codes (`web/src/fleet.rs`), the agent and its link
+(`web/src/agent.rs`, `web/src/link.rs`, `/agent`), the portal's own people (`web/src/people.rs`), the desktop relay (`web/src/relay.rs`, `/relay`, the helper's
+`IssueFor`), the closed action list's new `user_setpw`, and the portal's own audit log (`web/src/audit.rs`).
+
+**New trust boundary.** The portal is the control plane and is trusted by every server that enrols with it: a compromised portal can do what the closed list
+allows on every server (make and switch off accounts the agent made, set their passwords, end sessions, open a desktop as them, read lists and audit),
+and nothing more. A compromised *server* can lie to the portal about its own lists, status and audit (shown as data, never as markup), refuse to answer, and
+read what the portal sends it (account names, the app password of people assigned to it); it cannot reach another server or the portal's people file. The
+network is hostile as before; `/api/enrol`, `/agent` and `/relay` are public (limited by `--allow-from` and by per-address rates), everything else needs a
+signed-in browser.
+
+### Controls and what checks them
+
+| Control | Where | Checked by |
+|---|---|---|
+| Join codes: 160 bit, once, one hour, only the hash kept; a code of another server stays unspent; enrolled servers are not re-enrolled by a code (revoke first) | `fleet.rs` | unit tests (once, expiry, replace, revoke), `servers_are_added_by_administrators_and_enrol_once_with_a_code` (e2e, and live on the test box) |
+| Server keys: 256 bit, only the hash kept, constant-time compare, file 0600, a revoked key stays dead, a failed save changes nothing | `fleet.rs` | unit tests; the file was read on the box: no secret in it |
+| Wrong codes: a global limit (20 a minute) and 10 a minute per address, one answer for every failure | `fleet.rs`, `web.rs` | unit test; e2e |
+| The agent pins the portal's certificate by SHA-256 (or uses the usual authorities); its signature is checked, so holding the file is not enough | `agent.rs` | wrong pin refused live; unit test of the pin format |
+| The link: hello with server id, key and version within 10 s; one link per server (a new one replaces the old); revoking ends it at once; frames 5 MiB at most; answers must be JSON; silence ends it | `web.rs`, `link.rs` | `link.rs` unit tests; `a_server_dials_in_and_the_portal_asks_it_for_lists_and_changes` |
+| An agent can only answer requests pending on its *own* link (the table is per link) | `link.rs` | `an_answer_with_another_number_or_not_an_answer_reaches_nobody` |
+| What an agent runs: five fixed read-only commands, the audit command with filters checked, and the closed action list checked twice (agent, runner) | `agent.rs`, `adminaction.rs`, `serve-request` | unit tests of every refusal |
+| `user_setpw` and desktops only for accounts the agent itself made for the portal (`/var/lib/waydesk-agent/managed`); an account that was already on the server is never taken over | `agent.rs`, `people_do` | `a_chosen_password_is_only_for_an_account_the_agent_made...`, `an_account_that_was_on_the_server_already_is_never_taken_over`; live: `daemon` refused |
+| The chosen password is on standard input only, never in the logged form of the action, and the root helper refuses the action | `adminaction.rs`, `helper.rs`, runner | unit test; live: matches the account's yescrypt hash |
+| The runner's remote actor must satisfy the account-name rule; the audit line says `via: portal`, the name, the address and `actor_kind` | `serve-request`, `audit_emit` | live audit lines |
+| `IssueFor`: root peers only, nothing else for root, nothing but `IssueFor` for the daemon's account to mint tickets; the account passes `still_allowed`; audited | `proto.rs`, `helper.rs` | protocol round trip; live: ticket issued and redeemed, session started |
+| Desktop relay: token 128 bit, one use, 15 s, for one server, table of 64; the browser names only the server, the account is the cookie's; assigned + made by the portal + not switched off + online | `relay.rs`, `remote_stream` | `a_relay_needs_the_servers_key_and_a_live_token...`, `a_portal_person_opens_a_desktop_on_their_server...` (unassigned, not made, switched off, oversized message) |
+| People: argon2id (default cost), random salt, a decoy hash for unknown names, at most 4 hashes at once (waiting at most 5 s), a lockout per account and per address, a refusal takes `fail_delay` in all, a wrong password never spends a two-step code | `people.rs`, `portal_login` | unit and e2e tests; live sign-ins |
+| Portal people's two-step records are apart from the host accounts'; two-step stays optional (`--totp`) | `web.rs` | e2e |
+| Somebody always stays an administrator; nobody switches themselves off or removes themselves; a switched-off person's sign-ins end at once; admin rights are asked on every request | `people.rs`, `people_do`, `require_admin` | unit and e2e tests |
+| The portal's audit log: no secret ever reaches it (callers pass names and addresses), control characters are dropped, 200 characters a field, 0600, rotates at 10 MiB | `audit.rs` | `the_portals_own_audit_log...` greps the log for every password, code and key made in the test |
+| Everything a server sends is shown with `textContent`; numbers are numbers before they reach a style | `admin.js` | by construction, as for the host pages |
+
+### Found and fixed in this pass
+
+| # | Finding | Severity | Fix |
+|---|---|---|---|
+| 1 | **A portal that is compromised could set the password of, or open a desktop as, an account that the portal never made** (a real person's login on that server), because the closed list names accounts, not who made them. | High (new in stage 3) | The agent keeps the list of accounts it made at the portal's request and refuses `user_setpw` and desktops for any other; the portal also records where it made each account. |
+| 2 | **Password hashing could be queued without end** by many sign-ins (each waiting holds a task). | Medium (DoS) | A place among the four runs is waited for 5 s, then the portal says it is busy. |
+| 3 | **A refusal of a portal person's sign-in was slower than other refusals by the time of one hash**, so the time could say which names are portal people. | Low | A refusal takes `fail_delay` in all, hashing included. |
+| 4 | The agent used a key file whatever its mode. | Low | A key file that others can read is refused. |
+| 5 | A server could be removed while people were assigned, leaving assignments that could never be taken away; a server gone for good kept its people's assignments forever. | Robustness | Removing needs the people taken away first; taking a person away can be forced (the account on the server stays as it is). |
+| 6 | One audit line field is built from a name that came from outside, and a newline in it could forge a second line. | Medium (log forging) | Control characters are dropped from every field; the test tries `\r\n{"event":"forged"}`. |
+
+### Noted, not changed
+
+- **Enrolment can be held off for a minute by anyone who can reach the portal**: 20 wrong codes use the global limit. It stops enrolling, nothing else. A limit per address alone would be weaker against a spread attack.
+- **The agent runs as root** (it has to: the runner's socket is root's, and tickets come from the helper). It listens on nothing and runs only what is above; its unit is hardened (`NoNewPrivileges`, `PrivateTmp`, `ProtectHome`, address families).
+- **The audit log can be pushed out by noise**: sign-in refusals are limited per address, but a spread attack could fill 20 MiB and rotate real history away. Sending the lines on to syslog is the answer (stage 4).
+- **Servers' audit is read live, not collected**: a server that is offline has no audit on the portal's page; its own log is intact. Collecting is stage 4 if wanted.
+- **A portal person with the name of a host account** (`boss`) takes that name at the portal's sign-in; the host account can then no longer sign in *at the portal* (it still can over RDP). Portal administrators choose the names; the People page does not know the host's.
+- **The app password is the account's password on the server.** It is as strong as 80 random bits, shown once; whoever holds it can use RDP to that server. Making a new one replaces it everywhere the person is assigned and online.
+- **No rate limit on administrators' read pages** (they need a signed-in administrator); changes are limited to 30 a minute per address.
+- **Passwords are not wiped from memory** in the portal or the agent (as for the daemon).
+- **A stolen server key** lets its holder pretend to be that server to the portal (answer requests, receive the app password of its people) until the server is revoked. There is no second proof such as a certificate per server.
+- **Not reviewed by someone else**, not fuzzed (the link and relay parsers are JSON and length prefixes; the daemon's side is as before).
