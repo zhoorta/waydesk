@@ -514,10 +514,14 @@ fn serve(mut sock: UnixStream, cfg: &Config, policy: &PamPolicy, sessions: &Sess
                         proto::NOTE_TOTP_ENROLLED => "account.totp.enrolled",
                         proto::NOTE_TOTP_REMOVED => "account.totp.removed",
                         proto::NOTE_TOTP_REMOVED_BY_ADMIN => "admin.totp.removed",
+                        proto::NOTE_SERVER_ADDED => "admin.server.add",
+                        proto::NOTE_SERVER_CODE => "admin.server.code",
+                        proto::NOTE_SERVER_REVOKED => "admin.server.revoke",
+                        proto::NOTE_SERVER_REMOVED => "admin.server.remove",
                         _ => "",
                     };
-                    // Only the three known notes, about a name that can be one; the administrator's note only from an administrator.
-                    let by_admin = event == proto::NOTE_TOTP_REMOVED_BY_ADMIN;
+                    // Only the known notes, about a name that can be one; the administrators' notes only from an administrator.
+                    let by_admin = matches!(event, proto::NOTE_TOTP_REMOVED_BY_ADMIN | proto::NOTE_SERVER_ADDED | proto::NOTE_SERVER_CODE | proto::NOTE_SERVER_REVOKED | proto::NOTE_SERVER_REMOVED);
                     if name.is_empty() || (!target.is_empty() && !crate::adminaction::valid_name(&target)) || (by_admin && !crate::admininfo::is_admin(&user.groups)) {
                         reply(&mut sock, &HelperResp::Error { message: "not a note the helper writes".into() })
                     } else {

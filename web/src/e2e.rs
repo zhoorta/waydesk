@@ -993,3 +993,54 @@ async fn a_person_sets_up_and_turns_off_their_own_authenticator_only_with_a_vali
     assert!(!store.exists("ana"));
     assert_eq!(call("/api/account/totp/remove", &ana, true, r#"{"code":"123456"}"#.into()).await.0, 409, "nothing left to turn off");
 }
+
+#[tokio::test]
+async fn servers_are_added_by_administrators_and_enrol_once_with_a_code() {
+    let env = start("servers", Opts::default()).await;
+    let boss = env.browser("boss").await;
+    let ana = env.browser("ana").await;
+    let origin = env.origin();
+    let post = |b: &Browser, body: String| {
+        let h = vec![("Cookie", b.cookie.clone()), ("Origin", origin.clone()), ("X-CSRF-Token", b.csrf.clone())];
+        let env = &env;
+        async move {
+            let h: Vec<(&str, &str)> = h.iter().map(|(k, v)| (*k, v.as_str())).collect();
+            env.send("POST", "/api/admin/servers", &h, &body).await
+        }
+    };
+    let field = |text: &str, name: &str| -> String {
+        let at = text.find(&format!("\"{name}\":\"")).unwrap_or_else(|| panic!("{name} in {text}")) + name.len() + 4;
+        text[at..].split('"').next().unwrap().to_string()
+    };
+    // Only administrators, with origin and csrf.
+    assert_eq!(post(&ana, r#"{"action":"add","name":"Porto"}"#.into()).await.0, 403);
+    assert_eq!(env.send("POST", "/api/admin/servers", &[("Cookie", &boss.cookie), ("X-CSRF-Token", &boss.csrf)], r#"{"action":"add","name":"x"}"#).await.0, 403, "no origin");
+    assert_eq!(env.send("GET", "/api/admin/servers", &[("Cookie", &ana.cookie)], "").await.0, 403);
+    assert_eq!(env.send("GET", "/api/admin/servers", &[], "").await.0, 401);
+    // Bad input.
+    assert_eq!(post(&boss, r#"{"action":"add","name":"<b>"}"#.into()).await.0, 400);
+    assert_eq!(post(&boss, r#"{"action":"revoke","id":"../x"}"#.into()).await.0, 400);
+    assert_eq!(post(&boss, r#"{"action":"nope"}"#.into()).await.0, 400);
+    // Add, list: the list never shows the code.
+    let (status, body) = post(&boss, r#"{"action":"add","name":"Porto 1"}"#.into()).await;
+    assert_eq!(status, 200, "{body}");
+    let (id, code) = (field(&body, "id"), field(&body, "code"));
+    let (status, list) = env.send("GET", "/api/admin/servers", &[("Cookie", &boss.cookie)], "").await;
+    assert_eq!(status, 200);
+    assert!(list.contains("\"waiting\"") && list.contains("Porto 1") && !list.contains(&code), "{list}");
+    // The public endpoint: a wrong code is refused, the right one works once and returns the key.
+    let enrol = |code: String| {
+        let env = &env;
+        async move { env.send("POST", "/api/enrol", &[], &format!("{{\"code\":\"{code}\"}}")).await }
+    };
+    assert_eq!(enrol("WRONG".into()).await.0, 403);
+    let (status, body) = enrol(code.clone()).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(field(&body, "server"), id);
+    assert_eq!(field(&body, "key").len(), 64);
+    assert_eq!(enrol(code).await.0, 403, "a code works once");
+    // Revoke, then remove.
+    assert_eq!(post(&boss, format!("{{\"action\":\"remove\",\"id\":\"{id}\"}}")).await.0, 400, "an enrolled server is revoked first");
+    assert_eq!(post(&boss, format!("{{\"action\":\"revoke\",\"id\":\"{id}\"}}")).await.0, 200);
+    assert_eq!(post(&boss, format!("{{\"action\":\"remove\",\"id\":\"{id}\"}}")).await.0, 200);
+}

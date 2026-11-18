@@ -85,6 +85,10 @@ pub struct App {
     /// Authenticators being set up: the secret a browser session was shown, kept (in memory only) until the person types a valid code from it or
     /// the time is up. Keyed by the browser session, so one browser cannot confirm another's.
     pub pending_totp: std::sync::Mutex<std::collections::HashMap<String, PendingTotp>>,
+    /// The servers this portal controls (stage 3): `fleet.json` next to the authenticators.
+    pub fleet: crate::fleet::Fleet,
+    /// Servers enrolling with a join code, per address (the endpoint is public).
+    pub enrol_rate: RateLimiter,
 }
 
 pub struct PendingTotp {
@@ -109,6 +113,9 @@ impl App {
             admin_rate: RateLimiter::new(30, Duration::from_secs(60)),
             pw_rate: RateLimiter::new(5, Duration::from_secs(60)),
             pending_totp: Default::default(),
+            // A file that cannot be read stops the portal at start: starting with an empty list would hide the servers and the next save would overwrite them.
+            fleet: crate::fleet::Fleet::open(cfg.totp_dir.join("fleet.json")).expect("the fleet file could not be read"),
+            enrol_rate: RateLimiter::new(10, Duration::from_secs(60)),
             tokens: Tokens::new(Duration::from_secs(30)),
             token_rate: RateLimiter::new(cfg.rate_per_minute, Duration::from_secs(60)),
             ws_rate: RateLimiter::new(cfg.rate_per_minute.saturating_mul(3), Duration::from_secs(60)),
@@ -170,6 +177,8 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/api/account/password", post(change_password).layer(axum::extract::DefaultBodyLimit::max(2048)))
         .route("/api/admin/totp", post(admin_totp).layer(axum::extract::DefaultBodyLimit::max(1024)))
         .route("/api/admin/audit", get(admin_audit))
+        .route("/api/admin/servers", get(servers_list).post(servers_do).layer(axum::extract::DefaultBodyLimit::max(1024)))
+        .route("/api/enrol", post(enrol).layer(axum::extract::DefaultBodyLimit::max(512)))
         .route("/api/admin/{kind}", get(admin_page))
         .route("/api/logout", post(logout))
         .route("/api/session", post(session_token).layer(axum::extract::DefaultBodyLimit::max(4096)))
@@ -650,6 +659,116 @@ async fn admin_audit(State(app): State<Arc<App>>, Query(q): Query<AuditParams>, 
         Ok(Err(why)) if why.contains("only administrators") => text(StatusCode::FORBIDDEN, "administrators only\n"),
         Ok(Err(why)) if why.starts_with("helper: ") => json(StatusCode::BAD_REQUEST, format!("{}\n", serde_json::json!({ "ok": false, "error": &why["helper: ".len()..] }))),
         _ => text(StatusCode::BAD_GATEWAY, "the server could not be asked\n"),
+    }
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+/// The signed-in browser's account must administer the machine (asked of the helper on every request).
+async fn require_admin(app: &Arc<App>, id: &str, signed: &Signed) -> Result<String, Response> {
+    let Some(ticket) = app.portal.ticket(id) else { return Err(text(StatusCode::UNAUTHORIZED, "not signed in\n")) };
+    let (auth, account, source, t2) = (app.auth.clone(), signed.account.clone(), signed.ip.to_string(), ticket.clone());
+    match tokio::task::spawn_blocking(move || auth.is_admin(&t2, &account, &source)).await {
+        Ok(Ok(true)) => Ok(ticket),
+        Ok(Ok(false)) => Err(text(StatusCode::FORBIDDEN, "administrators only\n")),
+        _ => Err(text(StatusCode::BAD_GATEWAY, "the server could not be asked\n")),
+    }
+}
+
+async fn servers_list(State(app): State<Arc<App>>, headers: HeaderMap) -> Response {
+    let Some((id, signed)) = signed_in(&app, &headers) else { return text(StatusCode::UNAUTHORIZED, "not signed in\n") };
+    if let Err(r) = require_admin(&app, &id, &signed).await {
+        return r;
+    }
+    json(StatusCode::OK, format!("{}\n", serde_json::json!({ "servers": app.fleet.list(unix_now()), "portal": app.cfg.public_origin })))
+}
+
+#[derive(serde::Deserialize)]
+struct ServerRequest {
+    action: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    id: String,
+}
+
+/// An id the fleet could have made: `s-` and eight hex digits.
+fn valid_server_id(id: &str) -> bool {
+    id.len() == 10 && id.starts_with("s-") && id[2..].bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// Add a server (the answer carries its join code, once), make a new code, revoke a server's key, remove a server from the list.
+async fn servers_do(State(app): State<Arc<App>>, Extension(ClientAddr(peer)): Extension<ClientAddr>, Extension(PublicHost(host)): Extension<PublicHost>, headers: HeaderMap, body: axum::body::Bytes) -> Response {
+    let (id, signed) = match changing(&app, &headers, &host) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    if !app.admin_rate.hit(peer.ip(), Instant::now()) {
+        return text(StatusCode::TOO_MANY_REQUESTS, "too many changes, wait a minute\n");
+    }
+    let Ok(req) = serde_json::from_slice::<ServerRequest>(&body) else { return text(StatusCode::BAD_REQUEST, "bad request\n") };
+    let ticket = match require_admin(&app, &id, &signed).await {
+        Ok(t) => t,
+        Err(r) => return r,
+    };
+    let now = unix_now();
+    let fail = |why: String| json(StatusCode::BAD_REQUEST, format!("{}\n", serde_json::json!({ "ok": false, "error": why })));
+    let (event, target, extra) = match req.action.as_str() {
+        "add" => match app.fleet.add_server(req.name.trim(), now) {
+            Ok((sid, code)) => (crate::portal::NOTE_SERVER_ADDED, sid.clone(), serde_json::json!({ "id": sid, "code": code, "expires_in": crate::fleet::JOIN_TTL })),
+            Err(e) => return fail(format!("{e:#}")),
+        },
+        "code" | "revoke" | "remove" if !valid_server_id(&req.id) => return text(StatusCode::BAD_REQUEST, "bad request\n"),
+        "code" => match app.fleet.new_join(&req.id, now) {
+            Ok(code) => (crate::portal::NOTE_SERVER_CODE, req.id.clone(), serde_json::json!({ "id": req.id, "code": code, "expires_in": crate::fleet::JOIN_TTL })),
+            Err(e) => return fail(format!("{e:#}")),
+        },
+        "revoke" => match app.fleet.revoke(&req.id) {
+            Ok(()) => (crate::portal::NOTE_SERVER_REVOKED, req.id.clone(), serde_json::json!({})),
+            Err(e) => return fail(format!("{e:#}")),
+        },
+        "remove" => match app.fleet.remove(&req.id) {
+            Ok(()) => (crate::portal::NOTE_SERVER_REMOVED, req.id.clone(), serde_json::json!({})),
+            Err(e) => return fail(format!("{e:#}")),
+        },
+        _ => return text(StatusCode::BAD_REQUEST, "bad request\n"),
+    };
+    warn!(admin = signed.account, action = req.action, server = target, "an administrator changed the servers");
+    note(&app, ticket, signed.account.clone(), signed.ip.to_string(), event, target);
+    let mut out = extra;
+    out["ok"] = serde_json::json!(true);
+    json(StatusCode::OK, format!("{out}\n"))
+}
+
+#[derive(serde::Deserialize)]
+struct EnrolRequest {
+    code: String,
+}
+
+/// A server enrols: it shows a join code and gets its id and key (once). Public, so it is limited per address, and a wrong code gets the same
+/// answer whatever was wrong with it.
+async fn enrol(State(app): State<Arc<App>>, Extension(ClientAddr(peer)): Extension<ClientAddr>, body: axum::body::Bytes) -> Response {
+    let ip = peer.ip();
+    if !app.enrol_rate.hit(ip, Instant::now()) {
+        return text(StatusCode::TOO_MANY_REQUESTS, "too many attempts, wait a minute\n");
+    }
+    let Ok(req) = serde_json::from_slice::<EnrolRequest>(&body) else { return text(StatusCode::BAD_REQUEST, "bad request\n") };
+    if req.code.len() > 64 {
+        return text(StatusCode::BAD_REQUEST, "bad request\n");
+    }
+    match app.fleet.enrol(&req.code, unix_now()) {
+        Ok((server, key)) => {
+            warn!(%ip, server, "a server enrolled");
+            json(StatusCode::OK, format!("{}\n", serde_json::json!({ "server": server, "key": key })))
+        }
+        Err(crate::fleet::EnrolError::Busy) => text(StatusCode::TOO_MANY_REQUESTS, "too many attempts, wait a minute\n"),
+        Err(crate::fleet::EnrolError::BadCode) => {
+            warn!(%ip, "enrolment refused: wrong, used or expired code");
+            tokio::time::sleep(app.cfg.fail_delay).await;
+            text(StatusCode::FORBIDDEN, "code refused\n")
+        }
     }
 }
 

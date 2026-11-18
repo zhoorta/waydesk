@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 mod proto;
 use proto::{HelperReq, HelperResp};
 pub use proto::InfoKind;
-pub use proto::{NOTE_TOTP_ENROLLED, NOTE_TOTP_REMOVED, NOTE_TOTP_REMOVED_BY_ADMIN};
+pub use proto::{NOTE_SERVER_ADDED, NOTE_SERVER_CODE, NOTE_SERVER_REMOVED, NOTE_SERVER_REVOKED, NOTE_TOTP_ENROLLED, NOTE_TOTP_REMOVED, NOTE_TOTP_REMOVED_BY_ADMIN};
 
 /// The name of the cookie. `__Host-` makes the browser accept it only with `Secure`, `Path=/` and no `Domain`, so a subdomain or a plain-HTTP page
 /// cannot plant or overwrite it.

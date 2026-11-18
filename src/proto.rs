@@ -590,6 +590,12 @@ pub const NOTE_TOTP_ENROLLED: u8 = 1;
 pub const NOTE_TOTP_REMOVED: u8 = 2;
 /// An administrator took the authenticator of `target` away.
 pub const NOTE_TOTP_REMOVED_BY_ADMIN: u8 = 3;
+/// An administrator added a server to the portal (a join code was made), made a new code for one, revoked its key, or removed it from the list.
+/// `target` is the server's id. Only administrators may write these.
+pub const NOTE_SERVER_ADDED: u8 = 4;
+pub const NOTE_SERVER_CODE: u8 = 5;
+pub const NOTE_SERVER_REVOKED: u8 = 6;
+pub const NOTE_SERVER_REMOVED: u8 = 7;
 
 /// Why a new session was refused (`HelperResp::Refused`).
 pub const REFUSED_MEMORY: u8 = 1;

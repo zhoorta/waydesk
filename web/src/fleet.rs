@@ -145,6 +145,9 @@ impl Fleet {
 
     fn save(&self, data: &Data) -> Result<()> {
         let Some(path) = &self.path else { return Ok(()) };
+        if let Some(dir) = path.parent() {
+            fs::create_dir_all(dir)?;
+        }
         let tmp = path.with_extension("tmp");
         let text = serde_json::to_vec_pretty(data)?;
         let mut f = fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&tmp)?;
@@ -468,7 +471,7 @@ mod tests {
 
     #[test]
     fn a_failed_save_changes_nothing() {
-        let f = Fleet { path: Some(PathBuf::from("/nonexistent-dir/fleet.json")), inner: Mutex::new(Inner { data: Data::default(), fails: VecDeque::new() }) };
+        let f = Fleet { path: Some(PathBuf::from("/dev/null/fleet.json")), inner: Mutex::new(Inner { data: Data::default(), fails: VecDeque::new() }) };
         assert!(f.add_server("a", T).is_err());
         assert!(f.list(T).is_empty());
     }

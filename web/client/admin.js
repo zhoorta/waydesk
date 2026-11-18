@@ -114,6 +114,63 @@ async function endSession(name) {
   run({ action: 'session_end', name }, () => 'Ended the session of ' + name + '.');
 }
 
+// ---- servers ----
+async function serverAct(body) {
+  const r = await fetch('/api/admin/servers', { method: 'POST', cache: 'no-store', headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': ctx.csrf() }, body: JSON.stringify(body) });
+  if (r.status === 401) { ctx.signedOut(); throw new Error('Your sign-in ended.'); }
+  if (r.status === 403) throw new Error('Only administrators can do this.');
+  if (r.status === 429) throw new Error('Too many changes in a minute. Wait a little.');
+  let out = null;
+  try { out = await r.json(); } catch { /* handled below */ }
+  if (!out) throw new Error('The server could not do this (' + r.status + ').');
+  if (!out.ok) throw new Error(out.error || 'It did not work.');
+  return out;
+}
+
+// The join code is shown once, here; the portal keeps only its hash.
+function showCode(name, code, minutes) {
+  const box = el('code', { class: 'secret' }, code);
+  const copy = button('Copy', async () => { try { await navigator.clipboard.writeText(code); copy.textContent = 'Copied'; } catch { copy.textContent = 'Select and copy it'; } });
+  const d = modal('join code: ' + name, [el('p', {}, 'The code is shown once. It works once, for ' + minutes + ' minutes. The server shows it to this portal to enrol.'), box], [copy, button('Done', () => d.close(), 'primary')]);
+}
+
+function addServer() {
+  const name = el('input', { name: 'name', autocomplete: 'off', spellcheck: 'false', required: true, maxlength: 40, placeholder: 'Porto 1' });
+  const err = el('p', { class: 'bad', role: 'alert' });
+  const form = el('form', { class: 'form' }, el('label', {}, 'Name', name), el('p', { class: 'hint' }, 'Letters, digits, spaces, dots, dashes and underscores. It is only a label for people.'), err);
+  const d = modal('add server', form, [button('Cancel', () => d.close()), button('Make a join code', () => form.requestSubmit(), 'primary')]);
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    try {
+      const r = await serverAct({ action: 'add', name: name.value.trim() });
+      d.close();
+      ctx.reload();
+      showCode(name.value.trim(), r.code, Math.round(r.expires_in / 60));
+    } catch (x) { err.textContent = x.message; }
+  });
+  name.focus();
+}
+
+async function newCode(v) {
+  try {
+    const r = await serverAct({ action: 'code', id: v.id });
+    ctx.reload();
+    showCode(v.name, r.code, Math.round(r.expires_in / 60));
+  } catch (e) { ctx.flash(e.message, 'bad'); }
+}
+
+async function revokeServer(v) {
+  if (!(await confirmBox('Revoke ' + v.name + '?', 'Its key stops working at once and it cannot connect. People assigned to it lose it until it is enrolled again.', 'Revoke', true))) return;
+  try { await serverAct({ action: 'revoke', id: v.id }); ctx.flash(v.name + ' was revoked.', 'ok'); } catch (e) { ctx.flash(e.message, 'bad'); }
+  ctx.reload();
+}
+
+async function removeServer(v) {
+  if (!(await confirmBox('Remove ' + v.name + ' from the list?', 'Only the entry is deleted; nothing is changed on the server itself.', 'Remove', true))) return;
+  try { await serverAct({ action: 'remove', id: v.id }); ctx.flash(v.name + ' was removed.', 'ok'); } catch (e) { ctx.flash(e.message, 'bad'); }
+  ctx.reload();
+}
+
 function tile(label, value, unit, percent, warn) {
   return el('div', { class: 'tile' }, el('div', { class: 'k' }, label), el('div', { class: 'big' }, value, ' ', el('small', {}, unit)), percent == null ? null : meter(percent, warn));
 }
@@ -287,6 +344,29 @@ const views = {
           win('two-step sign-in', el('p', {}, el('b', {}, 'Policy: '), policy),
             enrolled.length ? table(['Account', ''], enrolled.map((n) => el('tr', {}, cell(el('b', {}, n)), cell(el('div', { class: 'acts' }, button('Remove', () => removeTotp(n), 'sm danger')), 'n'))), '') : el('p', { class: 'muted' }, 'No account has an authenticator set up.'),
             el('p', { class: 'hint' }, 'Remove one when somebody loses their phone. Setting one up is done on the server: ', el('code', {}, 'waydesk-web totp add ACCOUNT'), '.')))),
+    ];
+  },
+
+  async servers() {
+    const r = await get('servers');
+    const list = r.servers || [];
+    const tone = { online: 'ok', offline: 'warn', waiting: '', expired: 'warn', revoked: 'bad' };
+    const label = { online: 'online', offline: 'offline', waiting: 'waiting for the server', expired: 'code expired', revoked: 'revoked' };
+    const when = (t) => (t ? new Date(t * 1000).toLocaleString() : '-');
+    const rows = list.map((v) => el('tr', {},
+      cell(el('b', {}, v.name)),
+      cell(chip(label[v.state] || v.state, tone[v.state] || '')),
+      cell(when(v.enrolled), 'dim'),
+      cell(v.last_seen ? when(v.last_seen) : '-', 'dim'),
+      cell(el('div', { class: 'acts' },
+        v.state === 'waiting' || v.state === 'expired' ? button('New code', () => newCode(v), 'sm') : null,
+        v.state === 'online' || v.state === 'offline' ? button('Revoke', () => revokeServer(v), 'sm danger') : null,
+        v.state === 'revoked' ? button('New code', () => newCode(v), 'sm') : null,
+        v.state !== 'online' && v.state !== 'offline' ? button('Remove', () => removeServer(v), 'sm danger') : null), 'n')));
+    return [
+      el('div', { class: 'head' }, el('h1', {}, 'Servers'), el('span', { class: 'sp' }), button('Add server', addServer, 'primary')),
+      win('servers \u00b7 ' + list.length, table(['Name', 'State', 'Enrolled', 'Last seen', ''], rows, 'No server yet. Add one to get a join code.'),
+        el('p', { class: 'hint' }, 'A join code works once and for one hour. The server keeps its own key after it enrols; revoking takes that key away.')),
     ];
   },
 
