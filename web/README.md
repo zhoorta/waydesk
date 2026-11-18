@@ -112,6 +112,7 @@ What it does and does not do:
 - **Guessing is limited**: 5 wrong codes from one address for one account, or 20 for one account from anywhere, within ten minutes, and the right code is
   refused too until it passes. (This also means that someone can lock a known account out for ten minutes; the token limits per address keep that slow.)
 - **The answer is the same** whatever was wrong, so it does not say which accounts exist or have an authenticator.
+- **Where the records are:** `/var/lib/waydesk-web` (the unit's `StateDirectory`; `--totp-dir` changes it), the one place the portal may write: it records each code it accepts so that a code works once. `waydesk-web totp add`, run as root, gives the file to the owner of that directory. Records made by an earlier version in `/etc/waydesk/totp` have to be moved there (`sudo mv /etc/waydesk/totp/*.totp /var/lib/waydesk-web/ && sudo chown waydesk: /var/lib/waydesk-web/*.totp`).
 - **Recovery codes** are kept as hashes and shown once. An administrator can always set an account up again with `totp add`.
 - **It protects this way in, not the RDP port.** An account with an authenticator can still log in over RDP (3389) with the password alone, for anyone who
   can reach that port. Keep 3389 on loopback, or behind the VPN or the firewall.

@@ -32,7 +32,7 @@ use web::{App, ClientAddr, Config};
 const USAGE: &str = "usage: waydesk-web [--bind ADDR:PORT] [--cert FILE] [--key FILE] [--target HOST:PORT] [--root DIR] [--allow-from LIST]
                    [--rate-per-minute N] [--max-per-ip N] [--max-total N]
                    [--plain-http] [--trusted-proxy LIST] [--public-origin https://HOST]
-                   [--totp off|optional|required] [--totp-dir DIR] [--gateway-key FILE]
+                   [--totp off|optional|required] [--totp-dir DIR (default /var/lib/waydesk-web)] [--gateway-key FILE]
                    [--helper-socket FILE] [--idle-minutes N]
 set up codes: waydesk-web totp add ACCOUNT | recovery ACCOUNT | remove ACCOUNT | list
 behind a reverse proxy: --plain-http --trusted-proxy 127.0.0.1 --public-origin https://waydesk.example.com (docs: web/README.md)
@@ -54,7 +54,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Config> {
         trusted_proxies: None,
         public_origin: None,
         totp: web::TotpMode::Off,
-        totp_dir: "/etc/waydesk/totp".into(),
+        totp_dir: "/var/lib/waydesk-web".into(),
         gateway_key: None,
         fail_delay: Duration::from_secs(4),
         idle: Duration::from_secs(30 * 60),

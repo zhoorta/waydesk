@@ -19,6 +19,10 @@ AmbientCapabilities=
 PrivateTmp=yes
 PrivateDevices=yes
 ProtectSystem=strict
+# The authenticator records (and the record of codes already used) live here: the one place this unit may write. `waydesk-web totp add`, run as root,
+# gives the files it makes to the owner of this directory, so the portal can read them.
+StateDirectory=waydesk-web
+StateDirectoryMode=0700
 ProtectHome=yes
 ProtectKernelModules=yes
 ProtectKernelTunables=yes

@@ -176,6 +176,16 @@ impl Store {
         std::fs::write(&tmp, record.to_text())?;
         std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
         std::fs::rename(&tmp, &path)?;
+        // Made by root (`waydesk-web totp add`) in a directory that belongs to the portal's account: the record has to belong to that account too, or the portal
+        // cannot read it, and cannot record the codes it uses.
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            let (file, dir) = (std::fs::metadata(&path)?, std::fs::metadata(&self.dir)?);
+            if file.uid() != dir.uid() {
+                // Only root can give a file away; for anybody else this is a no-op that fails, and the record stays theirs.
+                let _ = std::os::unix::fs::chown(&path, Some(dir.uid()), Some(dir.gid()));
+            }
+        }
         Ok(())
     }
 
@@ -239,7 +249,11 @@ impl Store {
             record.last_step = Some(step);
             return match self.save(account, &record) {
                 Ok(()) => CodeCheck::Good,
-                Err(_) => CodeCheck::Wrong, // a code that cannot be recorded as used is not accepted
+                Err(e) => {
+                    // A code that cannot be recorded as used is not accepted; say why, because this is a setup problem (the directory is not writable).
+                    tracing::warn!("cannot record a used code for {account}: {e:#}");
+                    CodeCheck::Wrong
+                }
             };
         }
         let hashed = hash_recovery(input);
