@@ -89,6 +89,9 @@ struct Data {
 pub struct People {
     path: Option<PathBuf>,
     data: Mutex<Data>,
+    /// When the file was last read or written by this process: a change from outside (`waydesk-web people add`, run as root next to a running portal)
+    /// is picked up on the next look, without a restart.
+    stamp: Mutex<Option<std::time::SystemTime>>,
 }
 
 /// The same rule as `adminaction::valid_name`: what `useradd` takes. A portal name becomes the name of the system account on every server.
@@ -139,11 +142,26 @@ impl People {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Data::default(),
             Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
         };
-        Ok(People { path: Some(path), data: Mutex::new(data) })
+        let stamp = fs::metadata(&path).and_then(|m| m.modified()).ok();
+        Ok(People { path: Some(path), data: Mutex::new(data), stamp: Mutex::new(stamp) })
     }
 
     pub fn in_memory() -> Self {
-        People { path: None, data: Mutex::new(Data::default()) }
+        People { path: None, data: Mutex::new(Data::default()), stamp: Mutex::new(None) }
+    }
+
+    /// Reads the file again when somebody else changed it. A file that does not parse is ignored (the people already in memory stay).
+    fn refresh(&self) {
+        let Some(path) = &self.path else { return };
+        let Ok(modified) = fs::metadata(path).and_then(|m| m.modified()) else { return };
+        let (Ok(mut stamp), Ok(mut data)) = (self.stamp.lock(), self.data.lock()) else { return };
+        if *stamp == Some(modified) {
+            return;
+        }
+        if let Some(fresh) = fs::read_to_string(path).ok().and_then(|t| serde_json::from_str::<Data>(&t).ok()) {
+            *data = fresh;
+            *stamp = Some(modified);
+        }
     }
 
     fn save(&self, data: &Data) -> Result<()> {
@@ -169,11 +187,15 @@ impl People {
     }
 
     fn edit<T>(&self, change: impl FnOnce(&mut Data) -> Result<T>) -> Result<T> {
+        self.refresh();
         let mut g = self.data.lock().map_err(|_| anyhow::anyhow!("people lock poisoned"))?;
         let mut copy = Data { people: g.people.clone() };
         let out = change(&mut copy)?;
         self.save(&copy)?;
         *g = copy;
+        if let (Some(path), Ok(mut stamp)) = (&self.path, self.stamp.lock()) {
+            *stamp = fs::metadata(path).and_then(|m| m.modified()).ok();
+        }
         Ok(out)
     }
 
@@ -202,6 +224,7 @@ impl People {
 
     /// Checks a password. Always does the hashing work, whatever the name.
     pub fn verify(&self, name: &str, password: &str) -> Verdict {
+        self.refresh();
         let found = self.data.lock().ok().and_then(|g| g.people.iter().find(|p| p.name == name).cloned());
         match found {
             None => {
@@ -222,14 +245,17 @@ impl People {
     }
 
     pub fn exists(&self, name: &str) -> bool {
+        self.refresh();
         self.data.lock().is_ok_and(|g| g.people.iter().any(|p| p.name == name))
     }
 
     pub fn get(&self, name: &str) -> Option<View> {
+        self.refresh();
         self.data.lock().ok()?.people.iter().find(|p| p.name == name).map(View::from)
     }
 
     pub fn list(&self) -> Vec<View> {
+        self.refresh();
         let Ok(g) = self.data.lock() else { return Vec::new() };
         let mut v: Vec<View> = g.people.iter().map(View::from).collect();
         v.sort_by(|a, b| a.name.cmp(&b.name));
@@ -238,6 +264,7 @@ impl People {
 
     /// Whether `name` is a person who may administer the portal now (not switched off).
     pub fn is_admin(&self, name: &str) -> bool {
+        self.refresh();
         self.data.lock().is_ok_and(|g| g.people.iter().any(|p| p.name == name && p.admin && !p.disabled))
     }
 
@@ -357,6 +384,7 @@ impl People {
     }
 
     pub fn made_on(&self, name: &str, server: &str) -> bool {
+        self.refresh();
         self.data.lock().is_ok_and(|g| g.people.iter().any(|p| p.name == name && p.made_on.iter().any(|s| s == server)))
     }
 
@@ -556,8 +584,25 @@ mod tests {
     }
 
     #[test]
+    fn a_change_made_from_outside_is_seen_without_a_restart() {
+        let dir = std::env::temp_dir().join(format!("wd-people-out-{}", std::process::id()));
+        let path = dir.join("people.json");
+        let _ = fs::remove_dir_all(&dir);
+        let running = People::open(path.clone()).unwrap();
+        assert!(!running.exists("ana"));
+        // `waydesk-web people add` is another process with its own handle on the same file.
+        let pw = People::open(path.clone()).unwrap().add("ana", "", false, T).unwrap();
+        assert!(running.exists("ana"));
+        assert!(matches!(running.verify("ana", &pw), Verdict::Good(_)));
+        // And the running one keeps editing on top of what it saw.
+        running.add("bo", "", false, T).unwrap();
+        assert_eq!(People::open(path).unwrap().list().len(), 2);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn a_failed_save_changes_nothing() {
-        let p = People { path: Some(PathBuf::from("/dev/null/people.json")), data: Mutex::new(Data::default()) };
+        let p = People { path: Some(PathBuf::from("/dev/null/people.json")), data: Mutex::new(Data::default()), stamp: Mutex::new(None) };
         assert!(p.add("ana", "", false, T).is_err());
         assert!(!p.exists("ana"));
     }
