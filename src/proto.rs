@@ -549,6 +549,9 @@ pub enum HelperReq {
     /// The account that logged in on this connection changes its own password: the helper checks `old` again (the same lockout as a login), then has the
     /// runner set `new`. Neither password is logged or kept.
     ChangePassword { old: String, new: String },
+    /// A line for the audit log about something the portal did that the helper cannot see (an authenticator set up or taken away): `event` is
+    /// one of `NOTE_*`, `target` an account name or empty. The line names the account that logged in on this connection and where it came from.
+    AuditNote { event: u8, target: String },
     Bye,
 }
 
@@ -581,6 +584,12 @@ pub enum HelperResp {
     /// The answer to `Info`: JSON text.
     Info { json: String },
 }
+
+/// `HelperReq::AuditNote` events.
+pub const NOTE_TOTP_ENROLLED: u8 = 1;
+pub const NOTE_TOTP_REMOVED: u8 = 2;
+/// An administrator took the authenticator of `target` away.
+pub const NOTE_TOTP_REMOVED_BY_ADMIN: u8 = 3;
 
 /// Why a new session was refused (`HelperResp::Refused`).
 pub const REFUSED_MEMORY: u8 = 1;
@@ -636,6 +645,11 @@ impl HelperReq {
                 o.str(old);
                 o.str(new);
             }
+            HelperReq::AuditNote { event, target } => {
+                o.u8(10);
+                o.u8(*event);
+                o.str(target);
+            }
             HelperReq::Bye => o.u8(255),
         }
         o.0
@@ -663,6 +677,7 @@ impl HelperReq {
             7 => HelperReq::Admin { json: i.str()? },
             8 => HelperReq::Audit { since: i.str()?, user: i.str()?, event: i.str()?, outcome: i.str()?, limit: i.u16()? },
             9 => HelperReq::ChangePassword { old: i.str()?, new: i.str()? },
+            10 => HelperReq::AuditNote { event: i.u8()?, target: i.str()? },
             255 => HelperReq::Bye,
             t => return Err(ProtoError::UnknownTag(t)),
         };
@@ -913,6 +928,7 @@ mod tests {
             HelperReq::Info { kind: InfoKind::Access },
             HelperReq::Info { kind: InfoKind::Cert },
             HelperReq::ChangePassword { old: "pä ss".into(), new: "x".repeat(20) },
+            HelperReq::AuditNote { event: NOTE_TOTP_REMOVED_BY_ADMIN, target: "ana".into() },
             HelperReq::Admin { json: r#"{"action":"user_add","name":"frida"}"#.into() },
             HelperReq::Audit { since: "7d".into(), user: "alice".into(), event: "admin".into(), outcome: "fail".into(), limit: 200 },
             HelperReq::Bye,

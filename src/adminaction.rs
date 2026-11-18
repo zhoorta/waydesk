@@ -22,6 +22,8 @@ pub enum AdminAction {
     /// The memory limit of the account's session (`6G`), or `reset`.
     UserLimit { name: String, memory: String },
     SessionEnd { name: String },
+    /// Who can reach the RDP port: `local`, `lan` or `vpn` (the same words as `waydesk-admin access`). The daemon restarts.
+    Access { mode: String },
 }
 
 /// A name `useradd` accepts on Debian (its default NAME_REGEX): lower case letters, digits, `_` and `-`, not starting with a digit or `-`, at most 32.
@@ -54,18 +56,21 @@ fn valid_memory(m: &str) -> bool {
 }
 
 impl AdminAction {
+    /// The account the action is about (none for the machine-wide ones).
     pub fn name(&self) -> &str {
         match self {
+            Self::Access { .. } => "",
             Self::UserAdd { name } | Self::UserEnable { name } | Self::UserDisable { name, .. } | Self::UserPasswd { name } | Self::UserSet { name, .. } | Self::UserLimit { name, .. } | Self::SessionEnd { name } => name,
         }
     }
 
     /// Whether the request is one the list allows, with a reason in plain words when it is not.
     pub fn validate(&self) -> Result<(), String> {
-        if !valid_name(self.name()) {
+        if !matches!(self, Self::Access { .. }) && !valid_name(self.name()) {
             return Err("that is not a valid account name (lower case letters, digits, _ and -, at most 32)".into());
         }
         match self {
+            Self::Access { mode } if !matches!(mode.as_str(), "local" | "lan" | "vpn") => return Err("the access setting must be local, lan or vpn".into()),
             Self::UserSet { desktop, gpu, .. } => {
                 if desktop.is_none() && gpu.is_none() {
                     return Err("nothing to change".into());
@@ -115,6 +120,7 @@ impl AdminAction {
                 }
             }
             Self::SessionEnd { name } => vec![s("sessions"), s("end"), s(name)],
+            Self::Access { mode } => vec![s("access"), s(mode)],
         }
     }
 
@@ -127,6 +133,7 @@ impl AdminAction {
             Self::UserSet { name, desktop, gpu } => json!({ "action": "user_set", "name": name, "desktop": desktop, "gpu": gpu }),
             Self::UserLimit { name, memory } => json!({ "action": "user_limit", "name": name, "memory": memory }),
             Self::SessionEnd { name } => json!({ "action": "session_end", "name": name }),
+            Self::Access { mode } => json!({ "action": "access", "mode": mode }),
         }
     }
 
@@ -138,8 +145,14 @@ impl AdminAction {
             Some(Value::String(s)) => Ok(Some(s.clone())),
             Some(_) => Err(format!("{k} must be text")),
         };
+        let kind = text("action").ok_or("an action is needed")?;
+        if kind == "access" {
+            let action = Self::Access { mode: text("mode").ok_or("a mode is needed")? };
+            action.validate()?;
+            return Ok(action);
+        }
         let name = text("name").ok_or("a name is needed")?;
-        let action = match text("action").ok_or("an action is needed")?.as_str() {
+        let action = match kind.as_str() {
             "user_add" => Self::UserAdd { name },
             "user_enable" => Self::UserEnable { name },
             "user_disable" => Self::UserDisable { name, keep_session: v.get("keep_session").and_then(Value::as_bool).unwrap_or(false) },
@@ -183,6 +196,9 @@ mod tests {
         assert_eq!(parse(r#"{"action":"user_limit","name":"eva","memory":"6G"}"#).unwrap().args(), ["users", "limit", "eva", "--memory", "6G"]);
         assert_eq!(parse(r#"{"action":"user_limit","name":"eva","memory":"reset"}"#).unwrap().args(), ["users", "limit", "eva", "reset"]);
         assert_eq!(parse(r#"{"action":"session_end","name":"eva"}"#).unwrap().args(), ["sessions", "end", "eva"]);
+        for mode in ["local", "lan", "vpn"] {
+            assert_eq!(parse(&format!(r#"{{"action":"access","mode":"{mode}"}}"#)).unwrap().args(), ["access", mode]);
+        }
     }
 
     #[test]
@@ -206,6 +222,10 @@ mod tests {
             r#"{"action":"user_limit","name":"eva","memory":"G"}"#,
             r#"{"action":"user_limit","name":"eva","memory":"1.2.3G"}"#,
             r#"{"action":"user_limit","name":"eva"}"#,
+            r#"{"action":"access","mode":"custom"}"#,
+            r#"{"action":"access","mode":"lan --allow any"}"#,
+            r#"{"action":"access","mode":"--bind"}"#,
+            r#"{"action":"access"}"#,
         ] {
             assert!(parse(bad).is_err(), "{bad}");
         }
@@ -219,6 +239,7 @@ mod tests {
             AdminAction::UserSet { name: "a".into(), desktop: Some("sway".into()), gpu: None },
             AdminAction::UserLimit { name: "a".into(), memory: "512M".into() },
             AdminAction::SessionEnd { name: "a".into() },
+            AdminAction::Access { mode: "vpn".into() },
         ] {
             assert_eq!(AdminAction::from_json(&a.to_json()).unwrap(), a);
         }

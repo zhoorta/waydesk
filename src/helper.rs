@@ -508,6 +508,29 @@ fn serve(mut sock: UnixStream, cfg: &Config, policy: &PamPolicy, sessions: &Sess
                     }
                 },
             },
+            HelperReq::AuditNote { event, target } => match (&who, &login) {
+                (Some(user), Some((source, _))) => {
+                    let name = match event {
+                        proto::NOTE_TOTP_ENROLLED => "account.totp.enrolled",
+                        proto::NOTE_TOTP_REMOVED => "account.totp.removed",
+                        proto::NOTE_TOTP_REMOVED_BY_ADMIN => "admin.totp.removed",
+                        _ => "",
+                    };
+                    // Only the three known notes, about a name that can be one; the administrator's note only from an administrator.
+                    let by_admin = event == proto::NOTE_TOTP_REMOVED_BY_ADMIN;
+                    if name.is_empty() || (!target.is_empty() && !crate::adminaction::valid_name(&target)) || (by_admin && !crate::admininfo::is_admin(&user.groups)) {
+                        reply(&mut sock, &HelperResp::Error { message: "not a note the helper writes".into() })
+                    } else {
+                        let mut e = audit::event(name, Outcome::Ok).str("user", &user.name).num("uid", user.uid.into()).source(source).str("via", "portal");
+                        if !target.is_empty() {
+                            e = e.str("target", &target);
+                        }
+                        e.emit();
+                        reply(&mut sock, &HelperResp::AuthOk)
+                    }
+                }
+                _ => reply(&mut sock, &HelperResp::Error { message: "not logged in".into() }),
+            },
             HelperReq::ChangePassword { old, new } => match (&who, &login) {
                 (Some(user), Some((source, _))) => {
                     let fail = |sock: &mut UnixStream, why: &str| reply(sock, &HelperResp::Error { message: why.into() });

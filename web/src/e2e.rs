@@ -933,3 +933,63 @@ async fn a_person_changes_their_own_password_and_an_administrator_sees_the_setti
     assert_eq!(post!("/api/admin/totp", &boss, Some(&origin), true, remove).0, 200);
     assert!(!store.exists("ana"));
 }
+
+#[tokio::test]
+async fn a_person_sets_up_and_turns_off_their_own_authenticator_only_with_a_valid_code() {
+    // The default server does not ask for codes: nothing to set up.
+    let off = start("totpoff", Opts::default()).await;
+    let b = off.browser("ana").await;
+    let (status, body) = off.send("POST", "/api/account/totp/start", &[("Origin", &off.origin()), ("Cookie", &b.cookie), ("X-CSRF-Token", &b.csrf)], "").await;
+    assert_eq!(status, 409, "{body}");
+
+    let env = start("totpself", Opts { totp: crate::web::TotpMode::Optional, gateway_key: Some("a-long-enough-gateway-key"), ..Opts::default() }).await;
+    let ana = env.browser("ana").await;
+    let origin = env.origin();
+    let store = crate::totp::Store::new(&env.dir.join("totp"));
+    let call = |path: &'static str, b: &Browser, csrf: bool, body: String| {
+        let (origin, cookie, token) = (origin.clone(), b.cookie.clone(), b.csrf.clone());
+        let env = &env;
+        async move {
+            let mut h: Vec<(&str, &str)> = vec![("Origin", origin.as_str()), ("Cookie", cookie.as_str())];
+            if csrf {
+                h.push(("X-CSRF-Token", token.as_str()));
+            }
+            env.send("POST", path, &h, &body).await
+        }
+    };
+    // no csrf token, nothing is started
+    assert_eq!(call("/api/account/totp/start", &ana, false, String::new()).await.0, 403);
+    // confirming without starting
+    assert_eq!(call("/api/account/totp/confirm", &ana, true, r#"{"code":"123456"}"#.into()).await.0, 409);
+
+    let (status, started) = call("/api/account/totp/start", &ana, true, String::new()).await;
+    assert_eq!(status, 200, "{started}");
+    // the test client leaves the transfer's chunk markers on the body: the JSON object is what is between the first { and the last }
+    let object = |body: &str| -> serde_json::Value { serde_json::from_str(&body[body.find('{').unwrap()..=body.rfind('}').unwrap()]).unwrap() };
+    let v = object(&started);
+    let secret = data_encoding::BASE32_NOPAD.decode(v["secret"].as_str().unwrap().as_bytes()).unwrap();
+    assert!(v["uri"].as_str().unwrap().starts_with("otpauth://totp/Waydesk:ana?secret="));
+    assert!(!store.exists("ana"), "nothing is kept before a code proves the secret");
+
+    let (status, body) = call("/api/account/totp/confirm", &ana, true, r#"{"code":"000000"}"#.into()).await;
+    assert_eq!(status, 400, "{body}");
+    assert!(!store.exists("ana"));
+    let good = crate::totp::code_at(&secret, unix_now());
+    let (status, body) = call("/api/account/totp/confirm", &ana, true, format!("{{\"code\":\"{good}\"}}")).await;
+    assert_eq!(status, 200, "{body}");
+    let done = object(&body);
+    assert_eq!(done["recovery"].as_array().unwrap().len(), 8, "recovery codes are shown once");
+    assert!(store.exists("ana"));
+    assert!(!body.contains(v["secret"].as_str().unwrap()), "the secret is not repeated");
+
+    // a second start, now that there is one
+    assert_eq!(call("/api/account/totp/start", &ana, true, String::new()).await.0, 409);
+    // turning it off: the wrong code, then a good one (the next step's: the first was used up)
+    assert_eq!(call("/api/account/totp/remove", &ana, true, r#"{"code":"000000"}"#.into()).await.0, 400);
+    assert!(store.exists("ana"));
+    let next = crate::totp::code_at(&secret, unix_now() + 30);
+    let (status, body) = call("/api/account/totp/remove", &ana, true, format!("{{\"code\":\"{next}\"}}")).await;
+    assert_eq!(status, 200, "{body}");
+    assert!(!store.exists("ana"));
+    assert_eq!(call("/api/account/totp/remove", &ana, true, r#"{"code":"123456"}"#.into()).await.0, 409, "nothing left to turn off");
+}

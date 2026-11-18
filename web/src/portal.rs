@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 mod proto;
 use proto::{HelperReq, HelperResp};
 pub use proto::InfoKind;
+pub use proto::{NOTE_TOTP_ENROLLED, NOTE_TOTP_REMOVED, NOTE_TOTP_REMOVED_BY_ADMIN};
 
 /// The name of the cookie. `__Host-` makes the browser accept it only with `Secure`, `Path=/` and no `Domain`, so a subdomain or a plain-HTTP page
 /// cannot plant or overwrite it.
@@ -53,6 +54,12 @@ pub trait Authenticator: Send + Sync {
     /// `Err("helper: ...")` is a refusal in words the page can show.
     fn change_password(&self, _ticket: &str, _account: &str, _source: &str, _old: &str, _new: &str) -> Result<(), String> {
         Err("no helper".into())
+    }
+
+    /// Tells the helper to write a line in the audit log about an authenticator being set up or taken away (`proto::NOTE_*`). Best effort: the portal
+    /// logs it too.
+    fn note(&self, _ticket: &str, _account: &str, _source: &str, _event: u8, _target: &str) -> Result<(), String> {
+        Ok(())
     }
 
     /// A change an administrator asked for (the JSON of one action, see `src/adminaction.rs`). The helper decides whether the account may and whether the
@@ -169,6 +176,21 @@ impl Authenticator for HelperAuth {
             HelperResp::AuthFail => Err("the sign-in is no longer good".into()),
             HelperResp::Error { message } => Err(format!("helper: {message}")),
             other => Err(format!("unexpected answer to a ticket: {other:?}")),
+        };
+        let _ = proto::write_frame(&mut sock, &HelperReq::Bye.encode());
+        result
+    }
+
+    fn note(&self, ticket: &str, account: &str, source: &str, event: u8, target: &str) -> Result<(), String> {
+        let mut sock = self.connect()?;
+        let redeem = HelperReq::Redeem { ticket: ticket.to_owned(), user: account.to_owned(), source: source.to_owned() };
+        let result = match Self::ask(&mut sock, &redeem)? {
+            HelperResp::AuthOk => match Self::ask(&mut sock, &HelperReq::AuditNote { event, target: target.to_owned() })? {
+                HelperResp::AuthOk => Ok(()),
+                HelperResp::Error { message } => Err(format!("helper: {message}")),
+                other => Err(format!("unexpected answer to a note: {other:?}")),
+            },
+            other => Err(format!("the helper did not take the ticket: {other:?}")),
         };
         let _ = proto::write_frame(&mut sock, &HelperReq::Bye.encode());
         result

@@ -1,20 +1,8 @@
 // The administrators' pages: Overview, Users and Sessions, read only. The data is the helper's (`waydesk-admin ... --json`), passed on by the portal at
 // /api/admin/*; the portal asks the helper on every request whether the account is an administrator, so hiding the menu here is only convenience.
 // Everything is put on the page with textContent (never innerHTML): a name from the machine's account list cannot become markup.
+import { el, chip, dot, win, button, modal, confirmBox } from './ui.js';
 
-const el = (tag, props = {}, ...kids) => {
-  const e = document.createElement(tag);
-  for (const [k, v] of Object.entries(props)) {
-    if (v === false || v == null) continue;
-    if (k === 'class') e.className = v;
-    else e.setAttribute(k, v === true ? '' : String(v));
-  }
-  for (const kid of kids.flat()) if (kid != null && kid !== false) e.append(kid instanceof Node ? kid : document.createTextNode(String(kid)));
-  return e;
-};
-const chip = (text, tone = '') => el('span', { class: 'tag ' + tone }, text);
-const dot = (tone = '') => el('span', { class: 'dot ' + tone });
-const win = (title, ...body) => el('section', { class: 'win' }, el('div', { class: 'bar' }, el('span', { class: 't' }, title)), el('div', { class: 'body' }, body));
 const meter = (percent, warn = false) => el('div', { class: 'meter' }, el('i', { class: warn ? 'w' : '', style: `width:${Math.max(0, Math.min(100, Math.round(percent)))}%` }));
 const gb = (mb) => (mb >= 1024 ? (mb / 1024).toFixed(mb >= 10240 ? 0 : 1) + ' GB' : Math.round(mb) + ' MB');
 const table = (heads, rows, empty) => el('div', { class: 'tw' }, rows.length === 0 ? el('p', { class: 'muted' }, empty) : el('table', {}, el('thead', {}, el('tr', {}, heads.map((h) => el('th', { class: h.startsWith('>') ? 'n' : '' }, h.replace(/^>/, ''))))), el('tbody', {}, rows)));
@@ -46,26 +34,7 @@ async function act(action) {
   return body.result || {};
 }
 
-// A window over the page: a title bar like every window, the content, and buttons. Closes on Escape or by its own buttons.
-function modal(title, content, buttons) {
-  const d = el('dialog', { class: 'win dlg', 'aria-label': title },
-    el('div', { class: 'bar' }, el('span', { class: 't' }, title)),
-    el('div', { class: 'body' }, content, el('div', { class: 'actions' }, buttons)));
-  d.addEventListener('close', () => d.remove());
-  document.body.append(d);
-  d.showModal();
-  return d;
-}
-const button = (label, onClick, kind = '') => { const b = el('button', { type: 'button', class: 'btn ' + kind }, label); b.addEventListener('click', onClick); return b; };
 
-// "Are you sure": resolves to true or false.
-function confirmBox(title, text, label, danger = false, extra = null) {
-  return new Promise((resolve) => {
-    let answer = false;
-    const d = modal(title, [el('p', {}, text), extra], [button('Cancel', () => d.close()), button(label, () => { answer = true; d.close(); }, danger ? 'danger' : 'primary')]);
-    d.addEventListener('close', () => resolve(answer));
-  });
-}
 
 // Runs a change, tells the administrator what happened, and reloads the page.
 async function run(action, done) {
@@ -278,6 +247,18 @@ const views = {
     const pre = (text) => el('pre', { class: 'plainpre' }, text || '-');
     const policy = { off: 'off: the password is enough', optional: 'optional: asked of accounts that set one up', required: 'required: every account needs one' }[p.totp] || p.totp;
     const enrolled = s.enrolled || [];
+    const currentMode = ((access.text || '').match(/\((local|lan|vpn|custom)\)/) || [])[1] || '';
+    const words = { local: ['this machine only', 'the RDP port listens on this machine only (reach it through an SSH tunnel)'], lan: ['the local network', "the RDP port listens on this machine's local-network address, and only that network may connect"], vpn: ['the VPN', "the RDP port listens on the VPN's address, and only the VPN's addresses may connect (the VPN must be set up with `waydesk-admin vpn init`)"] };
+    const changeAccess = async (mode, now) => {
+      if (mode === now) return;
+      const undo = now && now !== 'custom' ? 'sudo waydesk-admin access ' + now : 'sudo waydesk-admin access local';
+      const ok = await confirmBox('Let ' + words[mode][0] + ' reach the desktop?', [
+        el('p', {}, 'Afterwards ' + words[mode][1] + '.'),
+        el('p', {}, 'The desktop daemon restarts: people connected over RDP or the browser stream reconnect, and their programs keep running.'),
+        el('p', { class: 'hint' }, 'To undo it from a terminal on the server: ', el('code', {}, undo))], 'Change it', true);
+      if (!ok) return;
+      run({ action: 'access', mode }, (r) => (r.message || 'Done.').split('\n')[0]);
+    };
     const removeTotp = async (name) => {
       if (!(await confirmBox('Remove the authenticator of ' + name + '?', name + ' will sign in with the password alone (where the policy allows it) and can set a new authenticator up.', 'Remove', true))) return;
       try {
@@ -289,10 +270,12 @@ const views = {
       ctx.reload();
     };
     return [
-      el('div', { class: 'head' }, el('h1', {}, 'Settings'), el('span', { class: 'sp' }), el('span', { class: 'muted small' }, 'read only \u00b7 changed on the server with ', el('code', {}, 'waydesk-admin'), ' and ', el('code', {}, '/etc/default/waydesk'))),
+      el('div', { class: 'head' }, el('h1', {}, 'Settings'), el('span', { class: 'sp' }), el('span', { class: 'muted small' }, 'the rest is changed on the server with ', el('code', {}, 'waydesk-admin'), ' and ', el('code', {}, '/etc/default/waydesk'))),
       el('div', { class: 'two' },
         el('div', { class: 'colstack' },
-          win('who can reach the desktop (RDP)', pre(access.text), el('p', { class: 'hint' }, 'Change it with ', el('code', {}, 'waydesk-admin access local | lan | vpn'), '. The daemon restarts and people connected over RDP reconnect.')),
+          win('who can reach the desktop (RDP)', pre(access.text),
+            el('div', { class: 'seg' }, ['local', 'lan', 'vpn'].map((m) => button({ local: 'This machine only', lan: 'Local network', vpn: 'VPN' }[m], () => changeAccess(m, currentMode), 'sm' + (currentMode === m ? ' on' : '')))),
+            el('p', { class: 'hint' }, currentMode === 'custom' ? 'The setting is a custom one; pick one of these to replace it.' : 'Changing it restarts the desktop daemon: people connected over RDP or the browser reconnect. The certificate is changed with ', currentMode === 'custom' ? null : el('code', {}, 'waydesk-admin cert'), currentMode === 'custom' ? null : '.')),
           win('certificate', pre(cert.text), el('p', { class: 'hint' }, 'Reissue or replace it with ', el('code', {}, 'waydesk-admin cert'), '.'))),
         el('div', { class: 'colstack' },
           win('this portal', el('dl', { class: 'kv' },

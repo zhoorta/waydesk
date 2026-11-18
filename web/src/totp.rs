@@ -210,6 +210,17 @@ impl Store {
         Ok((record, codes))
     }
 
+    /// Makes the record for a secret the person has already proved they hold (they typed a valid code), with fresh recovery codes; `last_step` is the
+    /// step of that code, so it cannot be used again to sign in. Refuses an account that has an authenticator (take it away first).
+    pub fn enroll_with(&self, account: &str, secret: &[u8], last_step: u64) -> Result<Vec<String>> {
+        let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+        anyhow::ensure!(self.load(account).is_none(), "{account} has an authenticator already");
+        let codes = new_recovery_codes()?;
+        let record = Record { secret: secret.to_vec(), last_step: Some(last_step), recovery: codes.iter().map(|c| hash_recovery(c)).collect() };
+        self.save(account, &record)?;
+        Ok(codes)
+    }
+
     pub fn new_recovery(&self, account: &str) -> Result<Vec<String>> {
         let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
         let mut record = self.load(account).with_context(|| format!("{account} has no authenticator set up"))?;

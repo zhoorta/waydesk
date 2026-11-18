@@ -123,3 +123,7 @@ pre.plainpre { margin: 0; padding: 12px 16px; background: rgba(0,0,0,.35); borde
 .form { display: grid; gap: 16px; max-width: 28rem; }
 .form .bad { margin: 0; min-height: 1.4em; }
 .colstack table { min-width: 0; }
+
+.seg { display: inline-flex; gap: 0; margin: 16px 0 0; border: 1px solid rgba(255,255,255,.18); border-radius: 8px; overflow: hidden; }
+.seg .btn { border: 0; border-radius: 0; background: none; padding: 6px 16px; } .seg .btn + .btn { border-left: 1px solid rgba(255,255,255,.18); }
+.seg .btn.on { background: rgba(238,154,69,.16); color: var(--copper); }

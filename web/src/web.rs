@@ -82,7 +82,20 @@ pub struct App {
     pub admin_rate: RateLimiter,
     /// Password changes, per address (a wrong old password is also slowed and counted by the helper).
     pub pw_rate: RateLimiter,
+    /// Authenticators being set up: the secret a browser session was shown, kept (in memory only) until the person types a valid code from it or
+    /// the time is up. Keyed by the browser session, so one browser cannot confirm another's.
+    pub pending_totp: std::sync::Mutex<std::collections::HashMap<String, PendingTotp>>,
 }
+
+pub struct PendingTotp {
+    account: String,
+    secret: Vec<u8>,
+    at: Instant,
+}
+
+/// How long a secret that was shown waits for its first code, and how many wait at once.
+const PENDING_TOTP_SECS: u64 = 600;
+const PENDING_TOTP_MAX: usize = 1024;
 
 /// How long an administrators' answer is reused.
 const ADMIN_CACHE_SECS: u64 = 3;
@@ -95,6 +108,7 @@ impl App {
             admin_cache: Default::default(),
             admin_rate: RateLimiter::new(30, Duration::from_secs(60)),
             pw_rate: RateLimiter::new(5, Duration::from_secs(60)),
+            pending_totp: Default::default(),
             tokens: Tokens::new(Duration::from_secs(30)),
             token_rate: RateLimiter::new(cfg.rate_per_minute, Duration::from_secs(60)),
             ws_rate: RateLimiter::new(cfg.rate_per_minute.saturating_mul(3), Duration::from_secs(60)),
@@ -150,6 +164,9 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/api/mine", get(mine))
         .route("/api/admin/do", post(admin_do).layer(axum::extract::DefaultBodyLimit::max(2048)))
         .route("/api/account", get(account_info))
+        .route("/api/account/totp/start", post(totp_start).layer(axum::extract::DefaultBodyLimit::max(256)))
+        .route("/api/account/totp/confirm", post(totp_confirm).layer(axum::extract::DefaultBodyLimit::max(512)))
+        .route("/api/account/totp/remove", post(totp_remove).layer(axum::extract::DefaultBodyLimit::max(512)))
         .route("/api/account/password", post(change_password).layer(axum::extract::DefaultBodyLimit::max(2048)))
         .route("/api/admin/totp", post(admin_totp).layer(axum::extract::DefaultBodyLimit::max(1024)))
         .route("/api/admin/audit", get(admin_audit))
@@ -442,6 +459,129 @@ async fn change_password(State(app): State<Arc<App>>, Extension(ClientAddr(peer)
 }
 
 #[derive(serde::Deserialize)]
+struct CodeRequest {
+    code: String,
+}
+
+/// Writes the audit line for an authenticator set up or taken away, in the background (the helper is local, but a slow one must not hold a request).
+fn note(app: &Arc<App>, ticket: String, account: String, source: String, event: u8, target: String) {
+    let auth = app.auth.clone();
+    tokio::task::spawn_blocking(move || {
+        if let Err(why) = auth.note(&ticket, &account, &source, event, &target) {
+            warn!("the audit line could not be written: {why}");
+        }
+    });
+}
+
+/// The person sets up their own authenticator, step one: a new secret, shown once (as a key to type and a link for the phone). Nothing is saved yet.
+async fn totp_start(State(app): State<Arc<App>>, Extension(ClientAddr(peer)): Extension<ClientAddr>, Extension(PublicHost(host)): Extension<PublicHost>, headers: HeaderMap) -> Response {
+    let (id, signed) = match changing(&app, &headers, &host) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    if app.cfg.totp == TotpMode::Off {
+        return json(StatusCode::CONFLICT, "{\"ok\":false,\"error\":\"This server does not ask for a code, so there is nothing to set up.\"}\n".into());
+    }
+    if app.store.exists(&signed.account) {
+        return json(StatusCode::CONFLICT, "{\"ok\":false,\"error\":\"You have an authenticator already. Turn it off first to set up a new one.\"}\n".into());
+    }
+    if !app.pw_rate.hit(peer.ip(), Instant::now()) {
+        return text(StatusCode::TOO_MANY_REQUESTS, "too many attempts, wait a minute\n");
+    }
+    let Ok(secret) = crate::totp::new_secret() else { return text(StatusCode::SERVICE_UNAVAILABLE, "busy\n") };
+    let uri = crate::totp::otpauth_uri("Waydesk", &signed.account, &secret);
+    let shown = crate::totp::base32(&secret);
+    {
+        let mut pending = app.pending_totp.lock().unwrap();
+        let now = Instant::now();
+        pending.retain(|_, p| now.duration_since(p.at) < Duration::from_secs(PENDING_TOTP_SECS));
+        if pending.len() >= PENDING_TOTP_MAX && !pending.contains_key(&id) {
+            return text(StatusCode::SERVICE_UNAVAILABLE, "busy\n");
+        }
+        pending.insert(id, PendingTotp { account: signed.account.clone(), secret: secret.to_vec(), at: now });
+    }
+    json(StatusCode::OK, format!("{}\n", serde_json::json!({ "ok": true, "secret": shown, "uri": uri })))
+}
+
+/// Step two: a code from the app proves the person holds the secret; only then is it kept, and the recovery codes are shown, once.
+async fn totp_confirm(State(app): State<Arc<App>>, Extension(ClientAddr(peer)): Extension<ClientAddr>, Extension(PublicHost(host)): Extension<PublicHost>, headers: HeaderMap, body: axum::body::Bytes) -> Response {
+    let (id, signed) = match changing(&app, &headers, &host) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    let Ok(req) = serde_json::from_slice::<CodeRequest>(&body) else { return text(StatusCode::BAD_REQUEST, "bad request\n") };
+    let ip = peer.ip();
+    let now = Instant::now();
+    if app.guesses.blocked(ip, &signed.account, now) {
+        return text(StatusCode::TOO_MANY_REQUESTS, "too many wrong codes, wait a few minutes\n");
+    }
+    let secret = {
+        let pending = app.pending_totp.lock().unwrap();
+        match pending.get(&id) {
+            Some(p) if p.account == signed.account && now.duration_since(p.at) < Duration::from_secs(PENDING_TOTP_SECS) => p.secret.clone(),
+            _ => return json(StatusCode::CONFLICT, "{\"ok\":false,\"error\":\"Start again: the key you were shown has expired.\"}\n".into()),
+        }
+    };
+    let unix = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    let code: String = req.code.chars().filter(|c| !c.is_whitespace()).collect();
+    let Some(step) = crate::totp::verify(&secret, &code, unix, None) else {
+        app.guesses.failed(ip, &signed.account, now);
+        return json(StatusCode::BAD_REQUEST, "{\"ok\":false,\"error\":\"That code is not right. Check the time on your phone and try the next code.\"}\n".into());
+    };
+    app.guesses.succeeded(ip, &signed.account);
+    match app.store.enroll_with(&signed.account, &secret, step) {
+        Ok(codes) => {
+            app.pending_totp.lock().unwrap().remove(&id);
+            info!(account = signed.account, "set up an authenticator");
+            if let Some(ticket) = app.portal.ticket(&id) {
+                note(&app, ticket, signed.account.clone(), signed.ip.to_string(), crate::portal::NOTE_TOTP_ENROLLED, String::new());
+            }
+            json(StatusCode::OK, format!("{}\n", serde_json::json!({ "ok": true, "recovery": codes })))
+        }
+        Err(e) => {
+            warn!("could not keep an authenticator: {e:#}");
+            json(StatusCode::CONFLICT, "{\"ok\":false,\"error\":\"It could not be set up (you may have one already).\"}\n".into())
+        }
+    }
+}
+
+/// The person turns their own authenticator off. A current code (or a recovery code) is needed, so a stolen session cannot take the second step away,
+/// and a server that requires the code does not allow it at all.
+async fn totp_remove(State(app): State<Arc<App>>, Extension(ClientAddr(peer)): Extension<ClientAddr>, Extension(PublicHost(host)): Extension<PublicHost>, headers: HeaderMap, body: axum::body::Bytes) -> Response {
+    let (id, signed) = match changing(&app, &headers, &host) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    let Ok(req) = serde_json::from_slice::<CodeRequest>(&body) else { return text(StatusCode::BAD_REQUEST, "bad request\n") };
+    if app.cfg.totp == TotpMode::Required {
+        return json(StatusCode::FORBIDDEN, "{\"ok\":false,\"error\":\"This server requires a code from everybody. Ask an administrator.\"}\n".into());
+    }
+    let ip = peer.ip();
+    let now = Instant::now();
+    if app.guesses.blocked(ip, &signed.account, now) {
+        return text(StatusCode::TOO_MANY_REQUESTS, "too many wrong codes, wait a few minutes\n");
+    }
+    let unix = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    let code: String = req.code.chars().filter(|c| !c.is_whitespace()).collect();
+    match app.store.check_and_use(&signed.account, &code, unix) {
+        CodeCheck::Good | CodeCheck::GoodRecovery(_) => {
+            app.guesses.succeeded(ip, &signed.account);
+            let _ = app.store.remove(&signed.account);
+            info!(account = signed.account, "turned their authenticator off");
+            if let Some(ticket) = app.portal.ticket(&id) {
+                note(&app, ticket, signed.account.clone(), signed.ip.to_string(), crate::portal::NOTE_TOTP_REMOVED, String::new());
+            }
+            json(StatusCode::OK, "{\"ok\":true}\n".into())
+        }
+        CodeCheck::NoAuthenticator => json(StatusCode::CONFLICT, "{\"ok\":false,\"error\":\"You have no authenticator.\"}\n".into()),
+        CodeCheck::Wrong => {
+            app.guesses.failed(ip, &signed.account, now);
+            json(StatusCode::BAD_REQUEST, "{\"ok\":false,\"error\":\"That code is not right.\"}\n".into())
+        }
+    }
+}
+
+#[derive(serde::Deserialize)]
 struct TotpRequest {
     action: String,
     name: String,
@@ -468,6 +608,11 @@ async fn admin_totp(State(app): State<Arc<App>>, Extension(PublicHost(host)): Ex
     match app.store.remove(&req.name) {
         Ok(removed) => {
             warn!(admin = signed.account, account = req.name, removed, "an administrator removed the authenticator of an account");
+            if removed {
+                if let Some(ticket) = app.portal.ticket(&id) {
+                    note(&app, ticket, signed.account.clone(), signed.ip.to_string(), crate::portal::NOTE_TOTP_REMOVED_BY_ADMIN, req.name.clone());
+                }
+            }
             json(StatusCode::OK, format!("{}\n", serde_json::json!({ "ok": true, "removed": removed })))
         }
         Err(e) => {
