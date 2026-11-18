@@ -7,6 +7,7 @@ mod bridge;
 mod fleet;
 mod link;
 mod people;
+mod relay;
 #[cfg(test)]
 mod e2e;
 mod limits;

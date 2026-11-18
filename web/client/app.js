@@ -93,20 +93,27 @@ function show(view) {
 }
 // A portal account has no desktop on the portal's own machine: its card lists the servers it is assigned to. (Opening a desktop on one is the next step.)
 function showServers(s) {
-  const list = $('state');
   const servers = s.servers || [];
   $('who').textContent = servers.length ? 'Your servers:' : 'No server is assigned to you yet. Ask an administrator.';
+  const list = $('state');
   list.replaceChildren(...servers.flatMap((v) => {
     const dt = document.createElement('dt');
     const dd = document.createElement('dd');
     dt.textContent = v.name;
-    dd.textContent = (v.online ? 'online' : 'offline') + (v.desktop ? ' \u00b7 ' + v.desktop : '');
+    dd.append(document.createTextNode((v.online ? 'online' : 'offline') + (v.desktop ? ' \u00b7 ' + v.desktop : '') + ' '));
+    const open = document.createElement('button');
+    open.type = 'button';
+    open.className = 'btn sm primary';
+    open.textContent = 'Open';
+    open.disabled = !v.online;
+    open.addEventListener('click', () => { openServer = v.id; openDesktop(); });
+    dd.append(open);
     return [dt, dd];
   }));
   list.hidden = servers.length === 0;
-  $('open').disabled = true;
-  $('openfs').disabled = true;
-  $('deskmsg').textContent = 'Opening a desktop from here comes in the next step. For now use an RDP client with your app password (My account).';
+  // The buttons are per server here; the general ones are for the machine the portal runs on.
+  document.querySelector('#deskform .actions').hidden = true;
+  $('deskmsg').textContent = s.app_password_set ? '' : 'For an RDP client (Windows App, Remmina), make an app password in My account.';
 }
 // What the server says about this account's desktop (the helper's own row for it): running since when, which desktop and graphics. When it
 // cannot say, the card keeps its plain text.
@@ -116,6 +123,8 @@ async function showState() {
   $('open').disabled = false;
   $('openfs').disabled = false;
   $('deskmsg').textContent = '';
+  document.querySelector('#deskform .actions').hidden = false;
+  openServer = '';
   try {
     const r = await fetch('/api/mine', { cache: 'no-store' });
     if (!r.ok) return;
@@ -282,6 +291,8 @@ $('signout').addEventListener('click', async () => {
 
 // The stream: the canvas is made first (it needs the page's size to ask for a desktop of that size), then the connection starts; the server
 // logs it in with the ticket of this sign-in, so no password is typed or sent again.
+// The server a portal account opens its desktop on ('' for the machine the portal runs on).
+let openServer = '';
 function openStream() {
   showSession(true);
   const canvas = document.createElement('canvas');
@@ -304,7 +315,7 @@ function openStream() {
   if (params.get('debug') === '1') globalThis.__desk = desk; // for looking at the decoder's numbers in the console
   heldPassword = '';
   $('pass2').value = '';
-  desk.connect({ width: size.width, height: size.height, scale: size.scale });
+  desk.connect({ width: size.width, height: size.height, scale: size.scale, server: openServer });
 }
 
 async function openDesktop() {

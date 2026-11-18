@@ -552,6 +552,10 @@ pub enum HelperReq {
     /// A line for the audit log about something the portal did that the helper cannot see (an authenticator set up or taken away): `event` is
     /// one of `NOTE_*`, `target` an account name or empty. The line names the account that logged in on this connection and where it came from.
     AuditNote { event: u8, target: String },
+    /// A ticket for `user` from `source`, without a password: for a server's agent, which opens a browser stream for a person the portal has
+    /// signed in. Only a connection from root (the agent) may ask for it, and root may ask for nothing else; the account still has to be one that may
+    /// log in (`PamPolicy::still_allowed`), and redeeming the ticket checks that again.
+    IssueFor { user: String, source: String },
     Bye,
 }
 
@@ -656,6 +660,11 @@ impl HelperReq {
                 o.u8(*event);
                 o.str(target);
             }
+            HelperReq::IssueFor { user, source } => {
+                o.u8(11);
+                o.str(user);
+                o.str(source);
+            }
             HelperReq::Bye => o.u8(255),
         }
         o.0
@@ -684,6 +693,7 @@ impl HelperReq {
             8 => HelperReq::Audit { since: i.str()?, user: i.str()?, event: i.str()?, outcome: i.str()?, limit: i.u16()? },
             9 => HelperReq::ChangePassword { old: i.str()?, new: i.str()? },
             10 => HelperReq::AuditNote { event: i.u8()?, target: i.str()? },
+            11 => HelperReq::IssueFor { user: i.str()?, source: i.str()? },
             255 => HelperReq::Bye,
             t => return Err(ProtoError::UnknownTag(t)),
         };
@@ -935,6 +945,7 @@ mod tests {
             HelperReq::Info { kind: InfoKind::Cert },
             HelperReq::ChangePassword { old: "pä ss".into(), new: "x".repeat(20) },
             HelperReq::AuditNote { event: NOTE_TOTP_REMOVED_BY_ADMIN, target: "ana".into() },
+            HelperReq::IssueFor { user: "ana".into(), source: "203.0.113.9".into() },
             HelperReq::Admin { json: r#"{"action":"user_add","name":"frida"}"#.into() },
             HelperReq::Audit { since: "7d".into(), user: "alice".into(), event: "admin".into(), outcome: "fail".into(), limit: 200 },
             HelperReq::Bye,

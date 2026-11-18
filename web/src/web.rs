@@ -92,6 +92,8 @@ pub struct App {
     /// The links the servers dialled, and how often an address may try to open one.
     pub links: crate::link::Links,
     pub agent_rate: RateLimiter,
+    /// Desktops waiting for their server's agent to dial back (`relay.rs`).
+    pub relays: crate::relay::Relays,
     /// The portal's own accounts (`people.rs`), their two-step records (apart from the host accounts'), and the limits that protect their passwords.
     pub people: crate::people::People,
     pub pstore: Store,
@@ -127,6 +129,7 @@ impl App {
             enrol_rate: RateLimiter::new(10, Duration::from_secs(60)),
             links: crate::link::Links::new(),
             agent_rate: RateLimiter::new(30, Duration::from_secs(60)),
+            relays: crate::relay::Relays::new(),
             people: crate::people::People::open(cfg.totp_dir.join("people.json")).expect("the people file could not be read"),
             pstore: Store::new(&cfg.totp_dir.join("people")),
             pw_guesses: Guesses::new(20, 5, Duration::from_secs(600)),
@@ -194,6 +197,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/api/admin/audit", get(admin_audit))
         .route("/api/admin/servers", get(servers_list).post(servers_do).layer(axum::extract::DefaultBodyLimit::max(1024)))
         .route("/agent", get(agent_ws))
+        .route("/relay", get(relay_ws))
         .route("/api/admin/people", get(people_list).post(people_do).layer(axum::extract::DefaultBodyLimit::max(2048)))
         .route("/api/account/apppass", post(app_password).layer(axum::extract::DefaultBodyLimit::max(64)))
         .route("/api/enrol", post(enrol).layer(axum::extract::DefaultBodyLimit::max(512)))
@@ -1396,13 +1400,13 @@ async fn ws_handler(State(app): State<Arc<App>>, Extension(ClientAddr(peer)): Ex
 
 /// The browser stream: a signed-in browser's WebSocket, bridged to the daemon (see `stream.rs`). The account is the cookie's. A WebSocket carries
 /// no CSRF header, so what keeps another page from opening one in a visitor's name is the `Origin` check and the cookie's `SameSite=Strict`.
-async fn stream_handler(State(app): State<Arc<App>>, Extension(ClientAddr(peer)): Extension<ClientAddr>, Extension(PublicHost(host)): Extension<PublicHost>, headers: HeaderMap, ws: WebSocketUpgrade) -> Response {
+async fn stream_handler(State(app): State<Arc<App>>, Extension(ClientAddr(peer)): Extension<ClientAddr>, Extension(PublicHost(host)): Extension<PublicHost>, Query(which): Query<WhichServer>, headers: HeaderMap, ws: WebSocketUpgrade) -> Response {
     if !origin_ok(&headers, &host, app.cfg.public_origin.as_deref()) {
         return text(StatusCode::FORBIDDEN, "wrong origin\n");
     }
     let Some((id, signed)) = signed_in(&app, &headers) else { return text(StatusCode::UNAUTHORIZED, "not signed in\n") };
     if signed.portal_user {
-        return text(StatusCode::NOT_IMPLEMENTED, "the browser desktop of a portal account is not built yet\n");
+        return remote_stream(&app, peer.ip(), signed, which.server.as_deref().unwrap_or(""), ws);
     }
     let Some(ticket) = app.portal.ticket(&id) else { return text(StatusCode::UNAUTHORIZED, "not signed in\n") };
     if app.cfg.gateway_key.is_none() {
@@ -1419,6 +1423,61 @@ async fn stream_handler(State(app): State<Arc<App>>, Extension(ClientAddr(peer))
     };
     info!(%ip, account = signed.account, active = app.sessions.active(), "stream requested");
     ws.max_message_size(crate::stream::MAX_CLIPBOARD_FROM_BROWSER).max_frame_size(crate::stream::MAX_CLIPBOARD_FROM_BROWSER).on_upgrade(move |socket| crate::stream::run(socket, ip, signed.account, ticket, app, guard))
+}
+
+/// A portal account opens a desktop on one of its servers: it has to be assigned to it (and made there by the portal), not switched off, and the
+/// server has to be online. The portal then makes a token, the server's agent is told over its link to dial back with it, and the two WebSockets are
+/// passed on to each other (`stream::run_remote`). The account the server is told is the signed-in one; the browser names only the server.
+fn remote_stream(app: &Arc<App>, ip: IpAddr, signed: Signed, server: &str, ws: WebSocketUpgrade) -> Response {
+    if !valid_server_id(server) {
+        return text(StatusCode::BAD_REQUEST, "choose a server\n");
+    }
+    let Some(me) = app.people.get(&signed.account).filter(|p| !p.disabled && p.servers.iter().any(|a| a.server == server) && app.people.made_on(&p.name, server)) else {
+        return text(StatusCode::FORBIDDEN, "that server is not assigned to you\n");
+    };
+    if !app.links.online(server) {
+        return text(StatusCode::SERVICE_UNAVAILABLE, "that server is offline\n");
+    }
+    if !app.ws_rate.hit(ip, Instant::now()) {
+        return text(StatusCode::TOO_MANY_REQUESTS, "too many attempts, wait a minute\n");
+    }
+    let guard = match app.sessions.start(ip) {
+        Ok(g) => g,
+        Err(Refusal::PerAddress) => return text(StatusCode::TOO_MANY_REQUESTS, "too many sessions from this address\n"),
+        Err(Refusal::Total) => return text(StatusCode::SERVICE_UNAVAILABLE, "the portal is full\n"),
+    };
+    let Some((token, agent)) = app.relays.expect(server) else { return text(StatusCode::SERVICE_UNAVAILABLE, "too many desktops are opening, try again\n") };
+    info!(%ip, account = me.name, server, "remote stream requested");
+    let (app, server) = (app.clone(), server.to_string());
+    ws.max_message_size(crate::stream::MAX_CLIPBOARD_FROM_BROWSER).max_frame_size(crate::stream::MAX_CLIPBOARD_FROM_BROWSER).on_upgrade(move |socket| crate::stream::run_remote(socket, ip, me.name, server, token, agent, app, guard))
+}
+
+/// The agent of a server dials this to carry one desktop: `/relay`, upgraded to a WebSocket. The first frame names the server, its key and the token
+/// the portal gave it over the link; the WebSocket is then handed to the browser's task that waits for it.
+async fn relay_ws(State(app): State<Arc<App>>, Extension(ClientAddr(peer)): Extension<ClientAddr>, ws: WebSocketUpgrade) -> Response {
+    if !app.agent_rate.hit(peer.ip(), Instant::now()) {
+        return text(StatusCode::TOO_MANY_REQUESTS, "too many attempts, wait a minute\n");
+    }
+    ws.max_message_size(crate::stream::MAX_FROM_DAEMON).max_frame_size(crate::stream::MAX_FROM_DAEMON).on_upgrade(move |mut socket| async move {
+        use axum::extract::ws::Message;
+        let hello = match tokio::time::timeout(Duration::from_secs(10), socket.recv()).await {
+            Ok(Some(Ok(Message::Text(t)))) if t.len() <= 1024 => t,
+            _ => return,
+        };
+        let v: serde_json::Value = serde_json::from_str(hello.as_str()).unwrap_or_default();
+        let (server, key, token) = (v["server"].as_str().unwrap_or(""), v["key"].as_str().unwrap_or(""), v["token"].as_str().unwrap_or(""));
+        if v["t"] != "relay" || !valid_server_id(server) || key.len() != 64 || token.len() != 32 || !app.fleet.authenticate(server, key) {
+            warn!(ip = %peer.ip(), "a relay was refused: wrong hello or key");
+            return;
+        }
+        match app.relays.take(token, server) {
+            Some(waiting) => {
+                // The browser's task takes it from here; when it has gone, the socket is dropped and the agent sees the end.
+                let _ = waiting.send(socket);
+            }
+            None => warn!(ip = %peer.ip(), server, "a relay was refused: the token is not live for this server"),
+        }
+    })
 }
 
 /// `root` joined with a path from a URL, only if it stays inside `root` and names no hidden file.

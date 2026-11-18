@@ -106,3 +106,72 @@ async fn session(ws: &mut WebSocket, ip: IpAddr, account: &str, ticket: &str, ap
     }
     result.map(|()| (from_browser_bytes, to_browser_bytes))
 }
+
+/// A desktop on another server: the browser's WebSocket and the agent's (it dialled `/relay`) are passed on to each other, message for message. Each
+/// message is one message of the daemon's protocol, as with a local stream (the agent adds and takes off the length); the limits on what the browser
+/// may send are the same, and the account the daemon is told was fixed by the portal when it asked the agent, never by the browser.
+pub async fn run_remote(mut ws: WebSocket, ip: IpAddr, account: String, server: String, token: String, agent: tokio::sync::oneshot::Receiver<WebSocket>, app: Arc<App>, _guard: SessionGuard) {
+    let started = Instant::now();
+    // The agent was told to dial back: tell the browser nothing until it has, and give up when it does not.
+    let asked = app.links.request(&server, serde_json::json!({ "open": { "token": token, "account": account, "ip": ip.to_string() } }), Duration::from_secs(20)).await;
+    let mut agent_ws = match asked {
+        Ok(_) => match tokio::time::timeout(crate::relay::WAIT, agent).await {
+            Ok(Ok(a)) => a,
+            _ => {
+                app.relays.forget(&token);
+                info!(%ip, account, server, "the server's agent did not dial back");
+                let _ = ws.send(Message::Close(None)).await;
+                return;
+            }
+        },
+        Err(e) => {
+            app.relays.forget(&token);
+            info!(%ip, account, server, "the server could not open the desktop: {e:?}");
+            let _ = ws.send(Message::Close(None)).await;
+            return;
+        }
+    };
+    let (mut from_browser, mut to_browser) = (0u64, 0u64);
+    let mut ping = tokio::time::interval(PING_EVERY);
+    let mut last_heard = Instant::now();
+    let result: Result<(), String> = loop {
+        tokio::select! {
+            m = ws.recv() => match m {
+                Some(Ok(Message::Binary(b))) => {
+                    last_heard = Instant::now();
+                    if b.is_empty() || b.len() > if b[0] == 9 { MAX_CLIPBOARD_FROM_BROWSER } else { MAX_FROM_BROWSER } {
+                        break Err(format!("a message of {} bytes from the browser", b.len()));
+                    }
+                    from_browser += b.len() as u64;
+                    if let Err(e) = agent_ws.send(Message::Binary(b)).await { break Err(format!("write to the server: {e}")); }
+                }
+                Some(Ok(Message::Close(_))) | None => break Ok(()),
+                Some(Ok(Message::Text(_))) => break Err("a text message from the browser".into()),
+                Some(Ok(_)) => last_heard = Instant::now(),
+                Some(Err(e)) => break Err(format!("the browser's connection failed: {e}")),
+            },
+            m = agent_ws.recv() => match m {
+                Some(Ok(Message::Binary(b))) => {
+                    if b.len() > MAX_FROM_DAEMON { break Err("the server sent a message that is too large".into()); }
+                    to_browser += b.len() as u64;
+                    if let Err(e) = ws.send(Message::Binary(b)).await { break Err(format!("write to the browser: {e}")); }
+                }
+                Some(Ok(Message::Close(_))) | None => break Ok(()),
+                Some(Ok(Message::Text(_))) => break Err("a text message from the server".into()),
+                Some(Ok(_)) => {}
+                Some(Err(e)) => break Err(format!("the server's connection failed: {e}")),
+            },
+            _ = ping.tick() => {
+                if last_heard.elapsed() > SILENCE_LIMIT { break Err("the browser went silent".into()); }
+                if ws.send(Message::Ping(Vec::new().into())).await.is_err() { break Ok(()); }
+                let _ = agent_ws.send(Message::Ping(Vec::new().into())).await;
+            }
+        }
+    };
+    if let Err(e) = &result {
+        warn!(%ip, account, server, "{e}");
+    }
+    info!(%ip, account, server, seconds = started.elapsed().as_secs(), from_browser, to_browser, "remote stream ended");
+    let _ = agent_ws.send(Message::Close(None)).await;
+    let _ = ws.send(Message::Close(None)).await;
+}

@@ -13,6 +13,13 @@
 #[allow(dead_code)]
 mod adminaction;
 mod link;
+// The helper's own messages (a ticket for an account, without a password: root only) and the line the daemon's gateway port reads first.
+#[path = "../../src/proto.rs"]
+#[allow(dead_code)]
+mod proto;
+#[path = "../../src/gateway.rs"]
+#[allow(dead_code)]
+mod daemon_gateway;
 
 use std::io::{BufRead as _, Read as _, Write as _};
 use std::os::unix::fs::OpenOptionsExt as _;
@@ -45,6 +52,24 @@ struct Config {
     server: String,
     key: String,
     pin: Option<String>,
+    /// The root helper's socket (it gives the agent a ticket for a person the portal signed in), the daemon's gateway port and the file with its key:
+    /// where `waydesk` has them by default. A desktop can be opened here only when the daemon was started with `--gateway-bind` and `--gateway-key`.
+    #[serde(default = "default_helper")]
+    helper_socket: String,
+    #[serde(default = "default_gateway")]
+    gateway: String,
+    #[serde(default = "default_gateway_key")]
+    gateway_key_file: String,
+}
+
+fn default_helper() -> String {
+    "/run/waydesk/helper.sock".into()
+}
+fn default_gateway() -> String {
+    "127.0.0.1:3390".into()
+}
+fn default_gateway_key() -> String {
+    "/etc/waydesk/gateway.key".into()
 }
 
 /// `https://host[:port]` -> (host, port). Nothing else is accepted: no path, no credentials, no plain HTTP.
@@ -161,7 +186,7 @@ async fn enrol(portal: &str, code: &str, pin: Option<String>) -> Result<()> {
     if server.is_empty() || key.len() != 64 {
         bail!("the portal's answer is not what an enrolment looks like");
     }
-    let cfg = Config { portal: portal.trim_end_matches('/').to_string(), server: server.to_string(), key: key.to_string(), pin };
+    let cfg = Config { portal: portal.trim_end_matches('/').to_string(), server: server.to_string(), key: key.to_string(), pin, helper_socket: default_helper(), gateway: default_gateway(), gateway_key_file: default_gateway_key() };
     std::fs::create_dir_all("/etc/waydesk")?;
     save_config(&cfg, Path::new(CONFIG))?;
     println!("enrolled as {server}; start the link with: systemctl enable --now waydesk-agent");
@@ -265,6 +290,9 @@ async fn serve(cfg: &Config) -> Result<()> {
     eprintln!("waydesk-agent: link up to {}", cfg.portal);
     let (out_tx, mut out_rx) = tokio::sync::mpsc::channel::<String>(8);
     let slots = Arc::new(tokio::sync::Semaphore::new(2));
+    let cfg_shared = Arc::new(Config { portal: cfg.portal.clone(), server: cfg.server.clone(), key: cfg.key.clone(), pin: cfg.pin.clone(), helper_socket: cfg.helper_socket.clone(), gateway: cfg.gateway.clone(), gateway_key_file: cfg.gateway_key_file.clone() });
+    // At most this many desktops through this agent at once.
+    let desktops = Arc::new(tokio::sync::Semaphore::new(MAX_DESKTOPS));
     let mut last = Instant::now();
     let mut watch = tokio::time::interval(Duration::from_secs(10));
     loop {
@@ -278,6 +306,11 @@ async fn serve(cfg: &Config) -> Result<()> {
                     }
                     let id = req["id"].as_u64().unwrap_or(0);
                     let out_tx = out_tx.clone();
+                    if let Some(open) = req.get("open") {
+                        // A desktop for a person the portal signed in: a ticket from the helper, then a second connection back to the portal.
+                        tokio::spawn(open_desktop(cfg_shared.clone(), open.clone(), id, out_tx, desktops.clone()));
+                        continue;
+                    }
                     let Ok(permit) = slots.clone().try_acquire_owned() else {
                         let _ = out_tx.send(json!({ "t": "res", "id": id, "ok": false, "error": "this server is busy, try again" }).to_string()).await;
                         continue;
@@ -301,6 +334,129 @@ async fn serve(cfg: &Config) -> Result<()> {
             _ = watch.tick() => if last.elapsed() > Duration::from_secs(70) { bail!("the portal went quiet") },
         }
     }
+}
+
+// ---- desktops ----
+
+/// Desktops that may be open through one agent at once.
+const MAX_DESKTOPS: usize = 32;
+/// What the browser may send in a message (a clipboard text may be longer), and what the daemon may send (a whole H.264 picture): as in `stream.rs`.
+const MAX_FROM_PORTAL: usize = 1 + 1024 * 1024;
+const MAX_FROM_DAEMON: usize = 16 * 1024 * 1024;
+
+/// A ticket for `account` from the root helper, for a person the portal signed in from `ip`. The helper refuses it for an account that may not log in.
+fn ticket_for(helper_socket: &str, account: &str, ip: std::net::IpAddr) -> Result<String> {
+    use proto::{HelperReq, HelperResp};
+    let mut sock = std::os::unix::net::UnixStream::connect(helper_socket).with_context(|| format!("cannot reach the helper at {helper_socket}"))?;
+    sock.set_read_timeout(Some(Duration::from_secs(15)))?;
+    sock.set_write_timeout(Some(Duration::from_secs(15)))?;
+    proto::write_frame(&mut sock, &HelperReq::IssueFor { user: account.to_string(), source: ip.to_string() }.encode()).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let body = proto::read_frame(&mut sock).map_err(|e| anyhow::anyhow!("{e}"))?.context("the helper closed the connection")?;
+    let answer = match HelperResp::decode(&body).map_err(|e| anyhow::anyhow!("{e}"))? {
+        HelperResp::Ticket { ticket } => Ok(ticket),
+        HelperResp::Error { message } => Err(anyhow::anyhow!("{message}")),
+        other => Err(anyhow::anyhow!("unexpected answer from the helper: {other:?}")),
+    };
+    let _ = proto::write_frame(&mut sock, &HelperReq::Bye.encode());
+    answer
+}
+
+/// The portal asked for a desktop: get the ticket, say so (the portal waits for the dial-back after that), and carry the desktop until it ends.
+async fn open_desktop(cfg: Arc<Config>, open: Value, id: u64, out: tokio::sync::mpsc::Sender<String>, slots: Arc<tokio::sync::Semaphore>) {
+    let answer = |ok: bool, text: &str| json!({ "t": "res", "id": id, "ok": ok, if ok { "json" } else { "error" }: text }).to_string();
+    let token = open.get("token").and_then(Value::as_str).unwrap_or("");
+    let account = open.get("account").and_then(Value::as_str).unwrap_or("");
+    let ip = open.get("ip").and_then(Value::as_str).and_then(|i| i.parse::<std::net::IpAddr>().ok());
+    let (Some(ip), true, true) = (ip, token.len() == 32 && token.bytes().all(|b| b.is_ascii_hexdigit()), adminaction::valid_name(account)) else {
+        let _ = out.send(answer(false, "not a request this agent answers")).await;
+        return;
+    };
+    let Ok(permit) = slots.try_acquire_owned() else {
+        let _ = out.send(answer(false, "this server has too many desktops open through the portal")).await;
+        return;
+    };
+    let (helper, who) = (cfg.helper_socket.clone(), account.to_string());
+    let ticket = match tokio::task::spawn_blocking(move || ticket_for(&helper, &who, ip)).await {
+        Ok(Ok(t)) => t,
+        Ok(Err(e)) => {
+            let _ = out.send(answer(false, &format!("{e:#}"))).await;
+            return;
+        }
+        Err(_) => {
+            let _ = out.send(answer(false, "it failed")).await;
+            return;
+        }
+    };
+    let _ = out.send(answer(true, "{}")).await;
+    if let Err(e) = relay(&cfg, token, account, ip, &ticket).await {
+        eprintln!("waydesk-agent: a desktop of {account} ended: {e:#}");
+    }
+    drop(permit);
+}
+
+/// One desktop: the daemon's gateway port on one side, a WebSocket to the portal's `/relay` on the other. Each WebSocket message is one message of the
+/// daemon's browser protocol; towards the daemon it gets a length in front (`u32`, little endian), and the other way the length is taken off.
+async fn relay(cfg: &Config, token: &str, account: &str, ip: std::net::IpAddr, ticket: &str) -> Result<()> {
+    let key = std::fs::read_to_string(&cfg.gateway_key_file).with_context(|| format!("cannot read the gateway key {}", cfg.gateway_key_file))?;
+    let daemon = tokio::time::timeout(Duration::from_secs(5), TcpStream::connect(&cfg.gateway)).await.context("the daemon's gateway port did not answer")?.with_context(|| format!("cannot reach the gateway port {} (the daemon needs --gateway-bind and --gateway-key)", cfg.gateway))?;
+    daemon.set_nodelay(true).ok();
+    let (mut rd, mut wr) = daemon.into_split();
+    wr.write_all(daemon_gateway::stream_line(key.trim(), account, ip, ticket).as_bytes()).await?;
+
+    let tls = connect(&cfg.portal, cfg.pin.as_deref()).await?;
+    let (host, port) = parse_portal(&cfg.portal)?;
+    let url = if port == 443 { format!("wss://{host}/relay") } else { format!("wss://{host}:{port}/relay") };
+    let ws_cfg = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default().max_message_size(Some(MAX_FROM_PORTAL + 16)).max_frame_size(Some(MAX_FROM_PORTAL + 16));
+    let (ws, _) = tokio_tungstenite::client_async_with_config(url, tls, Some(ws_cfg)).await.context("the portal did not accept the relay")?;
+    let (mut tx, mut rx) = ws.split();
+    tx.send(Message::Text(json!({ "t": "relay", "server": cfg.server, "key": cfg.key, "token": token }).to_string().into())).await?;
+
+    // The daemon's messages are read in a task of their own: a read of a whole message is not something to cut short in a select.
+    let (from_daemon_tx, mut from_daemon) = tokio::sync::mpsc::channel::<Vec<u8>>(8);
+    let reader = tokio::spawn(async move {
+        loop {
+            let mut len = [0u8; 4];
+            if rd.read_exact(&mut len).await.is_err() {
+                return;
+            }
+            let len = u32::from_le_bytes(len) as usize;
+            if len == 0 || len > MAX_FROM_DAEMON {
+                return;
+            }
+            let mut body = vec![0u8; len];
+            if rd.read_exact(&mut body).await.is_err() || from_daemon_tx.send(body).await.is_err() {
+                return;
+            }
+        }
+    });
+    let mut last = Instant::now();
+    let mut watch = tokio::time::interval(Duration::from_secs(15));
+    let result: Result<()> = loop {
+        tokio::select! {
+            m = rx.next() => match m {
+                Some(Ok(Message::Binary(b))) => {
+                    last = Instant::now();
+                    if b.is_empty() || b.len() > MAX_FROM_PORTAL { break Err(anyhow::anyhow!("a message of {} bytes from the portal", b.len())); }
+                    let mut framed = Vec::with_capacity(4 + b.len());
+                    framed.extend_from_slice(&(b.len() as u32).to_le_bytes());
+                    framed.extend_from_slice(&b);
+                    if let Err(e) = wr.write_all(&framed).await { break Err(anyhow::anyhow!("write to the daemon: {e}")); }
+                }
+                Some(Ok(Message::Close(_))) | None => break Ok(()),
+                Some(Ok(Message::Ping(_))) | Some(Ok(Message::Pong(_))) => last = Instant::now(),
+                Some(Ok(_)) => break Err(anyhow::anyhow!("a message of a kind the portal does not send")),
+                Some(Err(e)) => break Err(anyhow::anyhow!("the portal's connection failed: {e}")),
+            },
+            m = from_daemon.recv() => match m {
+                Some(body) => if let Err(e) = tx.send(Message::Binary(body.into())).await { break Err(anyhow::anyhow!("write to the portal: {e}")); },
+                None => break Ok(()),
+            },
+            _ = watch.tick() => if last.elapsed() > Duration::from_secs(120) { break Err(anyhow::anyhow!("the portal went quiet")); },
+        }
+    };
+    reader.abort();
+    let _ = tx.send(Message::Close(None)).await;
+    result
 }
 
 async fn run() -> Result<()> {
@@ -385,7 +541,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("wd-agent-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("agent.json");
-        let cfg = Config { portal: "https://p".into(), server: "s-00000000".into(), key: "k".repeat(64), pin: None };
+        let cfg = Config { portal: "https://p".into(), server: "s-00000000".into(), key: "k".repeat(64), pin: None, helper_socket: default_helper(), gateway: default_gateway(), gateway_key_file: default_gateway_key() };
         save_config(&cfg, &path).unwrap();
         assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
         assert_eq!(serde_json::from_str::<Config>(&std::fs::read_to_string(&path).unwrap()).unwrap(), cfg);

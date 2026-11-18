@@ -75,8 +75,9 @@ export class Desk {
     this.tapped = new Set(); // keys sent as a whole tap (their key-up is not sent again)
   }
 
-  connect({ width, height, scale }) {
-    const url = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/stream';
+  // `server`: the id of a server the portal relays to (a portal account); empty for the machine the portal runs on.
+  connect({ width, height, scale, server = '' }) {
+    const url = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/stream' + (server ? '?server=' + encodeURIComponent(server) : '');
     const ws = new WebSocket(url);
     ws.binaryType = 'arraybuffer';
     this.ws = ws;

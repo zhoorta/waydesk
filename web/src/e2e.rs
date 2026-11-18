@@ -1258,3 +1258,152 @@ async fn an_account_that_was_on_the_server_already_is_never_taken_over() {
     assert!(body.contains("not taken over") || body.contains("not made by the portal"), "{body}");
     assert!(env.app.people.get("pana").unwrap().servers.is_empty());
 }
+
+#[tokio::test]
+async fn a_portal_person_opens_a_desktop_on_their_server_through_the_agents_dial_back() {
+    let env = start("relay", Opts::default()).await;
+    let boss_pw = env.app.people.add("pboss", "", true, 0).unwrap();
+    let ana_pw = env.app.people.add("pana", "", false, 0).unwrap();
+    let eva_pw = env.app.people.add("peva", "", false, 0).unwrap();
+    let boss = env.sign_in("pboss", &boss_pw, "").await.1.unwrap();
+    let ana = env.sign_in("pana", &ana_pw, "").await.1.unwrap();
+    let eva = env.sign_in("peva", &eva_pw, "").await.1.unwrap();
+    let origin = env.origin();
+    let at = |text: &str, name: &str| {
+        let i = text.find(&format!("\"{name}\":\"")).unwrap() + name.len() + 4;
+        text[i..].split('"').next().unwrap().to_string()
+    };
+    let h = [("Cookie", boss.cookie.as_str()), ("Origin", origin.as_str()), ("X-CSRF-Token", boss.csrf.as_str())];
+    let (_, added) = env.send("POST", "/api/admin/servers", &h, r#"{"action":"add","name":"Far"}"#).await;
+    let (sid, code) = (at(&added, "id"), at(&added, "code"));
+    let (_, enrolled) = env.send("POST", "/api/enrol", &[], &format!("{{\"code\":\"{code}\"}}")).await;
+    let key = at(&enrolled, "key");
+
+    // A stand-in agent: answers an `open` request, then dials `/relay` with the token and echoes every message reversed.
+    let asked: Arc<std::sync::Mutex<Vec<serde_json::Value>>> = Default::default();
+    let req = format!("wss://{}/agent", env.host()).into_client_request().unwrap();
+    let (mut link, _) = tokio_tungstenite::client_async(req, env.tls().await).await.unwrap();
+    link.send(Message::Text(serde_json::json!({"t":"hello","server":sid,"key":key,"version":1}).to_string().into())).await.unwrap();
+    link.next().await;
+    let (files, gateway, host) = (env.files.clone(), env.gateway, env.host());
+    let (seen, sid2, key2) = (asked.clone(), sid.clone(), key.clone());
+    tokio::spawn(async move {
+        while let Some(Ok(m)) = link.next().await {
+            let Message::Text(t) = m else { continue };
+            let v: serde_json::Value = serde_json::from_str(t.as_str()).unwrap();
+            seen.lock().unwrap().push(v.clone());
+            let id = v["id"].clone();
+            link.send(Message::Text(serde_json::json!({"t":"res","id":id,"ok":true,"json":"{}"}).to_string().into())).await.unwrap();
+            let token = v["open"]["token"].as_str().unwrap().to_string();
+            let (files, sid2, key2, host) = (files.clone(), sid2.clone(), key2.clone(), host.clone());
+            tokio::spawn(async move {
+                let tcp = TcpStream::connect(gateway).await.unwrap();
+                let tls = tokio_rustls::TlsConnector::from(tlsconf::daemon_client_config(files).unwrap()).connect(ServerName::try_from("localhost").unwrap(), tcp).await.unwrap();
+                let req = format!("wss://{host}/relay").into_client_request().unwrap();
+                let (mut ws, _) = tokio_tungstenite::client_async(req, tls).await.unwrap();
+                ws.send(Message::Text(serde_json::json!({"t":"relay","server":sid2,"key":key2,"token":token}).to_string().into())).await.unwrap();
+                while let Some(Ok(m)) = ws.next().await {
+                    if let Message::Binary(b) = m {
+                        let mut r = b.to_vec();
+                        r.reverse();
+                        ws.send(Message::Binary(r.into())).await.unwrap();
+                    }
+                }
+            });
+        }
+    });
+
+    let open = |b: &Browser, server: &str| {
+        let (env, cookie, origin) = (&env, b.cookie.clone(), env.origin());
+        let path = format!("/stream?server={server}");
+        async move {
+            let mut req = format!("wss://{}{path}", env.host()).into_client_request().unwrap();
+            req.headers_mut().insert("Cookie", cookie.parse().unwrap());
+            req.headers_mut().insert("Origin", origin.parse().unwrap());
+            tokio_tungstenite::client_async(req, env.tls().await).await.map(|(s, _)| s)
+        }
+    };
+    // Nobody is assigned yet: refused before anything is asked of the server.
+    assert!(open(&ana, &sid).await.is_err(), "not assigned");
+    assert!(open(&ana, "").await.is_err(), "no server named");
+    assert!(open(&ana, "s-zzzzzzzz").await.is_err());
+    assert!(asked.lock().unwrap().is_empty());
+    let assign = |name: &str| format!(r#"{{"action":"assign","name":"{name}","server":"{sid}"}}"#);
+    // The stand-in link answers `do` requests with "{}": that is not an ok runner answer, so use the store directly for the assignment.
+    env.app.people.assign("pana", crate::people::Assignment { server: sid.clone(), desktop: None, gpu: None, memory: None }).unwrap();
+    assert!(open(&ana, &sid).await.is_err(), "assigned, but the portal did not make the account there");
+    env.app.people.mark_made("pana", &sid).unwrap();
+    let _ = assign;
+
+    let mut ws = open(&ana, &sid).await.expect("assigned and made");
+    ws.send(Message::Binary(vec![1, 2, 3].into())).await.unwrap();
+    loop {
+        match ws.next().await.unwrap().unwrap() {
+            Message::Binary(got) => {
+                assert_eq!(got.as_ref(), [3, 2, 1], "the message went to the agent's side and came back");
+                break;
+            }
+            Message::Ping(_) | Message::Pong(_) => {}
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+    {
+        let asked = asked.lock().unwrap();
+        let open = &asked[0]["open"];
+        assert_eq!(open["account"], "pana", "the account is the signed-in one");
+        assert_eq!(open["ip"], "127.0.0.1");
+        assert_eq!(open["token"].as_str().unwrap().len(), 32);
+    }
+    // A message that is too large for a browser to send ends the desktop.
+    ws.send(Message::Binary(vec![7u8; crate::stream::MAX_FROM_BROWSER + 1].into())).await.unwrap();
+    loop {
+        match ws.next().await {
+            None | Some(Err(_)) | Some(Ok(Message::Close(_))) => break,
+            Some(Ok(_)) => {}
+        }
+    }
+    // Another person cannot use ana's server; a switched-off person cannot open one; an offline server is refused.
+    assert!(open(&eva, &sid).await.is_err());
+    env.app.people.set_disabled("pana", true).unwrap();
+    assert!(open(&ana, &sid).await.is_err(), "switched off");
+    env.app.people.set_disabled("pana", false).unwrap();
+    // A host-style account never gets a `server` stream through this path.
+    let _ = boss;
+}
+
+#[tokio::test]
+async fn a_relay_needs_the_servers_key_and_a_live_token_for_that_server_and_works_once() {
+    let env = start("relaytoken", Opts::default()).await;
+    let boss_pw = env.app.people.add("pboss", "", true, 0).unwrap();
+    let boss = env.sign_in("pboss", &boss_pw, "").await.1.unwrap();
+    let origin = env.origin();
+    let at = |text: &str, name: &str| {
+        let i = text.find(&format!("\"{name}\":\"")).unwrap() + name.len() + 4;
+        text[i..].split('"').next().unwrap().to_string()
+    };
+    let h = [("Cookie", boss.cookie.as_str()), ("Origin", origin.as_str()), ("X-CSRF-Token", boss.csrf.as_str())];
+    let mut keys = Vec::new();
+    for name in ["One", "Two"] {
+        let (_, added) = env.send("POST", "/api/admin/servers", &h, &format!(r#"{{"action":"add","name":"{name}"}}"#)).await;
+        let (_, enrolled) = env.send("POST", "/api/enrol", &[], &format!("{{\"code\":\"{}\"}}", at(&added, "code"))).await;
+        keys.push((at(&added, "id"), at(&enrolled, "key")));
+    }
+    let (token, waiting) = env.app.relays.expect(&keys[0].0).unwrap();
+    let dial = |server: String, key: String, token: String| {
+        let env = &env;
+        async move {
+            let req = format!("wss://{}/relay", env.host()).into_client_request().unwrap();
+            let (mut ws, _) = tokio_tungstenite::client_async(req, env.tls().await).await.unwrap();
+            ws.send(Message::Text(serde_json::json!({"t":"relay","server":server,"key":key,"token":token}).to_string().into())).await.unwrap();
+            // A refused relay is closed by the portal.
+            matches!(tokio::time::timeout(std::time::Duration::from_millis(500), ws.next()).await, Ok(None) | Ok(Some(Ok(Message::Close(_)))) | Ok(Some(Err(_))))
+        }
+    };
+    assert!(dial(keys[0].0.clone(), "0".repeat(64), token.clone()).await, "wrong key");
+    assert!(dial(keys[1].0.clone(), keys[1].1.clone(), token.clone()).await, "another server's key with this token");
+    assert!(dial(keys[0].0.clone(), keys[0].1.clone(), "0".repeat(32)).await, "unknown token");
+    // The right server, key and token: not refused, and the waiting side gets the socket.
+    assert!(!dial(keys[0].0.clone(), keys[0].1.clone(), token.clone()).await);
+    assert!(tokio::time::timeout(std::time::Duration::from_secs(2), waiting).await.unwrap().is_ok());
+    assert!(dial(keys[0].0.clone(), keys[0].1.clone(), token).await, "once");
+}

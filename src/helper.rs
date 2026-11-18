@@ -170,13 +170,15 @@ pub fn run(cfg: Config) -> Result<()> {
                 continue;
             }
         };
-        match peer_uid(&sock) {
-            Some(uid) if uid == daemon.uid => {}
+        // The daemon's account, and root: a server's agent (root) may ask for tickets (`IssueFor`) and for nothing else.
+        let root_peer = match peer_uid(&sock) {
+            Some(uid) if uid == daemon.uid => false,
+            Some(0) => true,
             other => {
                 warn!(?other, "refused a connection from another account");
                 continue;
             }
-        }
+        };
         if active.fetch_add(1, Ordering::AcqRel) >= MAX_CONNECTIONS {
             active.fetch_sub(1, Ordering::AcqRel);
             warn!("too many connections, refused");
@@ -184,7 +186,7 @@ pub fn run(cfg: Config) -> Result<()> {
         }
         let (cfg, policy, sessions, active, register_path, tickets) = (cfg.clone(), policy.clone(), sessions.clone(), active.clone(), register_path.clone(), tickets.clone());
         std::thread::spawn(move || {
-            serve(sock, &cfg, &policy, &sessions, &tickets, &register_path);
+            serve(sock, &cfg, &policy, &sessions, &tickets, &register_path, root_peer);
             active.fetch_sub(1, Ordering::AcqRel);
         });
     }
@@ -378,7 +380,7 @@ fn session_for(user: &UserInfo, source: &str, cfg: &Config, sessions: &Sessions,
 }
 
 /// One daemon connection: one client of the daemon.
-fn serve(mut sock: UnixStream, cfg: &Config, policy: &PamPolicy, sessions: &Sessions, tickets: &crate::tickets::Tickets, register_path: &std::path::Path) {
+fn serve(mut sock: UnixStream, cfg: &Config, policy: &PamPolicy, sessions: &Sessions, tickets: &crate::tickets::Tickets, register_path: &std::path::Path, root_peer: bool) {
     let mut who: Option<UserInfo> = None;
     // Where the client that logged in on this connection comes from, and since when: the daemon holds one connection per client, so the
     // end of this one is the end of that client's connection (written here, where the daemon cannot forge it).
@@ -396,7 +398,31 @@ fn serve(mut sock: UnixStream, cfg: &Config, policy: &PamPolicy, sessions: &Sess
                 break;
             }
         };
+        // Root (an agent) may ask for a ticket and say goodbye, and nothing else; the daemon's account may do everything but ask for a ticket without a password.
+        let allowed_for_peer = match &req {
+            HelperReq::Bye => true,
+            HelperReq::IssueFor { .. } => root_peer,
+            _ => !root_peer,
+        };
+        if !allowed_for_peer {
+            warn!(root_peer, "a request that this peer may not make");
+            reply(&mut sock, &HelperResp::Error { message: "not allowed for this peer".into() });
+            break;
+        }
         let ok = match req {
+            HelperReq::IssueFor { user, source } => {
+                let allowed = source.parse::<std::net::IpAddr>().ok().and_then(|_| policy.still_allowed(&user));
+                match allowed.and_then(|info| tickets.issue(&info, &source, Instant::now()).map(|t| (info, t))) {
+                    Some((info, ticket)) => {
+                        audit::event("login.ticket.issued", Outcome::Ok).typed_name(&info.name).num("uid", info.uid.into()).source(&source).str("via", "agent").emit();
+                        reply(&mut sock, &HelperResp::Ticket { ticket })
+                    }
+                    None => {
+                        audit::event("login.ticket.issued", Outcome::Refused).str("reason", "not_allowed").source(&source).str("via", "agent").emit();
+                        reply(&mut sock, &HelperResp::Error { message: "that account may not log in".into() })
+                    }
+                }
+            }
             HelperReq::Authenticate { user, password, source } => {
                 if who.is_some() {
                     reply(&mut sock, &HelperResp::Error { message: "already logged in on this connection".into() })
