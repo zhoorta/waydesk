@@ -1923,7 +1923,7 @@ fn audit_emit(name: &'static str, worked: bool, target: Option<String>, detail: 
         e = e.num("actor_uid", uid.into()).str("actor", &audit::name_of(uid).unwrap_or_default());
     }
     if let Some(name) = &remote_actor {
-        e = e.str("actor", name).str("origin", "portal account");
+        e = e.str("actor", name).str("actor_kind", "portal account");
     }
     if let Some(t) = &target {
         e = e.str("target", t);
