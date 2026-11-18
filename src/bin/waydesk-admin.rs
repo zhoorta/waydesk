@@ -357,7 +357,10 @@ fn serve_request() -> Result<()> {
     };
     let exe = std::env::current_exe().context("path of this program")?;
     let mut command = Command::new(exe);
-    command.args(action.args()).env_clear().env("PATH", "/usr/sbin:/usr/bin:/sbin:/bin").env("WAYDESK_VIA", "portal").env("WAYDESK_SOURCE", source).stdin(Stdio::null());
+    command.args(action.args()).env_clear().env("PATH", "/usr/sbin:/usr/bin:/sbin:/bin").env("WAYDESK_VIA", "portal").env("WAYDESK_SOURCE", source);
+    // What the command reads on standard input (a chosen password), if anything; never on its command line.
+    let input = action.stdin();
+    command.stdin(if input.is_some() { Stdio::piped() } else { Stdio::null() });
     if let Some(actor) = req.get("remote_actor") {
         // From the server's agent (root, which dialled the portal): the administrator is an account of the PORTAL's machine, not one of this one, so
         // there is no uid to check here; the audit line names the account. The name is held to the rule for account names, as everything else.
@@ -372,7 +375,14 @@ fn serve_request() -> Result<()> {
         let Some(actor) = actor.filter(|_| is_admin) else { return reply(json!({ "ok": false, "error": "only administrators may do this" })) };
         command.env("SUDO_UID", actor.to_string());
     }
-    let out = command.output().context("cannot run waydesk-admin")?;
+    let out = if let Some(input) = input {
+        command.stdout(Stdio::piped()).stderr(Stdio::piped());
+        let mut child = command.spawn().context("cannot run waydesk-admin")?;
+        child.stdin.take().context("no input pipe")?.write_all(input.as_bytes())?;
+        child.wait_with_output()?
+    } else {
+        command.output().context("cannot run waydesk-admin")?
+    };
     let stdout = String::from_utf8_lossy(&out.stdout);
     if out.status.success() {
         // `users add` and `users passwd` print JSON (with the new password); the others print a sentence.

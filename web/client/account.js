@@ -118,8 +118,27 @@ export async function render(root, csrf, onSignedOut, flash) {
   } else if (info.totp !== 'off') {
     twoStepBody.push(el('div', {}, button('Set up', () => setUp(csrf, onSignedOut, finished), 'primary')));
   }
+  const boxes = [win('password', form), win('two-step sign-in', ...twoStepBody)];
+  if (info.portal) boxes.push(win('app password', el('p', {}, 'A native RDP client (Windows App, Remote Desktop, Remmina) asks for a password. Use an app password, not your portal password.'), el('div', {}, button('Make an app password', () => appPassword(csrf, onSignedOut, finished), 'primary')),
+    el('p', { class: 'hint' }, 'It replaces the last one on every server you are assigned to, and is shown once. A server you are assigned to later gets it when you make a new one.')));
   root.replaceChildren(
     el('div', { class: 'head' }, el('h1', {}, 'My account'), el('span', { class: 'sp' }), el('span', { class: 'muted small' }, info.account)),
-    el('div', { class: 'two' }, win('password', form), win('two-step sign-in', ...twoStepBody)),
+    el('div', { class: 'two' }, ...boxes),
   );
+}
+
+// The app password is made by the server, set on each of the person's servers, and shown once here.
+async function appPassword(csrf, onSignedOut, done) {
+  const r = await post('/api/account/apppass', csrf);
+  if (r.status === 401) { onSignedOut(); return; }
+  if (r.status === 429) { done('Too many attempts. Wait a minute.', 'bad'); return; }
+  if (!r.data || !r.data.ok) { done((r.data && r.data.error) || 'The server could not make it.', 'bad'); return; }
+  const box = el('code', { class: 'secret' }, r.data.password);
+  const copy = button('Copy', async () => { try { await navigator.clipboard.writeText(r.data.password); copy.textContent = 'Copied'; } catch { copy.textContent = 'Select and copy it'; } });
+  const failed = (r.data.failed || []).map((f) => f.server + ': ' + f.error);
+  const d = modal('your app password', [
+    el('p', {}, 'Shown once. It is set on: ' + (r.data.servers || []).join(', ') + '.'),
+    box,
+    failed.length ? el('p', { class: 'bad' }, 'Not set on: ' + failed.join('; ') + '. Make a new one when those servers are online.') : null,
+  ], [copy, button('Done', () => d.close(), 'primary')]);
 }

@@ -6,6 +6,7 @@
 mod bridge;
 mod fleet;
 mod link;
+mod people;
 #[cfg(test)]
 mod e2e;
 mod limits;
@@ -37,6 +38,7 @@ const USAGE: &str = "usage: waydesk-web [--bind ADDR:PORT] [--cert FILE] [--key 
                    [--totp off|optional|required] [--totp-dir DIR (default /var/lib/waydesk-web)] [--gateway-key FILE]
                    [--helper-socket FILE] [--idle-minutes N]
 set up codes: waydesk-web totp add ACCOUNT | recovery ACCOUNT | remove ACCOUNT | list
+portal accounts: waydesk-web people add NAME [--admin] [--display TEXT] | list | passwd NAME | remove NAME   [--dir DIR]
 behind a reverse proxy: --plain-http --trusted-proxy 127.0.0.1 --public-origin https://waydesk.example.com (docs: web/README.md)
 defaults: --helper-socket /run/waydesk/helper.sock (only the daemon's account can open it: run as that account) --idle-minutes 30 --bind 127.0.0.1:8443 --cert /etc/waydesk/cert.pem --key /etc/waydesk/key.pem --target 127.0.0.1:3389 --root /usr/share/waydesk/web
           --rate-per-minute 10 --max-per-ip 3 --max-total 64";
@@ -225,6 +227,19 @@ async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().map(String::as_str) == Some("totp") {
         return totp::cli(&args[1..]);
+    }
+    if args.first().map(String::as_str) == Some("people") {
+        // `waydesk-web people add NAME --admin`: the portal's own accounts (people.rs); `--dir` is the state directory (default /var/lib/waydesk-web).
+        let mut rest: Vec<String> = args[1..].to_vec();
+        let dir = match rest.iter().position(|a| a == "--dir") {
+            Some(i) if i + 1 < rest.len() => {
+                let d = PathBuf::from(rest.remove(i + 1));
+                rest.remove(i);
+                d
+            }
+            _ => PathBuf::from("/var/lib/waydesk-web"),
+        };
+        return people::cli(&rest, &dir);
     }
     let cfg = parse_args(args.into_iter())?;
     let files = tlsconf::CertFiles::open(&cfg.cert, &cfg.key)?;

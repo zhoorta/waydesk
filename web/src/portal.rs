@@ -229,6 +229,8 @@ pub struct Signed {
     pub account: String,
     pub ip: IpAddr,
     pub csrf: String,
+    /// An account of the portal itself (`people.rs`), not a system account of the machine the portal runs on: it has no ticket for the root helper.
+    pub portal_user: bool,
 }
 
 struct Entry {
@@ -263,8 +265,13 @@ impl Portal {
 
     /// The value of the cookie.
     pub fn sign_in(&self, account: &str, ip: IpAddr, ticket: String, now: Instant) -> Option<(String, Signed)> {
+        self.sign_in_as(account, ip, ticket, false, now)
+    }
+
+    /// `portal_user`: the account is one of the portal's own; `ticket` is then empty (there is no helper login behind it).
+    pub fn sign_in_as(&self, account: &str, ip: IpAddr, ticket: String, portal_user: bool, now: Instant) -> Option<(String, Signed)> {
         let id = random_hex(32)?;
-        let signed = Signed { account: account.to_owned(), ip, csrf: random_hex(16)? };
+        let signed = Signed { account: account.to_owned(), ip, csrf: random_hex(16)?, portal_user };
         let mut map = self.entries.lock().unwrap_or_else(|e| e.into_inner());
         self.expire(&mut map, now);
         // The account's oldest sign-in goes when it has too many.
@@ -302,6 +309,11 @@ impl Portal {
     /// The helper's ticket of a live sign-in.
     pub fn ticket(&self, id: &str) -> Option<String> {
         self.entries.lock().unwrap_or_else(|e| e.into_inner()).get(id).map(|e| e.ticket.clone())
+    }
+
+    /// Ends every sign-in of an account (it was switched off or its password was reset).
+    pub fn end_account(&self, account: &str) {
+        self.entries.lock().unwrap_or_else(|e| e.into_inner()).retain(|_, e| e.signed.account != account || !e.signed.portal_user);
     }
 
     pub fn count(&self) -> usize {

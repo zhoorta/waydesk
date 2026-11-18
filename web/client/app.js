@@ -91,16 +91,37 @@ function show(view) {
   }
   if (view === 'login') $('user').focus();
 }
+// A portal account has no desktop on the portal's own machine: its card lists the servers it is assigned to. (Opening a desktop on one is the next step.)
+function showServers(s) {
+  const list = $('state');
+  const servers = s.servers || [];
+  $('who').textContent = servers.length ? 'Your servers:' : 'No server is assigned to you yet. Ask an administrator.';
+  list.replaceChildren(...servers.flatMap((v) => {
+    const dt = document.createElement('dt');
+    const dd = document.createElement('dd');
+    dt.textContent = v.name;
+    dd.textContent = (v.online ? 'online' : 'offline') + (v.desktop ? ' \u00b7 ' + v.desktop : '');
+    return [dt, dd];
+  }));
+  list.hidden = servers.length === 0;
+  $('open').disabled = true;
+  $('openfs').disabled = true;
+  $('deskmsg').textContent = 'Opening a desktop from here comes in the next step. For now use an RDP client with your app password (My account).';
+}
 // What the server says about this account's desktop (the helper's own row for it): running since when, which desktop and graphics. When it
 // cannot say, the card keeps its plain text.
 async function showState() {
   const el = $('state');
   el.hidden = true;
+  $('open').disabled = false;
+  $('openfs').disabled = false;
+  $('deskmsg').textContent = '';
   try {
     const r = await fetch('/api/mine', { cache: 'no-store' });
     if (!r.ok) return;
     const s = await r.json();
     if (!s.available) return;
+    if (s.portal) { showServers(s); return; }
     const running = s.session === 'running';
     $('who').textContent = running ? 'Your desktop is running.' : 'Your desktop starts when you open it, in about 20 seconds.';
     const rows = [['State', running ? 'running' + (s.since ? ' since ' + s.since.replace(/^\w+ /, '') : '') : 'not started'], ['Desktop', s.desktop_running || s.desktop], ['Graphics', s.gpu]];
@@ -121,13 +142,15 @@ function route() {
   const account = view === 'account';
   const signedOut = () => { me = null; show('login'); say('Your sign-in ended. Sign in again.', true); };
   $('adminnav').hidden = !(me && me.admin);
+  // A portal account has nothing on the portal's own machine: no audit log or machine settings of its own, only the servers and the people.
+  for (const a of document.querySelectorAll('[data-local-only]')) a.hidden = Boolean(me && me.portal);
   $('mypage').hidden = admin || account;
   $('adminpage').hidden = !(admin || account);
   for (const a of document.querySelectorAll('.topbar nav a')) {
     if (a.dataset.view === (admin || account ? view : 'desktop')) a.setAttribute('aria-current', 'page');
     else a.removeAttribute('aria-current');
   }
-  if (admin) renderAdmin(view, $('adminpage'), signedOut, () => me.csrf);
+  if (admin) renderAdmin(view, $('adminpage'), signedOut, () => me.csrf, Boolean(me.portal));
   else if (account) {
     stopAdmin();
     renderAccount($('adminpage'), () => me.csrf, signedOut, (text, tone) => {
@@ -144,7 +167,7 @@ window.addEventListener('hashchange', () => { if (me && !$('desk').hidden) route
 async function learnRole() {
   try {
     const r = await fetch('/api/me', { cache: 'no-store' });
-    if (r.ok) me.admin = (await r.json()).admin === true;
+    if (r.ok) { const j = await r.json(); me.admin = j.admin === true; me.portal = j.portal === true; }
   } catch { /* no admin pages then */ }
 }
 const showSession = (on) => show(on ? 'session' : (me ? 'desk' : 'login'));

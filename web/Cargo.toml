@@ -19,6 +19,7 @@ path = "src/agent.rs"
 
 [dependencies]
 anyhow = "1.0.104"
+argon2 = { version = "0.5", default-features = false, features = ["alloc", "password-hash"] }
 axum = { version = "0.8.9", features = ["ws"] }
 data-encoding = "2.11.1"
 futures-util = "0.3.34"
@@ -47,3 +48,9 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 [dev-dependencies]
 rcgen = "0.14.10"
 tokio-tungstenite = "0.30.0"
+
+# Password hashing is slow on purpose; in a debug build (the tests) it would be far slower still.
+[profile.dev.package.argon2]
+opt-level = 3
+[profile.dev.package.blake2]
+opt-level = 3

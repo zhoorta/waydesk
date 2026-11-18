@@ -17,6 +17,10 @@ pub enum AdminAction {
     UserDisable { name: String, keep_session: bool },
     /// A new random password, shown once.
     UserPasswd { name: String },
+    /// A password chosen by the portal (the app password of a portal user, the same on every server): read from standard input by the command,
+    /// never on its command line. Only a server's agent may ask for this (`carries_secret`); the helper refuses it, so it never passes through the
+    /// helper's logs.
+    UserSetPassword { name: String, password: String },
     /// The desktop and graphics of the account's sessions; `None` leaves the setting as it is.
     UserSet { name: String, desktop: Option<String>, gpu: Option<String> },
     /// The memory limit of the account's session (`6G`), or `reset`.
@@ -60,7 +64,20 @@ impl AdminAction {
     pub fn name(&self) -> &str {
         match self {
             Self::Access { .. } => "",
-            Self::UserAdd { name } | Self::UserEnable { name } | Self::UserDisable { name, .. } | Self::UserPasswd { name } | Self::UserSet { name, .. } | Self::UserLimit { name, .. } | Self::SessionEnd { name } => name,
+            Self::UserAdd { name } | Self::UserEnable { name } | Self::UserDisable { name, .. } | Self::UserPasswd { name } | Self::UserSetPassword { name, .. } | Self::UserSet { name, .. } | Self::UserLimit { name, .. } | Self::SessionEnd { name } => name,
+        }
+    }
+
+    /// Whether the action carries a secret that must not pass through the helper (and its logs): only a server's agent may relay it.
+    pub fn carries_secret(&self) -> bool {
+        matches!(self, Self::UserSetPassword { .. })
+    }
+
+    /// What the command reads on standard input, when it does.
+    pub fn stdin(&self) -> Option<String> {
+        match self {
+            Self::UserSetPassword { password, .. } => Some(format!("{password}\n")),
+            _ => None,
         }
     }
 
@@ -70,6 +87,7 @@ impl AdminAction {
             return Err("that is not a valid account name (lower case letters, digits, _ and -, at most 32)".into());
         }
         match self {
+            Self::UserSetPassword { password, .. } if password.chars().count() < 8 || password.len() > 128 || password.contains(['\n', '\r', '\0']) => return Err("the password must be 8 to 128 characters, on one line".into()),
             Self::Access { mode } if !matches!(mode.as_str(), "local" | "lan" | "vpn") => return Err("the access setting must be local, lan or vpn".into()),
             Self::UserSet { desktop, gpu, .. } => {
                 if desktop.is_none() && gpu.is_none() {
@@ -102,6 +120,7 @@ impl AdminAction {
                 v
             }
             Self::UserPasswd { name } => vec![s("users"), s("passwd"), s(name), s("--json")],
+            Self::UserSetPassword { name, .. } => vec![s("users"), s("passwd"), s(name), s("--stdin")],
             Self::UserSet { name, desktop, gpu } => {
                 let mut v = vec![s("users"), s("set"), s(name)];
                 if let Some(d) = desktop {
@@ -130,6 +149,8 @@ impl AdminAction {
             Self::UserEnable { name } => json!({ "action": "user_enable", "name": name }),
             Self::UserDisable { name, keep_session } => json!({ "action": "user_disable", "name": name, "keep_session": keep_session }),
             Self::UserPasswd { name } => json!({ "action": "user_passwd", "name": name }),
+            // The password is not written out: this is the form that is logged and shown.
+            Self::UserSetPassword { name, .. } => json!({ "action": "user_setpw", "name": name }),
             Self::UserSet { name, desktop, gpu } => json!({ "action": "user_set", "name": name, "desktop": desktop, "gpu": gpu }),
             Self::UserLimit { name, memory } => json!({ "action": "user_limit", "name": name, "memory": memory }),
             Self::SessionEnd { name } => json!({ "action": "session_end", "name": name }),
@@ -157,6 +178,7 @@ impl AdminAction {
             "user_enable" => Self::UserEnable { name },
             "user_disable" => Self::UserDisable { name, keep_session: v.get("keep_session").and_then(Value::as_bool).unwrap_or(false) },
             "user_passwd" => Self::UserPasswd { name },
+            "user_setpw" => Self::UserSetPassword { name, password: text("password").ok_or("a password is needed")? },
             "user_set" => Self::UserSet { name, desktop: opt("desktop")?, gpu: opt("gpu")? },
             "user_limit" => Self::UserLimit { name, memory: text("memory").ok_or("a memory limit is needed")? },
             "session_end" => Self::SessionEnd { name },
@@ -183,6 +205,19 @@ mod tests {
         for bad in ["", "-rf", "Alice", "9lives", "a b", "a;b", "a/b", "../x", "root\n", "ünï", &"a".repeat(33)] {
             assert!(!valid_name(bad), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn a_chosen_password_goes_on_standard_input_never_on_the_command_line_or_in_the_logged_form() {
+        let a = parse(r#"{"action":"user_setpw","name":"eva","password":"correct horse battery"}"#).unwrap();
+        assert_eq!(a.args(), ["users", "passwd", "eva", "--stdin"]);
+        assert_eq!(a.stdin().as_deref(), Some("correct horse battery\n"));
+        assert!(a.carries_secret());
+        assert!(!a.to_json().to_string().contains("horse"));
+        for bad in [r#"{"action":"user_setpw","name":"eva"}"#, r#"{"action":"user_setpw","name":"eva","password":"short"}"#, r#"{"action":"user_setpw","name":"eva","password":"two\nlines-long"}"#, r#"{"action":"user_setpw","name":"Eva","password":"long enough pw"}"#] {
+            assert!(parse(bad).is_err(), "{bad}");
+        }
+        assert!(parse(r#"{"action":"user_passwd","name":"eva"}"#).unwrap().stdin().is_none());
     }
 
     #[test]

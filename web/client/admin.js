@@ -11,6 +11,8 @@ const sessionSince = (s) => (s ? s.replace(/^\w+ /, '').replace(/ [A-Z]{2,5}$/, 
 
 // Which machine the pages are about: '' is the one the portal runs on, otherwise the id of a server that dialled in (see the picker). Kept for the tab.
 let server = '';
+// A portal account has nothing on the portal's own machine: the pages are about a server, never "this machine".
+let portalOnly = false;
 try { server = sessionStorage.getItem('wd-server') || ''; } catch { /* no storage: the portal's own machine */ }
 const pick = (id) => { server = id; try { sessionStorage.setItem('wd-server', id); } catch { /* fine */ } };
 const q = () => (server ? '?server=' + encodeURIComponent(server) : '');
@@ -22,7 +24,8 @@ async function picker() {
   const usable = list.filter((v) => v.state === 'online' || v.state === 'offline');
   if (!usable.length) { if (server) pick(''); return null; }
   if (server && !usable.some((v) => v.id === server)) pick('');
-  const s = el('select', { 'aria-label': 'Server' }, el('option', { value: '' }, 'This machine'), usable.map((v) => el('option', { value: v.id, selected: v.id === server }, v.name + (v.state === 'online' ? '' : ' (offline)'))));
+  if (portalOnly && !server) pick(usable.find((v) => v.state === 'online')?.id || usable[0].id);
+  const s = el('select', { 'aria-label': 'Server' }, portalOnly ? null : el('option', { value: '' }, 'This machine'), usable.map((v) => el('option', { value: v.id, selected: v.id === server }, v.name + (v.state === 'online' ? '' : ' (offline)'))));
   s.value = server;
   s.addEventListener('change', () => { pick(s.value); ctx.reload(); });
   return s;
@@ -70,7 +73,7 @@ async function run(action, done) {
 function showPassword(who, password, why) {
   const box = el('code', { class: 'secret' }, password);
   const copy = button('Copy', async () => { try { await navigator.clipboard.writeText(password); copy.textContent = 'Copied'; } catch { copy.textContent = 'Select and copy it'; } });
-  const d = modal(why + ': ' + who, [el('p', {}, 'The password is shown once. Give it to the person; they should change it at once (Change password, in the desktop\u2019s power menu).'), box], [copy, button('Done', () => d.close(), 'primary')]);
+  const d = modal(why + ': ' + who, [el('p', {}, 'The password is shown once. Give it to the person; they should change it at once (My account, or Change password in the desktop\u2019s power menu).'), box], [copy, button('Done', () => d.close(), 'primary')]);
 }
 
 function addUser() {
@@ -131,6 +134,89 @@ async function resetPassword(u) {
 async function endSession(name) {
   if (!(await confirmBox('End the session of ' + name + '?', 'Their programs are closed and unsaved work is lost.', 'End session', true))) return;
   run({ action: 'session_end', name }, () => 'Ended the session of ' + name + '.');
+}
+
+// ---- people ----
+async function peopleAct(body) {
+  const r = await fetch('/api/admin/people', { method: 'POST', cache: 'no-store', headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': ctx.csrf() }, body: JSON.stringify(body) });
+  if (r.status === 401) { ctx.signedOut(); throw new Error('Your sign-in ended.'); }
+  if (r.status === 403) throw new Error('Only administrators can do this.');
+  if (r.status === 429) throw new Error('Too many changes in a minute. Wait a little.');
+  let out = null;
+  try { out = await r.json(); } catch { /* handled below */ }
+  if (!out) throw new Error('The server could not do this (' + r.status + ').');
+  if (!out.ok) throw new Error(out.error || 'It did not work.');
+  return out;
+}
+
+async function personDo(body, done) {
+  try {
+    const out = await peopleAct(body);
+    const warn = (out.warnings || []).map((w) => w.server + ': ' + w.error);
+    ctx.flash(done + (warn.length ? ' Not done on: ' + warn.join('; ') : ''), warn.length ? 'bad' : 'ok');
+  } catch (e) { ctx.flash(e.message, 'bad'); }
+  ctx.reload();
+}
+
+function addPerson() {
+  const name = el('input', { name: 'name', autocomplete: 'off', autocapitalize: 'none', spellcheck: 'false', required: true, placeholder: 'frida' });
+  const display = el('input', { name: 'display', autocomplete: 'off', maxlength: 60, placeholder: 'Frida Silva (optional)' });
+  const admin = el('input', { type: 'checkbox' });
+  const err = el('p', { class: 'bad', role: 'alert' });
+  const form = el('form', { class: 'form' }, el('label', {}, 'Account name', name), el('label', {}, 'Name shown', display), el('label', { class: 'check' }, admin, 'Administrator of the portal'),
+    el('p', { class: 'hint' }, 'Lower case letters, digits, _ and -. The name becomes the account name on every server they are assigned to. A first password is made and shown once.'), err);
+  const d = modal('add person', form, [button('Cancel', () => d.close()), button('Create', () => form.requestSubmit(), 'primary')]);
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    try {
+      const r = await peopleAct({ action: 'add', name: name.value.trim(), display: display.value.trim(), admin: admin.checked });
+      d.close();
+      ctx.reload();
+      showPassword(r.name, r.password, 'first password');
+    } catch (x) { err.textContent = x.message; }
+  });
+  name.focus();
+}
+
+async function personPassword(p) {
+  if (!(await confirmBox('New password for ' + p.name + '?', 'The old password stops working at once and their sign-ins end. The new one is shown once.', 'Make a new password'))) return;
+  try { const r = await peopleAct({ action: 'passwd', name: p.name }); showPassword(p.name, r.password, 'new password'); } catch (e) { ctx.flash(e.message, 'bad'); }
+}
+
+async function personRemove(p) {
+  if (!(await confirmBox('Remove ' + p.name + '?', 'Their portal account is deleted. Take their servers away first; the accounts on the servers are switched off, not deleted.', 'Remove', true))) return;
+  personDo({ action: 'remove', name: p.name }, p.name + ' was removed.');
+}
+
+// The servers of one person: the ones they have, and a form to add one (or change its settings).
+function personServers(p, servers) {
+  const nameOf = (id) => (servers.find((v) => v.id === id) || {}).name || id;
+  const current = p.servers.length ? el('div', { class: 'tw' }, el('table', { class: 'plain' }, el('tbody', {}, p.servers.map((a) => el('tr', {},
+    cell(el('b', {}, nameOf(a.server))), cell([a.desktop || 'server default', a.gpu ? ' \u00b7 ' + a.gpu : '', a.memory ? ' \u00b7 ' + a.memory : '']),
+    cell(button('Take away', async () => {
+      d.close();
+      if (!(await confirmBox('Take ' + nameOf(a.server) + ' from ' + p.name + '?', 'Their account on that server is switched off (not deleted). Their running session ends.', 'Take away', true))) return;
+      personDo({ action: 'unassign', name: p.name, server: a.server }, nameOf(a.server) + ' was taken from ' + p.name + '.');
+    }, 'sm danger'), 'n'))))) : el('p', { class: 'muted' }, 'No server yet.');
+  const server = el('select', { name: 'server' }, servers.map((v) => el('option', { value: v.id }, v.name + (v.online ? '' : ' (offline)'))));
+  const select = (label, name, options) => el('label', {}, label, el('select', { name }, options.map(([v, t]) => el('option', { value: v }, t))));
+  const desktop = select('Desktop', 'desktop', [['', 'server default'], ['sway', 'Sway'], ['plasma', 'Plasma'], ['cosmic', 'COSMIC'], ['hyprland', 'Hyprland']]);
+  const gpu = select('Graphics', 'gpu', [['', 'server default'], ['auto', 'auto'], ['balance', 'balance'], ['off', 'off (software)']]);
+  const memory = el('input', { name: 'memory', placeholder: 'e.g. 6G (optional)', autocomplete: 'off', spellcheck: 'false' });
+  const err = el('p', { class: 'bad', role: 'alert' });
+  const form = el('form', { class: 'form' }, el('label', {}, 'Add a server', server), desktop, gpu, el('label', {}, 'Memory limit of the session', memory),
+    el('p', { class: 'hint' }, 'The account is made on that server now, so the server has to be online. An account of that name that was already there is never taken over.'), err);
+  const d = modal('servers of ' + p.name, [current, form], [button('Close', () => d.close()), button('Assign', () => form.requestSubmit(), 'primary')]);
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    if (!server.value) { err.textContent = 'No server has enrolled yet.'; return; }
+    try {
+      await peopleAct({ action: 'assign', name: p.name, server: server.value, desktop: desktop.querySelector('select').value || null, gpu: gpu.querySelector('select').value || null, memory: memory.value.trim() || null });
+      d.close();
+      ctx.flash(p.name + ' may use ' + nameOf(server.value) + '.', 'ok');
+      ctx.reload();
+    } catch (x) { err.textContent = x.message; }
+  });
 }
 
 // ---- servers ----
@@ -397,6 +483,28 @@ const views = {
     ];
   },
 
+  async people() {
+    const r = await get('people', true);
+    const servers = r.servers || [];
+    const nameOf = (id) => (servers.find((v) => v.id === id) || {}).name || id;
+    const rows = (r.people || []).map((p) => el('tr', {},
+      cell([el('b', {}, p.name), p.display ? el('span', { class: 'dim' }, ' ' + p.display) : null]),
+      cell(p.admin ? chip('admin') : el('span', { class: 'dim' }, '-')),
+      cell(p.disabled ? chip('switched off', 'bad') : chip('active', 'ok')),
+      cell(p.servers.length ? p.servers.map((a) => nameOf(a.server)).join(', ') : el('span', { class: 'dim' }, 'none')),
+      cell(el('div', { class: 'acts' },
+        button('Servers', () => personServers(p, servers), 'sm'),
+        button('New password', () => personPassword(p), 'sm'),
+        button(p.admin ? 'Not admin' : 'Make admin', () => personDo({ action: 'admin', name: p.name, on: !p.admin }, p.name + (p.admin ? ' is not an administrator any more.' : ' is an administrator now.')), 'sm'),
+        button(p.disabled ? 'Switch on' : 'Switch off', () => personDo({ action: 'disable', name: p.name, on: !p.disabled }, p.name + (p.disabled ? ' may sign in again.' : ' was switched off.')), 'sm' + (p.disabled ? '' : ' danger')),
+        button('Remove', () => personRemove(p), 'sm danger')), 'n')));
+    return [
+      el('div', { class: 'head' }, el('h1', {}, 'People'), el('span', { class: 'sp' }), button('Add person', addPerson, 'primary')),
+      win('portal accounts \u00b7 ' + rows.length, table(['Name', 'Role', 'State', 'Servers', ''], rows, 'Nobody yet.'),
+        el('p', { class: 'hint' }, 'These are accounts of the portal. Assigning a server makes the same account there, with a password nobody sees; the person makes an app password for RDP clients in My account.')),
+    ];
+  },
+
   async sessions() {
     const [list, s] = await Promise.all([get('sessions'), get('status')]);
     const by = new Map((s.users || []).map((u) => [u.name, u]));
@@ -415,8 +523,9 @@ const views = {
 
 let timer = 0;
 // Draws `view` into `root`; the numbers refresh every 10 s while the page shows (not for Users, which is a list that does not change by the second).
-export async function render(view, root, onSignedOut, csrf) {
+export async function render(view, root, onSignedOut, csrf, portal = false) {
   clearInterval(timer);
+  portalOnly = portal;
   const flashEl = document.getElementById('flash');
   ctx = {
     csrf,

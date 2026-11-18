@@ -112,6 +112,7 @@ struct Env {
     daemon_connections: Arc<AtomicUsize>,
     /// The first line the stand-in daemon read, when it expects the gateway's preamble.
     preambles: Arc<std::sync::Mutex<Vec<String>>>,
+    app: Arc<App>,
 }
 
 fn write_cert(dir: &Path, name: &str) -> (PathBuf, PathBuf) {
@@ -236,8 +237,8 @@ async fn start(name: &str, opts: Opts) -> Env {
         Some(l) => crate::allow::Allow::parse(l).unwrap(),
         None => crate::allow::Allow::any(),
     });
-    tokio::spawn(crate::serve(listener, app, tlsconf::server_config(files.clone()).unwrap(), allow));
-    Env { gateway, dir, files, daemon_connections, preambles }
+    tokio::spawn(crate::serve(listener, app.clone(), tlsconf::server_config(files.clone()).unwrap(), allow));
+    Env { gateway, dir, files, daemon_connections, preambles, app }
 }
 
 impl Drop for Env {
@@ -717,8 +718,8 @@ async fn without_a_helper_nobody_signs_in() {
     let app = App::new(cfg, tlsconf::daemon_client_config(env.files.clone()).unwrap(), Arc::new(Down));
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    tokio::spawn(crate::serve(listener, app, tlsconf::server_config(env.files.clone()).unwrap(), Arc::new(crate::allow::Allow::any())));
-    let down = Env { gateway: addr, dir: dir.clone(), files: env.files.clone(), daemon_connections: env.daemon_connections.clone(), preambles: env.preambles.clone() };
+    tokio::spawn(crate::serve(listener, app.clone(), tlsconf::server_config(env.files.clone()).unwrap(), Arc::new(crate::allow::Allow::any())));
+    let down = Env { gateway: addr, dir: dir.clone(), files: env.files.clone(), daemon_connections: env.daemon_connections.clone(), preambles: env.preambles.clone(), app };
     let (status, browser) = down.sign_in("ana", "pw-ana", "").await;
     assert_eq!(status, 503);
     assert!(browser.is_none());
@@ -1131,4 +1132,129 @@ async fn a_server_dials_in_and_the_portal_asks_it_for_lists_and_changes() {
     let (status, _) = env.send("GET", &format!("/api/admin/users?server={id}"), &[("Cookie", &boss.cookie)], "").await;
     assert_eq!(status, 503);
     assert!(agent(&env, &id, &key).await.is_err(), "the old key stays dead");
+}
+
+#[tokio::test]
+async fn the_portals_own_people_sign_in_with_argon2_passwords_and_are_assigned_to_servers() {
+    let env = start("people", Opts::default()).await;
+    let boss_pw = env.app.people.add("pboss", "Portal Boss", true, 0).unwrap();
+    let ana_pw = env.app.people.add("pana", "", false, 0).unwrap();
+    let origin = env.origin();
+    // Sign-in: right password works, a wrong one and an unknown name get the same refusal.
+    let (status, wrong) = env.sign_in("pboss", "not-the-password", "").await;
+    assert_eq!((status, wrong.is_none()), (401, true));
+    assert_eq!(env.sign_in("nobody-here", "x", "").await.0, 401);
+    let (status, boss) = env.sign_in("pboss", &boss_pw, "").await;
+    assert_eq!(status, 200);
+    let boss = boss.unwrap();
+    let ana = env.sign_in("pana", &ana_pw, "").await.1.unwrap();
+    let (_, me) = env.send("GET", "/api/me", &[("Cookie", &boss.cookie)], "").await;
+    assert!(me.contains("\"admin\":true") && me.contains("\"portal\":true"), "{me}");
+    let (_, me) = env.send("GET", "/api/me", &[("Cookie", &ana.cookie)], "").await;
+    assert!(me.contains("\"admin\":false"), "{me}");
+    // A portal account has nothing on the portal's own machine: the local pages ask for a server, the browser desktop is not built.
+    let (status, body) = env.send("GET", "/api/admin/users", &[("Cookie", &boss.cookie)], "").await;
+    assert_eq!(status, 409, "{body}");
+    assert_eq!(env.send("GET", "/api/admin/users", &[("Cookie", &ana.cookie)], "").await.0, 403);
+    assert_eq!(env.send("GET", "/api/admin/people", &[("Cookie", &ana.cookie)], "").await.0, 403);
+    let (status, list) = env.send("GET", "/api/admin/people", &[("Cookie", &boss.cookie)], "").await;
+    assert_eq!(status, 200);
+    assert!(list.contains("pana") && !list.contains("argon2") && !list.contains(&ana_pw), "{list}");
+
+    let post = |b: &Browser, path: &str, body: String| {
+        let h = vec![("Cookie", b.cookie.clone()), ("Origin", origin.clone()), ("X-CSRF-Token", b.csrf.clone())];
+        let (env, path) = (&env, path.to_string());
+        async move {
+            let h: Vec<(&str, &str)> = h.iter().map(|(k, v)| (*k, v.as_str())).collect();
+            env.send("POST", &path, &h, &body).await
+        }
+    };
+    let field = |text: &str, name: &str| -> String {
+        let at = text.find(&format!("\"{name}\":\"")).unwrap() + name.len() + 4;
+        text[at..].split('"').next().unwrap().to_string()
+    };
+    // Only an administrator changes people; nobody switches themselves off.
+    assert_eq!(post(&ana, "/api/admin/people", r#"{"action":"add","name":"x"}"#.into()).await.0, 403);
+    assert_eq!(post(&boss, "/api/admin/people", r#"{"action":"disable","name":"pboss","on":true}"#.into()).await.0, 400);
+    let (status, body) = post(&boss, "/api/admin/people", r#"{"action":"add","name":"pnew","display":"New"}"#.into()).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(field(&body, "password").len(), 19);
+    assert_eq!(post(&boss, "/api/admin/people", r#"{"action":"add","name":"Bad Name"}"#.into()).await.0, 400);
+
+    // A server dials in; assigning makes the account there, as the administrator who asked.
+    let (_, added) = post(&boss, "/api/admin/servers", r#"{"action":"add","name":"Far"}"#.into()).await;
+    let (sid, code) = (field(&added, "id"), field(&added, "code"));
+    let (_, enrolled) = env.send("POST", "/api/enrol", &[], &format!("{{\"code\":\"{code}\"}}")).await;
+    let seen = agent(&env, &sid, &field(&enrolled, "key")).await.expect("link");
+    let assign = format!(r#"{{"action":"assign","name":"pana","server":"{sid}","desktop":"plasma","memory":"6G"}}"#);
+    let (status, body) = post(&boss, "/api/admin/people", assign).await;
+    assert_eq!(status, 200, "{body}");
+    {
+        let asked = seen.lock().unwrap();
+        let actions: Vec<_> = asked.iter().map(|v| v["do"]["action"].as_str().unwrap_or("").to_string()).collect();
+        assert_eq!(actions, ["user_add", "user_set", "user_limit"]);
+        assert!(asked.iter().all(|v| v["actor"] == "pboss" && v["do"]["name"] == "pana"));
+    }
+    assert!(env.app.people.get("pana").unwrap().servers.len() == 1 && env.app.people.made_on("pana", &sid));
+    assert!(env.send("GET", "/api/mine", &[("Cookie", &ana.cookie)], "").await.1.contains("\"online\":true"));
+    // The person asks for an app password: set on the server as their own account, shown once, never kept.
+    let (status, body) = post(&ana, "/api/account/apppass", String::new()).await;
+    assert_eq!(status, 200, "{body}");
+    let app_pw = field(&body, "password");
+    assert_eq!(app_pw.len(), 19);
+    let setpw = seen.lock().unwrap().last().cloned().unwrap();
+    assert_eq!(setpw["do"]["action"], "user_setpw");
+    assert_eq!(setpw["do"]["password"], app_pw.as_str());
+    assert_eq!(setpw["actor"], "pana");
+    assert!(!std::fs::read_to_string(env.dir.join("totp/people.json")).unwrap().contains(&app_pw));
+    // A person with no server cannot ask; a host-style account has no app password.
+    assert_eq!(post(&boss, "/api/account/apppass", String::new()).await.0, 409);
+    // Switching a person off ends their sign-ins, refuses the next one and switches the account on the server off.
+    let (status, body) = post(&boss, "/api/admin/people", r#"{"action":"disable","name":"pana","on":true}"#.into()).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(seen.lock().unwrap().last().unwrap()["do"]["action"], "user_disable");
+    assert_eq!(env.send("GET", "/api/me", &[("Cookie", &ana.cookie)], "").await.0, 401, "their sign-in ended");
+    assert_eq!(env.sign_in("pana", &ana_pw, "").await.0, 401);
+    // A person with a server is not removed until the server is taken away; taking it away switches the account off there.
+    assert_eq!(post(&boss, "/api/admin/people", r#"{"action":"remove","name":"pana"}"#.into()).await.0, 400);
+    assert_eq!(post(&boss, "/api/admin/people", format!(r#"{{"action":"unassign","name":"pana","server":"{sid}"}}"#)).await.0, 200);
+    assert_eq!(post(&boss, "/api/admin/people", r#"{"action":"remove","name":"pana"}"#.into()).await.0, 200);
+}
+
+#[tokio::test]
+async fn an_account_that_was_on_the_server_already_is_never_taken_over() {
+    let env = start("peopleexists", Opts::default()).await;
+    let boss_pw = env.app.people.add("pboss", "", true, 0).unwrap();
+    env.app.people.add("pana", "", false, 0).unwrap();
+    let boss = env.sign_in("pboss", &boss_pw, "").await.1.unwrap();
+    let origin = env.origin();
+    let (_, added) = {
+        let h = [("Cookie", boss.cookie.as_str()), ("Origin", origin.as_str()), ("X-CSRF-Token", boss.csrf.as_str())];
+        env.send("POST", "/api/admin/servers", &h, r#"{"action":"add","name":"Far"}"#).await
+    };
+    let at = |text: &str, name: &str| {
+        let i = text.find(&format!("\"{name}\":\"")).unwrap() + name.len() + 4;
+        text[i..].split('"').next().unwrap().to_string()
+    };
+    let (sid, code) = (at(&added, "id"), at(&added, "code"));
+    let (_, enrolled) = env.send("POST", "/api/enrol", &[], &format!("{{\"code\":\"{code}\"}}")).await;
+    // A stand-in whose server already has an account called pana.
+    let req = format!("wss://{}/agent", env.host()).into_client_request().unwrap();
+    let (mut ws, _) = tokio_tungstenite::client_async(req, env.tls().await).await.unwrap();
+    ws.send(Message::Text(serde_json::json!({"t":"hello","server":sid,"key":at(&enrolled,"key"),"version":1}).to_string().into())).await.unwrap();
+    ws.next().await;
+    tokio::spawn(async move {
+        while let Some(Ok(m)) = ws.next().await {
+            // The portal pings every 20 s, the first one at once: only text frames are requests.
+            let Message::Text(t) = m else { continue };
+            let v: serde_json::Value = serde_json::from_str(t.as_str()).unwrap();
+            let json = r#"{"ok":false,"error":"pana exists already"}"#;
+            let _ = ws.send(Message::Text(serde_json::json!({"t":"res","id":v["id"],"ok":true,"json":json}).to_string().into())).await;
+        }
+    });
+    let h = [("Cookie", boss.cookie.as_str()), ("Origin", origin.as_str()), ("X-CSRF-Token", boss.csrf.as_str())];
+    let (status, body) = env.send("POST", "/api/admin/people", &h, &format!(r#"{{"action":"assign","name":"pana","server":"{sid}"}}"#)).await;
+    assert_eq!(status, 400, "{body}");
+    assert!(body.contains("not taken over") || body.contains("not made by the portal"), "{body}");
+    assert!(env.app.people.get("pana").unwrap().servers.is_empty());
 }

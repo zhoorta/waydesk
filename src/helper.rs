@@ -485,6 +485,7 @@ fn serve(mut sock: UnixStream, cfg: &Config, policy: &PamPolicy, sessions: &Sess
                     } else {
                         match serde_json::from_str::<serde_json::Value>(&json).map_err(|_| "the request is not JSON".to_string()).and_then(|v| crate::adminaction::AdminAction::from_json(&v)) {
                             Err(why) => refuse(&mut sock, &why),
+                            Ok(action) if action.carries_secret() => refuse(&mut sock, "this change is only made through a server's agent"),
                             Ok(action) => match crate::admininfo::run_action(&cfg.admin_socket, user.uid, source, &action) {
                                 Ok(answer) => reply(&mut sock, &HelperResp::Info { json: answer }),
                                 Err(e) => {
