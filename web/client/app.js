@@ -91,29 +91,87 @@ function show(view) {
   }
   if (view === 'login') $('user').focus();
 }
-// A portal account has no desktop on the portal's own machine: its card lists the servers it is assigned to. (Opening a desktop on one is the next step.)
+// A portal account has no desktop on the portal's own machine: one panel per server it is assigned to, each with a small picture of its desktop
+// there (when one runs), its state and the buttons to open it.
 function showServers(s) {
   const servers = s.servers || [];
-  $('who').textContent = servers.length ? 'Your servers:' : 'No server is assigned to you yet. Ask an administrator.';
-  const list = $('state');
-  list.replaceChildren(...servers.flatMap((v) => {
-    const dt = document.createElement('dt');
-    const dd = document.createElement('dd');
-    dt.textContent = v.name;
-    dd.append(document.createTextNode((v.online ? 'online' : 'offline') + (v.desktop ? ' \u00b7 ' + v.desktop : '') + ' '));
+  serverCount = servers.length;
+  $('localcard').hidden = true;
+  const hint = $('serverhint');
+  hint.hidden = false;
+  hint.textContent = servers.length ? '' : 'No server is assigned to you yet. Ask an administrator.';
+  if (servers.length && !s.app_password_set) hint.textContent = 'For an RDP client (Windows App, Remmina), make an app password in My account.';
+  hint.hidden = hint.textContent === '';
+  const box = $('servercards');
+  box.hidden = servers.length === 0;
+  box.replaceChildren(...servers.map((v) => {
+    const win = document.createElement('section');
+    win.className = 'win';
+    const bar = document.createElement('div');
+    bar.className = 'bar';
+    const title = document.createElement('span');
+    title.className = 't';
+    title.textContent = v.name;
+    bar.append(title);
+    const body = document.createElement('div');
+    body.className = 'body';
+    const shot = document.createElement('img');
+    shot.className = 'shot';
+    shot.alt = 'Your desktop on ' + v.name;
+    shot.hidden = true;
+    shot.dataset.server = v.id;
+    const none = document.createElement('div');
+    none.className = 'shot none';
+    none.textContent = v.online ? 'No desktop running' : 'Offline';
+    shot.addEventListener('error', () => { shot.hidden = true; none.hidden = false; });
+    const meta = document.createElement('p');
+    meta.className = 'muted small';
+    meta.textContent = (v.online ? 'online' : 'offline') + (v.desktop ? ' \u00b7 ' + v.desktop : '') + (v.gpu ? ' \u00b7 ' + v.gpu : '');
+    const actions = document.createElement('div');
+    actions.className = 'actions';
     const open = document.createElement('button');
     open.type = 'button';
-    open.className = 'btn sm primary';
-    open.textContent = 'Open';
+    open.className = 'btn primary';
     open.disabled = !v.online;
+    open.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-open"/></svg>';
+    open.append('Open desktop');
     open.addEventListener('click', () => { openServer = v.id; openDesktop(); });
-    dd.append(open);
-    return [dt, dd];
+    const full = document.createElement('button');
+    full.type = 'button';
+    full.className = 'btn';
+    full.disabled = !v.online;
+    full.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-full"/></svg>';
+    full.append('Open fullscreen');
+    full.addEventListener('click', () => { openServer = v.id; openDesktop(); $('fs').click(); });
+    actions.append(open, full);
+    body.append(shot, none, meta, actions);
+    win.append(bar, body);
+    return win;
   }));
-  list.hidden = servers.length === 0;
-  // The buttons are per server here; the general ones are for the machine the portal runs on.
-  document.querySelector('#deskform .actions').hidden = true;
-  $('deskmsg').textContent = s.app_password_set ? '' : 'For an RDP client (Windows App, Remmina), make an app password in My account.';
+  refreshShots();
+}
+// The pictures on the server cards: asked again every 30 s while the card is shown. A server that is offline, or has no session, shows none.
+let shotTimer = 0;
+const shotUrls = new Map();
+async function refreshShots() {
+  clearTimeout(shotTimer);
+  const imgs = [...document.querySelectorAll('#servercards img.shot')];
+  if (!imgs.length || !me || !me.portal || $('desk').hidden || $('mypage').hidden) return;
+  await Promise.all(imgs.map(async (img) => {
+    try {
+      const r = await fetch('/api/mine/shot?server=' + encodeURIComponent(img.dataset.server), { cache: 'no-store' });
+      const none = img.nextElementSibling;
+      if (r.status !== 200) { img.hidden = true; if (none) none.hidden = false; return; }
+      const url = URL.createObjectURL(await r.blob());
+      const old = shotUrls.get(img.dataset.server);
+      img.src = url;
+      img.hidden = false;
+      if (none) none.hidden = true;
+      shotUrls.set(img.dataset.server, url);
+      if (old) URL.revokeObjectURL(old);
+    } catch { img.hidden = true; if (img.nextElementSibling) img.nextElementSibling.hidden = false; }
+  }));
+  shotTimer = setTimeout(refreshShots, 30000);
 }
 // What the server says about this account's desktop (the helper's own row for it): running since when, which desktop and graphics. When it
 // cannot say, the card keeps its plain text.
@@ -124,6 +182,10 @@ async function showState() {
   $('openfs').disabled = false;
   $('deskmsg').textContent = '';
   document.querySelector('#deskform .actions').hidden = false;
+  // A portal account sees one panel per server (showServers); the others see the one card of the machine.
+  const portalPerson = Boolean(me && me.portal);
+  $('localcard').hidden = portalPerson;
+  if (!portalPerson) { $('servercards').hidden = true; $('serverhint').hidden = true; }
   openServer = '';
   try {
     const r = await fetch('/api/mine', { cache: 'no-store' });
@@ -145,8 +207,11 @@ async function showState() {
   } catch { /* the card stays as it is */ }
 }
 // The page under the top bar: "My desktop" or, for an administrator, one of the admin pages (the address after # says which).
+const OLD_ADDRESSES = { fleet: 'servers', overview: 'servers', sessions: 'servers', people: 'users' };
 function route() {
-  const view = location.hash.slice(1);
+  let view = location.hash.slice(1);
+  // Addresses of the earlier layout (Fleet, Overview, Sessions, People) open their place in the new one.
+  if (Object.hasOwn(OLD_ADDRESSES, view)) { location.hash = '#' + OLD_ADDRESSES[view]; return; }
   const admin = Boolean(me && me.admin) && adminView(view);
   const account = view === 'account';
   const signedOut = () => { me = null; show('login'); say('Your sign-in ended. Sign in again.', true); };
@@ -156,7 +221,7 @@ function route() {
   $('mypage').hidden = admin || account;
   $('adminpage').hidden = !(admin || account);
   for (const a of document.querySelectorAll('.topbar nav a')) {
-    if (a.dataset.view === (admin || account ? view : 'desktop')) a.setAttribute('aria-current', 'page');
+    if (a.dataset.view === (admin || account ? view.split('/')[0] : 'desktop')) a.setAttribute('aria-current', 'page');
     else a.removeAttribute('aria-current');
   }
   if (admin) renderAdmin(view, $('adminpage'), signedOut, () => me.csrf, Boolean(me.portal));
@@ -169,7 +234,11 @@ function route() {
       f.hidden = false;
       setTimeout(() => { f.hidden = true; }, 6000);
     });
-  } else stopAdmin();
+  } else {
+    stopAdmin();
+    // The servers of a portal account change from the Users page: ask again each time this page is shown.
+    if (me && me.portal && !$('desk').hidden) showState();
+  }
 }
 window.addEventListener('hashchange', () => { if (me && !$('desk').hidden) route(); });
 // Whether the account administers the machine is the server's answer (it asks the helper); the pages ask again on every request.
@@ -190,6 +259,7 @@ function end(message, isError = false) {
     isError = true;
     decoderFailure = '';
   }
+  stopStats();
   if (current) {
     try { if (current.ui) current.ui.shutdown(); else current.desk.detachInput(); } catch { /* already gone */ }
     current.el.remove();
@@ -293,6 +363,35 @@ $('signout').addEventListener('click', async () => {
 // logs it in with the ticket of this sign-in, so no password is typed or sent again.
 // The server a portal account opens its desktop on ('' for the machine the portal runs on).
 let openServer = '';
+let serverCount = 0;
+// The numbers in the bar, every second: the round trip to the portal (a small request of its own: the stream carries no echo to time), what the
+// stream carried (Mbit/s of H.264) and the frames shown. The round trip is the user's link; the hop from the portal to a server is not in it.
+let statTimer = 0;
+function stopStats() { clearInterval(statTimer); statTimer = 0; }
+function startStats(desk) {
+  stopStats();
+  let last = { f: desk.stats.frames, b: desk.stats.bytes, t: performance.now() };
+  let rtt = null;
+  let n = 0;
+  const ping = async () => {
+    const t = performance.now();
+    try { const r = await fetch('/healthz', { cache: 'no-store' }); rtt = r.ok ? Math.round(performance.now() - t) : null; } catch { rtt = null; }
+  };
+  ping();
+  const text = $('stattxt');
+  const dot = $('statdot');
+  statTimer = setInterval(() => {
+    const now = performance.now();
+    const dt = Math.max(0.2, (now - last.t) / 1000);
+    const fps = Math.round((desk.stats.frames - last.f) / dt);
+    const mbit = ((desk.stats.bytes - last.b) * 8) / 1e6 / dt;
+    last = { f: desk.stats.frames, b: desk.stats.bytes, t: now };
+    if (++n % 3 === 0) ping();
+    text.textContent = (rtt === null ? '– ms' : rtt + ' ms') + ' \u00b7 ' + (mbit < 10 ? mbit.toFixed(1) : Math.round(mbit)) + ' Mbit/s \u00b7 ' + fps + ' fps';
+    dot.className = 'dot' + (rtt === null ? ' off' : rtt > 150 ? ' warn' : '');
+  }, 1000);
+}
+$('switch').addEventListener('click', () => (current && current.desk ? current.desk.disconnect() : end('Disconnected.')));
 function openStream() {
   showSession(true);
   const canvas = document.createElement('canvas');
@@ -309,6 +408,9 @@ function openStream() {
     micEnded: () => { setLabel('mic', 'Mic off', false); say('The microphone stopped.'); },
   });
   current = { el: canvas, desk };
+  startStats(desk);
+  // Switch server: only for a portal account with more than one server. The desktop keeps running on its server; the page goes back to the panels.
+  $('switch').hidden = $('switchsep').hidden = !(me && me.portal && serverCount > 1);
   muted = true;
   setLabel('mute', 'Sound off', false);
   setLabel('mic', 'Mic off', false);

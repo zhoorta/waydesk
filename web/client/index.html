@@ -15,6 +15,7 @@
     <symbol id="i-snd" viewBox="0 0 24 24"><path d="M4 9v6h4l5 4V5L8 9H4zM17 8a5 5 0 0 1 0 8"/></symbol>
     <symbol id="i-mic" viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></symbol>
     <symbol id="i-key" viewBox="0 0 24 24"><rect x="3" y="6" width="18" height="12" rx="2"/><path d="M7 10h.01M11 10h.01M15 10h.01M8 14h8"/></symbol>
+    <symbol id="i-swap" viewBox="0 0 24 24"><path d="M4 8h14l-3-3M20 16H6l3 3"/></symbol>
     <symbol id="i-off" viewBox="0 0 24 24"><path d="M12 3v9M6.3 6.8a8 8 0 1 0 11.4 0"/></symbol>
   </svg>
 
@@ -41,13 +42,9 @@
         <a href="#desktop" data-view="desktop">My desktop</a>
         <a href="#account" data-view="account">My account</a>
         <span id="adminnav" hidden><span class="divider" aria-hidden="true">|</span>
-          <a href="#fleet" data-view="fleet">Fleet</a>
-          <a href="#overview" data-view="overview">Overview</a>
-          <a href="#users" data-view="users">Users</a>
           <a href="#servers" data-view="servers">Servers</a>
-          <a href="#sessions" data-view="sessions">Sessions</a>
-          <a href="#people" data-view="people">People</a>
-          <a href="#audit" data-view="audit" data-local-only>Audit</a>
+          <a href="#users" data-view="users">Users</a>
+          <a href="#audit" data-view="audit">Audit</a>
           <a href="#settings" data-view="settings" data-local-only>Settings</a></span>
       </nav>
       <div class="who"><b id="account"></b><button type="button" id="signout" class="btn sm">Sign out</button></div>
@@ -56,7 +53,7 @@
     <main class="page" id="adminpage" hidden></main>
     <main class="page" id="mypage">
       <h1>My desktop</h1>
-      <section class="win card">
+      <section class="win card" id="localcard">
         <div class="bar"><span class="t" id="cardtitle">desktop</span></div>
         <form id="deskform" class="body" method="post" action="#">
           <p id="who" class="muted"></p>
@@ -70,14 +67,19 @@
           <p id="deskmsg" role="status"></p>
         </form>
       </section>
+      <p id="serverhint" class="muted" hidden></p>
+      <div id="servercards" class="cards" hidden></div>
     </main>
   </div>
 
   <div id="session" hidden>
     <div id="bar" role="toolbar" aria-label="Session controls">
+      <button type="button" id="switch" class="ib" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-swap"/></svg><span>Switch server</span></button><span class="sep" id="switchsep" hidden></span>
       <button type="button" id="mute" class="ib" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-snd"/></svg><span>Sound off</span></button>
       <button type="button" id="mic" class="ib" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-mic"/></svg><span>Mic off</span></button>
       <button type="button" id="cad" class="ib"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-key"/></svg><span>Ctrl+Alt+Del</span></button>
+      <span class="sep"></span>
+      <span class="stat" id="stat" role="status" aria-label="Connection"><span class="dot" id="statdot"></span><span id="stattxt">connecting…</span></span>
       <span class="sep"></span>
       <button type="button" id="fs" class="ib"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-full"/></svg><span>Fullscreen</span></button>
       <button type="button" id="end" class="ib danger"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-off"/></svg><span>Disconnect</span></button>

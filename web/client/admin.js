@@ -1,4 +1,4 @@
-// The administrators' pages: Overview, Users and Sessions, read only. The data is the helper's (`waydesk-admin ... --json`), passed on by the portal at
+// The administrators' pages: Servers (each with Overview, Accounts, Sessions and Audit), Users (the portal's own), Audit and Settings. The data is the helper's (`waydesk-admin ... --json`), passed on by the portal at
 // /api/admin/*; the portal asks the helper on every request whether the account is an administrator, so hiding the menu here is only convenience.
 // Everything is put on the page with textContent (never innerHTML): a name from the machine's account list cannot become markup.
 import { el, chip, dot, win, button, modal, confirmBox } from './ui.js';
@@ -6,6 +6,8 @@ import { el, chip, dot, win, button, modal, confirmBox } from './ui.js';
 const meter = (percent, warn = false) => el('div', { class: 'meter' }, el('i', { class: warn ? 'w' : '', style: `width:${Math.max(0, Math.min(100, Math.round(percent)))}%` }));
 const gb = (mb) => (mb >= 1024 ? (mb / 1024).toFixed(mb >= 10240 ? 0 : 1) + ' GB' : Math.round(mb) + ' MB');
 const table = (heads, rows, empty) => el('div', { class: 'tw' }, rows.length === 0 ? el('p', { class: 'muted' }, empty) : el('table', {}, el('thead', {}, el('tr', {}, heads.map((h) => el('th', { class: h.startsWith('>') ? 'n' : '' }, h.replace(/^>/, ''))))), el('tbody', {}, rows)));
+// A window with a count at the right end of its title bar.
+const withCount = (w, text) => { w.querySelector('.bar').append(el('span', { class: 'act' }, text)); return w; };
 const cell = (content, cls = '') => el('td', { class: cls }, content);
 const sessionSince = (s) => (s ? s.replace(/^\w+ /, '').replace(/ [A-Z]{2,5}$/, '') : '');
 
@@ -20,13 +22,20 @@ const pick = (id) => { server = id; try { sessionStorage.setItem('wd-server', id
 const q = () => (server ? '?server=' + encodeURIComponent(server) : '');
 
 // A select of the machines to look at, when any server has enrolled. Selecting one redraws the page.
-async function picker() {
+// The machines that can be looked at; settles the chosen one first (a portal account has no "this machine", so a server must be chosen before any page asks for data).
+async function settle() {
   let list = [];
   try { list = (await get('servers', true)).servers || []; } catch { return null; }
   const usable = list.filter((v) => v.state === 'online' || v.state === 'offline');
-  if (!usable.length) { if (server) pick(''); return null; }
+  if (!usable.length) { if (server) pick(''); return usable; }
   if (server && !usable.some((v) => v.id === server)) pick('');
   if (portalOnly && !server) pick(usable.find((v) => v.state === 'online')?.id || usable[0].id);
+  return usable;
+}
+
+async function picker() {
+  const usable = await settle();
+  if (!usable || !usable.length) return null;
   const s = el('select', { 'aria-label': 'Server' }, portalOnly ? null : el('option', { value: '' }, 'This machine'), usable.map((v) => el('option', { value: v.id, selected: v.id === server }, v.name + (v.state === 'online' ? '' : ' (offline)'))));
   s.value = server;
   s.addEventListener('change', () => { pick(s.value); ctx.reload(); });
@@ -75,14 +84,14 @@ async function run(action, done) {
 function showPassword(who, password, why) {
   const box = el('code', { class: 'secret' }, password);
   const copy = button('Copy', async () => { try { await navigator.clipboard.writeText(password); copy.textContent = 'Copied'; } catch { copy.textContent = 'Select and copy it'; } });
-  const d = modal(why + ': ' + who, [el('p', {}, 'The password is shown once. Give it to the person; they should change it at once (My account, or Change password in the desktop\u2019s power menu).'), box], [copy, button('Done', () => d.close(), 'primary')]);
+  const d = modal(why + ': ' + who, [el('p', {}, 'The password is shown once. Give it to the user; they should change it at once (My account, or Change password in the desktop\u2019s power menu).'), box], [copy, button('Done', () => d.close(), 'primary')]);
 }
 
 function addUser() {
   const name = el('input', { name: 'name', autocomplete: 'off', autocapitalize: 'none', spellcheck: 'false', required: true, placeholder: 'frida' });
   const err = el('p', { class: 'bad', role: 'alert' });
   const form = el('form', { class: 'form' }, el('label', {}, 'Account name', name), el('p', { class: 'hint' }, 'Lower case letters, digits, _ and -. The account may use Waydesk at once; a first password is made and shown once.'), err);
-  const d = modal('add user', form, [button('Cancel', () => d.close()), button('Create', () => form.requestSubmit(), 'primary')]);
+  const d = modal('add account', form, [button('Cancel', () => d.close()), button('Create', () => form.requestSubmit(), 'primary')]);
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
     try {
@@ -167,7 +176,7 @@ function addPerson() {
   const err = el('p', { class: 'bad', role: 'alert' });
   const form = el('form', { class: 'form' }, el('label', {}, 'Account name', name), el('label', {}, 'Name shown', display), el('label', { class: 'check' }, admin, 'Administrator of the portal'),
     el('p', { class: 'hint' }, 'Lower case letters, digits, _ and -. The name becomes the account name on every server they are assigned to. A first password is made and shown once.'), err);
-  const d = modal('add person', form, [button('Cancel', () => d.close()), button('Create', () => form.requestSubmit(), 'primary')]);
+  const d = modal('add user', form, [button('Cancel', () => d.close()), button('Create', () => form.requestSubmit(), 'primary')]);
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
     try {
@@ -208,7 +217,7 @@ function personServers(p, servers) {
         }
       }
       ctx.reload();
-    }, 'sm danger'), 'n'))))) : el('p', { class: 'muted' }, 'No server yet.');
+    }, 'sm danger'), 'n')))))) : el('p', { class: 'muted' }, 'No server yet.');
   const server = el('select', { name: 'server' }, servers.map((v) => el('option', { value: v.id }, v.name + (v.online ? '' : ' (offline)'))));
   const select = (label, name, options) => el('label', {}, label, el('select', { name }, options.map(([v, t]) => el('option', { value: v }, t))));
   const desktop = select('Desktop', 'desktop', [['', 'server default'], ['sway', 'Sway'], ['plasma', 'Plasma'], ['cosmic', 'COSMIC'], ['hyprland', 'Hyprland']]);
@@ -283,7 +292,7 @@ async function newCode(v) {
 }
 
 async function revokeServer(v) {
-  if (!(await confirmBox('Revoke ' + v.name + '?', 'Its key stops working at once and it cannot connect. People assigned to it lose it until it is enrolled again.', 'Revoke', true))) return;
+  if (!(await confirmBox('Revoke ' + v.name + '?', 'Its key stops working at once and it cannot connect. Users assigned to it lose it until it is enrolled again.', 'Revoke', true))) return;
   try { await serverAct({ action: 'revoke', id: v.id }); ctx.flash(v.name + ' was revoked.', 'ok'); } catch (e) { ctx.flash(e.message, 'bad'); }
   ctx.reload();
 }
@@ -296,6 +305,35 @@ async function removeServer(v) {
 
 function tile(label, value, unit, percent, warn) {
   return el('div', { class: 'tile' }, el('div', { class: 'k' }, label), el('div', { class: 'big' }, value, ' ', el('small', {}, unit)), percent == null ? null : meter(percent, warn));
+}
+
+// ---- one server: its page, with tabs ----
+const TABS = [['overview', 'Overview'], ['accounts', 'Accounts'], ['sessions', 'Sessions'], ['audit', 'Audit']];
+async function serverPage(id, tab) {
+  const here = id === 'this';
+  if (here && portalOnly) return [el('p', { class: 'bad' }, 'A portal account has nothing on the portal’s own machine.')];
+  pick(here ? '' : id);
+  tab = TABS.some((t) => t[0] === tab) ? tab : 'overview';
+  const reg = await get('servers', true);
+  const v = here ? { id: '', name: 'This machine', state: 'online' } : (reg.servers || []).find((x) => x.id === id);
+  if (!v || !(v.state === 'online' || v.state === 'offline')) return [el('div', { class: 'crumb' }, el('a', { href: '#servers' }, 'Servers')), el('p', { class: 'bad' }, 'That server is not there (it may have been removed or revoked).')];
+  const head = [
+    el('div', { class: 'crumb' }, el('a', { href: '#servers' }, 'Servers'), ' › ', v.name),
+    el('div', { class: 'head' }, el('h1', {}, v.name), chip(v.state === 'online' ? 'online' : 'offline', v.state === 'online' ? 'ok' : 'warn'), el('span', { class: 'sp' })),
+    el('nav', { class: 'tabs', 'aria-label': 'Server' }, TABS.map(([k, t]) => el('a', { href: '#servers/' + id + '/' + k, 'aria-current': k === tab ? 'page' : false }, t))),
+  ];
+  if (v.state !== 'online') return [...head, el('p', { class: 'note' }, 'This server is offline: the portal cannot ask it anything. Its accounts and sessions show again when its agent reconnects.')];
+  if (tab === 'audit') auditSource = here ? '' : id;
+  const body = await views[tab]();
+  // The page has its own title and the tabs say which server it is: the title and the server picker of the single-machine pages go.
+  const first = body[0];
+  if (first && first.classList && first.classList.contains('head')) {
+    first.querySelector('h1')?.remove();
+    first.querySelector('select[aria-label="Server"]')?.remove();
+    // A title row with nothing left in it (only its spacer) would stay as an empty gap between the tabs and the table.
+    if ([...first.children].every((c) => c.classList.contains('sp'))) body.shift();
+  }
+  return [...head, ...body];
 }
 
 const views = {
@@ -325,7 +363,7 @@ const views = {
     for (const w of s.warnings || []) attention.push(['warning', 'warn', w]);
     const rows = sessionsNow.map((u) => el('tr', {}, cell(el('b', {}, u.name)), cell((u.video && u.video.compositor) || '-'), cell(u.video && u.video.encoder ? u.video.encoder : '-'), cell(gb(u.mem_mb || 0), 'n mono'), cell(Math.round(u.cpu_percent || 0) + '%', 'n mono')));
     return [
-      el('div', { class: 'head' }, el('h1', {}, 'Overview'), el('span', { class: 'sp' }), await picker(), el('span', { class: 'muted small' }, 'refreshes every 10 s · same numbers as ', el('code', {}, 'waydesk-admin status'))),
+      el('div', { class: 'head' }, el('h1', {}, 'Overview'), el('span', { class: 'sp' }), await picker(), null),
       tiles,
       el('div', { class: 'two' },
         win('sessions now', table(['Account', 'Desktop', 'Encoder', '>Memory', '>CPU'], rows, 'Nobody is logged in.')),
@@ -341,36 +379,65 @@ const views = {
     ];
   },
 
-  async fleet() {
-    const r = await get('fleet', true);
-    const list = r.servers || [];
-    const online = list.filter((v) => v.state === 'online');
-    const sessions = list.reduce((n, v) => n + (v.sessions || 0), 0);
+  // The list of servers: the registry (state, join codes) and the numbers of the ones online, one row each; a row opens the server's page.
+  async servers() {
+    const [reg, fl] = await Promise.all([get('servers', true), get('fleet', true).catch(() => ({ servers: [] }))]);
+    fleetInfo = { portal: reg.portal, pin: reg.pin };
+    const nums = new Map((fl.servers || []).map((v) => [v.id, v]));
+    const list = reg.servers || [];
     const tone = { online: 'ok', offline: 'warn', waiting: '', expired: 'warn', revoked: 'bad' };
-    const rows = list.map((v) => {
-      const mem = v.mem_percent, cpu = v.cpu_percent;
-      return el('tr', {},
-        cell(el('b', {}, v.name)),
-        cell(chip(v.error ? 'not answering' : v.state, v.error ? 'warn' : (tone[v.state] || ''))),
-        cell(v.sessions != null ? v.sessions + (v.max_sessions ? ' of ' + v.max_sessions : '') : '-', 'n mono'),
-        cell(mem != null ? [meter(mem, mem > 80), ' ' + Math.round(mem) + '%'] : '-', 'n'),
-        cell(cpu != null ? Math.round(cpu) + '%' : '-', 'n mono'),
-        cell(v.warnings ? chip(v.warnings + (v.warnings === 1 ? ' warning' : ' warnings'), 'warn') : el('span', { class: 'dim' }, '-')),
-        cell(String(v.people || 0), 'n mono'),
-        cell(v.state === 'online' ? button('Details', () => { pick(v.id); location.hash = '#overview'; }, 'sm') : null, 'n'));
-    });
+    const label = { online: 'online', offline: 'offline', waiting: 'waiting for the server', expired: 'code expired', revoked: 'revoked' };
+    const numbers = (n) => [
+      cell(n.sessions != null ? n.sessions + (n.max_sessions ? ' of ' + n.max_sessions : '') : '-', 'n mono'),
+      cell(n.mem_percent != null ? el('div', { class: 'memcell' }, meter(n.mem_percent, n.mem_percent > 80), el('span', {}, Math.round(n.mem_percent) + '%')) : '-'),
+      cell(n.cpu_percent != null ? Math.round(n.cpu_percent) + '%' : '-', 'n mono'),
+      cell(n.warnings ? chip(n.warnings + (n.warnings === 1 ? ' warning' : ' warnings'), 'warn') : el('span', { class: 'dim' }, '-')),
+    ];
+    const open = (tr, id) => { tr.classList.add('row'); tr.addEventListener('click', (e) => { if (!e.target.closest('a,button')) location.hash = '#servers/' + id + '/overview'; }); return tr; };
+    const rows = [];
+    // The machine the portal runs on, for an administrator of that machine (a portal account has nothing there).
+    if (!portalOnly) {
+      let here = null;
+      try { here = await get('status', true); } catch { /* not asked: no row */ }
+      if (here) {
+        const m = here.machine || {};
+        const mem = m.mem_total_mb ? (((m.mem_total_mb || 0) - (m.mem_available_mb || 0)) / m.mem_total_mb) * 100 : null;
+        const cores = m.cores || 1;
+        const cpu = m.cpu_percent != null ? m.cpu_percent : Math.min(100, ((parseFloat((m.load || [])[0]) || 0) / cores) * 100);
+        rows.push(open(el('tr', {}, cell(el('a', { href: '#servers/this/overview' }, el('b', {}, 'This machine'))), cell(chip('online', 'ok')),
+          ...numbers({ sessions: (here.users || []).filter((u) => u.session).length, mem_percent: mem, cpu_percent: cpu }), cell('-', 'n'), cell('', 'n')), 'this'));
+      }
+    }
+    for (const v of list) {
+      const live = v.state === 'online' || v.state === 'offline';
+      const n = nums.get(v.id) || {};
+      const tr = el('tr', {},
+        cell(live ? el('a', { href: '#servers/' + v.id + '/overview' }, el('b', {}, v.name)) : el('b', {}, v.name)),
+        cell(chip(v.error ? 'not answering' : (label[v.state] || v.state), v.error ? 'warn' : (tone[v.state] || ''))),
+        ...numbers(live ? n : {}),
+        cell(live ? String(n.people || 0) : '-', 'n mono'),
+        cell(el('div', { class: 'acts' },
+          v.state === 'waiting' || v.state === 'expired' || v.state === 'revoked' ? button('New code', () => newCode(v), 'sm') : null,
+          v.state === 'online' || v.state === 'offline' ? button('Revoke', () => revokeServer(v), 'sm danger') : null,
+          !live ? button('Remove', () => removeServer(v), 'sm danger') : null), 'n'));
+      rows.push(live ? open(tr, v.id) : tr);
+    }
+    const online = list.filter((v) => v.state === 'online').length + (rows.length > list.length ? 1 : 0);
+    const total = rows.length;
+    const sessions = list.reduce((n, v) => n + ((nums.get(v.id) || {}).sessions || 0), 0);
     return [
-      el('div', { class: 'head' }, el('h1', {}, 'Fleet'), el('span', { class: 'sp' }), el('span', { class: 'muted small' }, 'refreshes every 10 s')),
-      el('div', { class: 'tiles' }, tile('Servers', online.length, 'of ' + list.length + ' online', list.length ? (online.length / list.length) * 100 : null, list.length > 0 && online.length < list.length), tile('Sessions', sessions, 'running now', null), tile('People', r.people || 0, 'in the portal', null)),
-      win('servers', table(['Server', 'State', '>Sessions', 'Memory', '>CPU', 'Attention', '>People', ''], rows, 'No server yet. Add one on the Servers page.')),
+      el('div', { class: 'head' }, el('h1', {}, 'Servers'), el('span', { class: 'sp' }), button('Add server', addServer, 'primary')),
+      el('div', { class: 'tiles' }, tile('Servers', online, 'of ' + total + ' online', total ? (online / total) * 100 : null, total > 0 && online < total), tile('Sessions', sessions, 'running now', null), tile('Users', fl.people || 0, 'in the portal', null)),
+      win('servers · ' + total, table(['Server', 'State', '>Sessions', 'Memory', '>CPU', 'Attention', '>Users', ''], rows, 'No server yet. Add one to get a join code.'),
+        el('p', { class: 'hint' }, 'Click a server for its details. A join code works once and for one hour; the server keeps its own key after it enrols, and revoking takes that key away.')),
     ];
   },
 
-  async users() {
+  async accounts() {
     const list = await get('users');
     const holder = el('div', {});
-    const draw = (q) => {
-      const shown = list.filter((u) => !q || u.name.toLowerCase().includes(q));
+    const draw = () => {
+      const shown = list;
       holder.replaceChildren(win('accounts · ' + list.length, table(['Account', 'Desktop', 'Graphics', 'RDP', 'Admin', 'Session', ''],
         shown.map((u) => el('tr', {},
           cell(el('b', {}, u.name)),
@@ -383,12 +450,10 @@ const views = {
             button('Edit', () => editUser(u), 'sm'),
             button('Reset password', () => resetPassword(u), 'sm'),
             u.rdp ? button('Switch off', () => disableUser(u), 'sm danger') : button('Switch on', () => run({ action: 'user_enable', name: u.name }, () => u.name + ' may log in again.'), 'sm')), 'n'))),
-        'No account matches.'), el('p', { class: 'hint' }, '* a setting of the account itself; the rest is the server’s setting. Removing an account, and giving administrator rights, stay on the command line.')));
+        'No account on this server yet.'), el('p', { class: 'hint' }, (server === '' && !portalOnly ? '' : 'New accounts come from the Users page: assign the user to this server. ') + '* a setting of the account itself; the rest is the server’s setting. Removing an account, and giving administrator rights, stay on the command line.')));
     };
-    const search = el('input', { type: 'search', placeholder: 'Search accounts', 'aria-label': 'Search accounts', style: 'width:14rem' });
-    search.addEventListener('input', () => draw(search.value.trim().toLowerCase()));
-    draw('');
-    return [el('div', { class: 'head' }, el('h1', {}, 'Users'), el('span', { class: 'sp' }), await picker(), search, button('Add user', addUser, 'primary')), holder];
+    draw();
+    return [el('div', { class: 'head' }, el('h1', {}, 'Accounts'), el('span', { class: 'sp' }), await picker(), server === '' && !portalOnly ? button('Add account', addUser, 'primary') : null), holder];
   },
 
   async audit() {
@@ -450,7 +515,7 @@ const views = {
     const form = el('form', { class: 'row' }, field('Log of', source), field('Account', user), field('Event', kind), field('Outcome', outcome), field('Time', since), field('Show', limit), button('Search', () => form.requestSubmit(), 'primary'), button('Export CSV', () => csv()));
     form.addEventListener('submit', (e) => { e.preventDefault(); load(); });
     await load();
-    return [el('div', { class: 'head' }, el('h1', {}, 'Audit'), el('span', { class: 'sp' }), el('span', { class: 'muted small' }, 'read only \u00b7 a server\u2019s records are those of ', el('code', {}, 'waydesk-admin audit'))), win('filter', form), holder];
+    return [el('div', { class: 'head' }, el('h1', {}, 'Audit'), el('span', { class: 'sp' }), null), win('filter', form), holder];
   },
 
   async settings() {
@@ -502,31 +567,7 @@ const views = {
     ];
   },
 
-  async servers() {
-    const r = await get('servers', true);
-    fleetInfo = { portal: r.portal, pin: r.pin };
-    const list = r.servers || [];
-    const tone = { online: 'ok', offline: 'warn', waiting: '', expired: 'warn', revoked: 'bad' };
-    const label = { online: 'online', offline: 'offline', waiting: 'waiting for the server', expired: 'code expired', revoked: 'revoked' };
-    const when = (t) => (t ? new Date(t * 1000).toLocaleString() : '-');
-    const rows = list.map((v) => el('tr', {},
-      cell(el('b', {}, v.name)),
-      cell(chip(label[v.state] || v.state, tone[v.state] || '')),
-      cell(when(v.enrolled), 'dim'),
-      cell(v.last_seen ? when(v.last_seen) : '-', 'dim'),
-      cell(el('div', { class: 'acts' },
-        v.state === 'waiting' || v.state === 'expired' ? button('New code', () => newCode(v), 'sm') : null,
-        v.state === 'online' || v.state === 'offline' ? button('Revoke', () => revokeServer(v), 'sm danger') : null,
-        v.state === 'revoked' ? button('New code', () => newCode(v), 'sm') : null,
-        v.state !== 'online' && v.state !== 'offline' ? button('Remove', () => removeServer(v), 'sm danger') : null), 'n')));
-    return [
-      el('div', { class: 'head' }, el('h1', {}, 'Servers'), el('span', { class: 'sp' }), button('Add server', addServer, 'primary')),
-      win('servers \u00b7 ' + list.length, table(['Name', 'State', 'Enrolled', 'Last seen', ''], rows, 'No server yet. Add one to get a join code.'),
-        el('p', { class: 'hint' }, 'A join code works once and for one hour. The server keeps its own key after it enrols; revoking takes that key away.')),
-    ];
-  },
-
-  async people() {
+  async users() {
     const r = await get('people', true);
     const servers = r.servers || [];
     const nameOf = (id) => (servers.find((v) => v.id === id) || {}).name || id;
@@ -534,7 +575,7 @@ const views = {
       cell([el('b', {}, p.name), p.display ? el('span', { class: 'dim' }, ' ' + p.display) : null]),
       cell(p.admin ? chip('admin') : el('span', { class: 'dim' }, '-')),
       cell(p.disabled ? chip('switched off', 'bad') : chip('active', 'ok')),
-      cell(p.servers.length ? p.servers.map((a) => nameOf(a.server)).join(', ') : el('span', { class: 'dim' }, 'none')),
+      cell(p.servers.length ? el('div', { class: 'chips' }, p.servers.map((a) => el('a', { class: 'chip', href: '#servers/' + a.server + '/accounts' }, nameOf(a.server)))) : el('span', { class: 'dim' }, 'none')),
       cell(el('div', { class: 'acts' },
         button('Servers', () => personServers(p, servers), 'sm'),
         button('New password', () => personPassword(p), 'sm'),
@@ -542,9 +583,9 @@ const views = {
         button(p.disabled ? 'Switch on' : 'Switch off', () => personDo({ action: 'disable', name: p.name, on: !p.disabled }, p.name + (p.disabled ? ' may sign in again.' : ' was switched off.')), 'sm' + (p.disabled ? '' : ' danger')),
         button('Remove', () => personRemove(p), 'sm danger')), 'n')));
     return [
-      el('div', { class: 'head' }, el('h1', {}, 'People'), el('span', { class: 'sp' }), button('Add person', addPerson, 'primary')),
-      win('portal accounts \u00b7 ' + rows.length, table(['Name', 'Role', 'State', 'Servers', ''], rows, 'Nobody yet.'),
-        el('p', { class: 'hint' }, 'These are accounts of the portal. Assigning a server makes the same account there, with a password nobody sees; the person makes an app password for RDP clients in My account.')),
+      el('div', { class: 'head' }, el('h1', {}, 'Users'), el('span', { class: 'sp' }), button('Add user', addPerson, 'primary')),
+      win('users of the portal \u00b7 ' + rows.length, table(['Name', 'Role', 'State', 'Servers', ''], rows, 'Nobody yet.'),
+        el('p', { class: 'hint' }, 'These are the users of the portal. Assigning a server makes the same user\u2019s account on that server (see the Accounts tab of the server), with a password nobody sees; the user makes an app password for RDP clients in My account.')),
     ];
   },
 
@@ -558,17 +599,19 @@ const views = {
     });
     const a = s.admission || {};
     return [
-      el('div', { class: 'head' }, el('h1', {}, 'Sessions'), el('span', { class: 'sp' }), await picker(), chip(rows.length + (a.max_active_users ? ' of ' + a.max_active_users : ' running'), 'ok')),
-      win('running sessions', table(['Account', 'State', 'Since', 'Desktop', 'Encoder', '>Memory', '>CPU', ''], rows, 'No sessions running.')),
+      el('div', { class: 'head' }, el('h1', {}, 'Sessions'), el('span', { class: 'sp' }), await picker()),
+      withCount(win('running sessions', table(['Account', 'State', 'Since', 'Desktop', 'Encoder', '>Memory', '>CPU', ''], rows, 'No sessions running.')), rows.length + (a.max_active_users ? ' of ' + a.max_active_users : '')),
     ];
   },
 };
 
 let timer = 0;
 // Draws `view` into `root`; the numbers refresh every 10 s while the page shows (not for Users, which is a list that does not change by the second).
-export async function render(view, root, onSignedOut, csrf, portal = false) {
+export async function render(path, root, onSignedOut, csrf, portal = false) {
+  const [view, sid, tab] = path.split('/');
   clearInterval(timer);
   portalOnly = portal;
+  if (portalOnly) await settle();
   const flashEl = document.getElementById('flash');
   ctx = {
     csrf,
@@ -579,7 +622,7 @@ export async function render(view, root, onSignedOut, csrf, portal = false) {
   flashEl.hidden = true;
   const draw = async () => {
     try {
-      root.replaceChildren(...(await views[view]()));
+      root.replaceChildren(...(view === 'servers' && sid ? await serverPage(sid, tab) : await views[view]()));
     } catch (e) {
       if (e.signedOut) { clearInterval(timer); onSignedOut(); return; }
       root.replaceChildren(el('p', { class: 'bad' }, e.message || 'Something went wrong.'));
@@ -587,7 +630,7 @@ export async function render(view, root, onSignedOut, csrf, portal = false) {
   };
   root.replaceChildren(el('p', { class: 'muted' }, 'Loading…'));
   await draw();
-  if (view !== 'users' && view !== 'audit') timer = setInterval(() => { if (!document.hidden) draw(); }, 10000);
+  if (!['users', 'audit'].includes(view === 'servers' && sid ? tab : view)) timer = setInterval(() => { if (!document.hidden) draw(); }, 10000);
 }
 export const stop = () => clearInterval(timer);
-export const known = (v) => Object.hasOwn(views, v);
+export const known = (path) => ['servers', 'users', 'audit', 'settings'].includes(path.split('/')[0]);
