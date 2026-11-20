@@ -190,6 +190,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/api/login", post(login).layer(axum::extract::DefaultBodyLimit::max(4096)))
         .route("/api/me", get(me))
         .route("/api/mine", get(mine))
+        .route("/api/mine/shot", get(mine_shot))
         .route("/api/admin/do", post(admin_do).layer(axum::extract::DefaultBodyLimit::max(2048)))
         .route("/api/account", get(account_info))
         .route("/api/account/totp/start", post(totp_start).layer(axum::extract::DefaultBodyLimit::max(256)))
@@ -1439,6 +1440,41 @@ async fn admin_page(State(app): State<Arc<App>>, UrlPath(kind): UrlPath<String>,
     }
 }
 
+/// A small picture of the signed-in portal person's own running desktop on one of their servers (the card on My desktop). Only for a person assigned
+/// to that server, with an account the portal made there, not switched off; the account asked of the agent is the signed-in one, the browser names
+/// only the server. Nothing is stored or logged, and the answer is never cached. 204 when there is no session (or no picture yet).
+async fn mine_shot(State(app): State<Arc<App>>, Query(which): Query<WhichServer>, headers: HeaderMap) -> Response {
+    let Some((_, signed)) = signed_in(&app, &headers) else { return text(StatusCode::UNAUTHORIZED, "not signed in\n") };
+    let server = which.server.unwrap_or_default();
+    if !signed.portal_user || !valid_server_id(&server) {
+        return text(StatusCode::BAD_REQUEST, "choose a server\n");
+    }
+    let Some(me) = app.people.get(&signed.account).filter(|p| !p.disabled && p.servers.iter().any(|a| a.server == server) && app.people.made_on(&p.name, &server)) else {
+        return text(StatusCode::FORBIDDEN, "that server is not assigned to you\n");
+    };
+    let answer = match app.links.request(&server, serde_json::json!({ "shot": { "account": me.name } }), crate::link::READ_TIMEOUT).await {
+        Ok(a) => a,
+        Err(e) => return link_error(e),
+    };
+    let Some(png) = serde_json::from_str::<serde_json::Value>(&answer).ok().and_then(|v| v.get("hex")?.as_str().map(decode_hex)).flatten() else {
+        return text(StatusCode::NO_CONTENT, "");
+    };
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "image/png"), (header::CACHE_CONTROL, "no-store"), (header::X_CONTENT_TYPE_OPTIONS, "nosniff")],
+        png,
+    )
+        .into_response()
+}
+
+/// Hex text to bytes (`None` when it is not hex, or is too big for a picture of the card).
+fn decode_hex(h: &str) -> Option<Vec<u8>> {
+    if h.len() % 2 != 0 || h.len() > 2 * 512 * 1024 || !h.starts_with("89504e47") {
+        return None;
+    }
+    (0..h.len()).step_by(2).map(|i| u8::from_str_radix(&h[i..i + 2], 16).ok()).collect()
+}
+
 /// The signed-in account's own desktop, from the helper: whether its session is running and since when, its desktop and graphics. The helper decides
 /// what an account may see (its own row); when it cannot be asked, the page still works and says nothing about the state.
 async fn mine(State(app): State<Arc<App>>, headers: HeaderMap) -> Response {
@@ -1690,6 +1726,15 @@ async fn static_file(State(app): State<Arc<App>>, headers: HeaderMap, uri: Uri) 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_picture_of_a_card_is_a_png_in_hex_and_nothing_else() {
+        assert_eq!(decode_hex("89504e47ff"), Some(vec![0x89, 0x50, 0x4e, 0x47, 0xff]));
+        assert!(decode_hex("89504e4").is_none(), "odd length");
+        assert!(decode_hex("89504e47zz").is_none(), "not hex");
+        assert!(decode_hex("3c68746d6c3e").is_none(), "not a PNG");
+        assert!(decode_hex(&format!("89504e47{}", "00".repeat(512 * 1024))).is_none(), "too big");
+    }
+
     use super::*;
 
     #[test]

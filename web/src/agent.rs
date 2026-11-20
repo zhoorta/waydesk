@@ -326,6 +326,43 @@ fn audit_list(q: &Value) -> Result<String, String> {
     Ok(Value::Array(rows).to_string())
 }
 
+/// Where a session's worker leaves the small picture of its screen (the daemon's `sessionshot`).
+const STATUS_DIR: &str = "/run/waydesk/status";
+
+/// The small picture of the desktop of `account` for the portal, as hex in `{"hex": ...}`, or `{"none": true}` when there is no session or no picture
+/// yet. Only for an account this agent made (the same rule as setting a password or opening a desktop); the file is the account's own and is read as
+/// root without following links, as a plain file of that uid, and only if it is a PNG of a sensible size.
+fn desktop_shot(account: &str) -> Result<String, String> {
+    if !adminaction::valid_name(account) || !managed_contains(MANAGED, account) {
+        return Err("that account was not made by the portal".into());
+    }
+    let none = || Ok(json!({ "none": true }).to_string());
+    let Ok(c) = std::ffi::CString::new(account) else { return none() };
+    let pw = unsafe { libc::getpwnam(c.as_ptr()) };
+    if pw.is_null() {
+        return none();
+    }
+    let uid = unsafe { (*pw).pw_uid };
+    match read_shot(std::path::Path::new(STATUS_DIR), uid) {
+        Some(png) => Ok(json!({ "hex": png.iter().map(|b| format!("{b:02x}")).collect::<String>() }).to_string()),
+        None => none(),
+    }
+}
+
+fn read_shot(dir: &std::path::Path, uid: u32) -> Option<Vec<u8>> {
+    use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
+    const MAX: u64 = 512 * 1024;
+    let path = dir.join(uid.to_string()).join("shot.png");
+    let mut file = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(path).ok()?;
+    let meta = file.metadata().ok()?;
+    if !meta.is_file() || meta.uid() != uid || meta.len() > MAX {
+        return None;
+    }
+    let mut png = Vec::with_capacity(meta.len() as usize);
+    (&mut file).take(MAX).read_to_end(&mut png).ok()?;
+    png.starts_with(&[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]).then_some(png)
+}
+
 /// What one request from the portal gets: the JSON text, or why not.
 fn handle(req: &Value) -> Result<String, String> {
     if req.get("kind").and_then(Value::as_str) == Some("audit") {
@@ -335,6 +372,9 @@ fn handle(req: &Value) -> Result<String, String> {
         let (args, is_json) = read_args(kind).ok_or("not a request this agent answers")?;
         let out = run_cli(args).map_err(|e| format!("{e:#}"))?;
         return Ok(if is_json { out } else { json!({ "text": out.trim_end() }).to_string() });
+    }
+    if let Some(shot) = req.get("shot") {
+        return desktop_shot(shot.get("account").and_then(Value::as_str).unwrap_or(""));
     }
     if let Some(action) = req.get("do") {
         let actor = req.get("actor").and_then(Value::as_str).filter(|a| adminaction::valid_name(a)).ok_or("bad actor name")?;
@@ -579,6 +619,32 @@ async fn enrol_as_root(portal: &str, code: &str, pin: Option<String>) -> Result<
 
 #[cfg(test)]
 mod tests {
+    use std::os::unix::fs::symlink;
+
+    #[test]
+    fn a_picture_is_taken_only_as_a_plain_png_of_the_account() {
+        let dir = std::env::temp_dir().join(format!("wd-agent-shot-{}", std::process::id()));
+        let mine = unsafe { libc::geteuid() };
+        let folder = dir.join(mine.to_string());
+        std::fs::create_dir_all(&folder).unwrap();
+        let png = [&[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a][..], b"rest"].concat();
+        std::fs::write(folder.join("shot.png"), &png).unwrap();
+        assert_eq!(read_shot(&dir, mine), Some(png.clone()));
+        assert!(read_shot(&dir, mine + 1).is_none(), "no folder of that account");
+        std::fs::write(folder.join("shot.png"), b"<html>").unwrap();
+        assert!(read_shot(&dir, mine).is_none(), "not a PNG");
+        std::fs::remove_file(folder.join("shot.png")).unwrap();
+        std::fs::write(dir.join("elsewhere.png"), &png).unwrap();
+        symlink(dir.join("elsewhere.png"), folder.join("shot.png")).unwrap();
+        assert!(read_shot(&dir, mine).is_none(), "a link is not followed");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_picture_is_refused_for_an_account_the_agent_did_not_make() {
+        assert!(desktop_shot("../etc").is_err());
+        assert!(desktop_shot("root").is_err(), "root is not in the managed file");
+    }
     use super::*;
 
     #[test]

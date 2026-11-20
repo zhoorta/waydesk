@@ -93,11 +93,13 @@ impl Encode for Timed {
     fn encode(&mut self, bgra: &[u8], w: usize, h: usize) -> Result<Option<Vec<u8>>> {
         let start = std::time::Instant::now();
         let out = self.inner.encode(bgra, w, h)?;
+        crate::sessionshot::offer(w, h, || Some(std::borrow::Cow::Borrowed(bgra)));
         self.account(start, out)
     }
     fn encode_frame(&mut self, frame: &Pixels, w: usize, h: usize) -> Result<Option<Vec<u8>>> {
         let start = std::time::Instant::now();
         let out = self.inner.encode_frame(frame, w, h)?;
+        crate::sessionshot::offer(w, h, || frame.bgra().ok());
         self.account(start, out)
     }
     fn takes_gpu_frames(&self) -> bool {

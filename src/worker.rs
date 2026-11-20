@@ -197,6 +197,7 @@ pub async fn run(cfg: Config) -> Result<()> {
     }
     info!("session worker ending");
     crate::sessionstatus::clear();
+    crate::sessionshot::clear();
     // Dropping the session removes the output and stops the hook.
     drop(session);
     Ok(())
