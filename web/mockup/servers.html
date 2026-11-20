@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Waydesk portal: mockup, servers as the centre</title>
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<meta name="theme-color" content="#06121c">
+<style>
+/* Same tokens as index.html (and site/style.css). This page only tries one idea: servers are the centre, each with its own tabs. */
+:root {
+  --bg: #06121c; --panel: rgba(12,16,22,.92); --bar: #0a0c10; --line: #2a323c;
+  --fg: #e8e3da; --dim: #a8aeb4; --muted: #b9bfc5; --copper: #ee9a45;
+  --ok: #9fd88c; --warn: #e8c06a; --bad: #e08a78;
+  --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+  --fs-xs: 13px; --fs-s: 14px; --fs-m: 15px; --fs-l: 18px; --fs-xl: 32px;
+  --s1: 4px; --s2: 8px; --s3: 16px; --s4: 24px; --s5: 32px; --s6: 48px;
+  --r-win: 12px; --r-bar: 18px; --r-pill: 9px;
+  --shadow: 16px 22px 46px rgba(0,0,0,.72), 5px 8px 14px rgba(0,0,0,.55), 0 0 0 1px rgba(0,0,0,.4);
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html { background: var(--bg); }
+body { margin: 0; min-height: 100vh; color: var(--fg); font: var(--fs-m)/1.55 var(--sans); -webkit-font-smoothing: antialiased;
+  background: radial-gradient(900px 520px at 50% 30%, rgba(24,160,170,.26) 0, transparent 66%), radial-gradient(1100px 700px at 90% -5%, rgba(20,150,142,.5) 0, transparent 60%), radial-gradient(900px 650px at -5% 42%, rgba(22,84,168,.5) 0, transparent 60%), var(--bg); background-attachment: fixed; }
+a { color: var(--copper); text-underline-offset: 3px; }
+:focus-visible { outline: 2px solid var(--copper); outline-offset: 2px; }
+code, .mono { font-family: var(--mono); font-size: var(--fs-s); }
+h1 { font-size: var(--fs-xl); line-height: 1.2; margin: 0; }
+p { margin: var(--s2) 0; }
+.dim { color: var(--dim); } .muted { color: var(--muted); } .small { font-size: var(--fs-xs); }
+.col { max-width: 1200px; margin: 0 auto; padding: 0 var(--s4) var(--s6); }
+header { position: sticky; top: var(--s2); z-index: 5; margin-top: var(--s2); display: flex; align-items: center; flex-wrap: wrap; gap: var(--s2) var(--s4); padding: var(--s3) var(--s4); background: rgba(7,10,14,.86); backdrop-filter: blur(8px); border: 1px solid rgba(255,255,255,.1); border-radius: var(--r-bar); box-shadow: 0 10px 28px rgba(0,0,0,.55); }
+header img { height: 26px; display: block; }
+nav { display: flex; flex-wrap: wrap; gap: var(--s1) var(--s3); font-size: var(--fs-s); align-items: center; }
+nav a { color: #d0d4d9; text-decoration: none; padding: var(--s1) 0; border-bottom: 2px solid transparent; }
+nav a:hover { color: var(--copper); } nav a[aria-current] { color: var(--copper); border-bottom-color: var(--copper); }
+nav .divider { color: var(--dim); }
+.who { margin-left: auto; display: flex; align-items: center; gap: var(--s3); font-size: var(--fs-s); color: var(--dim); } .who b { color: var(--fg); }
+.btn { display: inline-flex; align-items: center; gap: 6px; padding: 8px 14px; border: 1px solid rgba(255,255,255,.2); border-radius: 10px; background: none; color: var(--fg); font: inherit; font-size: var(--fs-s); cursor: pointer; text-decoration: none; }
+.btn:hover { border-color: var(--copper); color: var(--copper); } .btn.primary { background: var(--copper); border-color: var(--copper); color: #1a1208; font-weight: 600; } .btn.sm { padding: 4px 10px; font-size: var(--fs-xs); } .btn.danger { color: var(--bad); }
+.tag { display: inline-block; padding: 0 var(--s2); border: 1px solid rgba(255,255,255,.18); border-radius: var(--r-pill); font-size: var(--fs-xs); color: var(--dim); white-space: nowrap; }
+.tag.ok { color: var(--ok); border-color: rgba(159,216,140,.4); } .tag.warn { color: var(--warn); border-color: rgba(232,192,106,.4); }
+.win { background: var(--panel); backdrop-filter: blur(10px); border: 1px solid rgba(255,255,255,.11); border-radius: var(--r-win); box-shadow: var(--shadow); overflow: hidden; }
+.win > .bar { display: flex; align-items: center; gap: var(--s2); height: 36px; padding: 0 var(--s3); background: var(--bar); color: var(--dim); font-size: var(--fs-xs); } .win > .bar .act { margin-left: auto; }
+.win > .body { padding: var(--s4); }
+.page { padding-top: var(--s5); display: grid; gap: var(--s4); }
+.head { display: flex; align-items: center; gap: var(--s3); flex-wrap: wrap; } .head .sp { flex: 1; }
+.crumb { font-size: var(--fs-s); color: var(--dim); margin-bottom: var(--s1); } .crumb a { color: var(--dim); text-decoration: none; } .crumb a:hover { color: var(--copper); }
+.tabs { display: flex; gap: var(--s3); border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+.tabs a { color: #d0d4d9; text-decoration: none; padding: var(--s2) var(--s1); border-bottom: 2px solid transparent; margin-bottom: -1px; font-size: var(--fs-s); }
+.tabs a:hover { color: var(--copper); } .tabs a[aria-current] { color: var(--copper); border-bottom-color: var(--copper); }
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr)); gap: var(--s4); }
+.tile { background: rgba(255,255,255,.04); border: 1px solid rgba(255,255,255,.08); border-radius: var(--r-win); padding: var(--s3) var(--s4); }
+.tile .k { color: var(--dim); font-size: var(--fs-s); } .tile .v { font-size: 28px; font-weight: 600; color: var(--copper); } .tile .u { color: var(--dim); font-size: var(--fs-s); }
+.meter { height: 6px; border-radius: 3px; background: rgba(255,255,255,.08); overflow: hidden; } .meter > i { display: block; height: 100%; background: var(--ok); } .meter > i.w { background: var(--warn); }
+table { border-collapse: collapse; width: 100%; font-size: var(--fs-s); }
+th, td { text-align: left; padding: 10px var(--s3) 10px 0; border-bottom: 1px solid var(--line); vertical-align: middle; }
+th { color: var(--dim); font-weight: 400; font-size: var(--fs-xs); border-bottom-color: var(--dim); white-space: nowrap; }
+td.n, th.n { text-align: right; } td:last-child, th:last-child { padding-right: 0; } tr:last-child td { border-bottom: 0; }
+tr.row { cursor: pointer; } tr.row:hover td { background: rgba(255,255,255,.03); }
+.memcell { display: flex; align-items: center; gap: 10px; min-width: 9rem; } .memcell .meter { flex: 1; }
+.chips { display: flex; gap: var(--s2); flex-wrap: wrap; }
+.chip { display: inline-flex; align-items: center; gap: 6px; padding: 2px 10px; border: 1px solid rgba(255,255,255,.18); border-radius: var(--r-pill); font-size: var(--fs-xs); color: #d0d4d9; text-decoration: none; }
+.chip:hover { border-color: var(--copper); color: var(--copper); } .chip .d { width: 7px; height: 7px; border-radius: 50%; background: var(--ok); } .chip .d.off { background: #5a626b; }
+.cols { display: grid; grid-template-columns: 2fr 1fr; gap: var(--s4); } @media (max-width: 800px) { .cols { grid-template-columns: 1fr; } }
+.note { border-left: 3px solid var(--copper); padding: var(--s2) var(--s3); background: rgba(238,154,69,.08); color: var(--muted); font-size: var(--fs-s); border-radius: 0 8px 8px 0; }
+.legend { position: fixed; right: var(--s3); bottom: var(--s3); max-width: 22rem; font-size: var(--fs-xs); color: var(--dim); background: rgba(7,10,14,.9); border: 1px solid var(--line); border-radius: 10px; padding: var(--s2) var(--s3); }
+</style>
+</head>
+<body>
+<div class="col">
+  <header>
+    <img src="logo-dark.svg" alt="Waydesk" width="119" height="26">
+    <nav aria-label="Portal">
+      <a href="#desktop" data-r="desktop">My desktop</a>
+      <a href="#account" data-r="account">My account</a>
+      <span class="divider" aria-hidden="true">|</span>
+      <a href="#servers" data-r="servers">Servers</a>
+      <a href="#people" data-r="people">People</a>
+      <a href="#audit" data-r="audit">Audit</a>
+    </nav>
+    <div class="who"><b>pdemo-admin</b><button class="btn sm" type="button">Sign out</button></div>
+  </header>
+  <main class="page" id="view"></main>
+</div>
+<aside class="legend">Mockup, fake data. Click a server row, then the tabs. Servers replace Fleet, Overview, Users, Sessions and the server picker; Users is now Accounts and lives inside a server.</aside>
+
+<script>
+const SERVERS = [
+  { id: 's-be7848d8', name: 'Loopback', os: 'Debian 13', online: true, sessions: 1, max: 0, mem: 55, cpu: 13, warn: 0, desktop: 'sway', gpu: 'software' },
+  { id: 's-a5fa19f7', name: 'Ubuntu 26.04', os: 'Ubuntu 26.04.1', online: true, sessions: 1, max: 6, mem: 32, cpu: 1, warn: 1, desktop: 'sway', gpu: 'virtio (software)' },
+  { id: 's-77c0ffee', name: 'Omarchy', os: 'Arch', online: false, sessions: 0, max: 0, mem: null, cpu: null, warn: 0, desktop: 'hyprland', gpu: 'Intel HD 630' },
+];
+const ACCOUNTS = {
+  's-be7848d8': [['pdemo-admin', 'made by the portal', true, 'running since 19:59'], ['webtest', 'local account', false, 'not started'], ['portaladmin', 'local account · admin', false, 'not started']],
+  's-a5fa19f7': [['pdemo-admin', 'made by the portal', true, 'running since 20:01']],
+  's-77c0ffee': [],
+};
+const PEOPLE = [
+  { name: 'pdemo-admin', display: 'Demo admin', admin: true, servers: ['s-be7848d8', 's-a5fa19f7'], app: true },
+  { name: 'maria', display: 'Maria Silva', admin: false, servers: ['s-a5fa19f7'], app: false },
+  { name: 'rui', display: 'Rui Costa', admin: false, servers: ['s-be7848d8', 's-a5fa19f7', 's-77c0ffee'], app: true },
+];
+const AUDIT = [['20:01:12', 'stream.open', 'pdemo-admin', 'Ubuntu 26.04'], ['19:59:40', 'login', 'pdemo-admin', 'portal'], ['19:57:03', 'admin.people.assign', 'pdemo-admin', 'Ubuntu 26.04 · maria'], ['19:51:51', 'server.enrolled', '-', 'Ubuntu 26.04']];
+const $ = (s) => document.querySelector(s);
+const byId = (id) => SERVERS.find((s) => s.id === id);
+const esc = (t) => String(t).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const win = (title, body, act = '') => `<section class="win"><div class="bar"><span>${esc(title)}</span><span class="act">${act}</span></div><div class="body">${body}</div></section>`;
+const state = (s) => (s.online ? '<span class="tag ok">online</span>' : '<span class="tag warn">offline</span>');
+const mem = (s) => (s.mem == null ? '-' : `<div class="memcell"><div class="meter"><i class="${s.mem > 80 ? 'w' : ''}" style="width:${s.mem}%"></i></div><span>${s.mem}%</span></div>`);
+const tile = (k, v, u) => `<div class="tile"><div class="k">${k}</div><div><span class="v">${v}</span> <span class="u">${u}</span></div></div>`;
+
+const TABS = [['overview', 'Overview'], ['accounts', 'Accounts'], ['sessions', 'Sessions'], ['audit', 'Audit'], ['settings', 'Settings']];
+
+function servers() {
+  const on = SERVERS.filter((s) => s.online).length;
+  const rows = SERVERS.map((s) => `<tr class="row" data-go="#servers/${s.id}/overview"><td><b>${esc(s.name)}</b><div class="dim small">${esc(s.os)}</div></td><td>${state(s)}</td>
+    <td class="n mono">${s.sessions}${s.max ? ' of ' + s.max : ''}</td><td>${mem(s)}</td><td class="n mono">${s.cpu == null ? '-' : s.cpu + '%'}</td>
+    <td>${s.warn ? `<span class="tag warn">${s.warn} warning</span>` : '<span class="dim">-</span>'}</td><td class="n mono">${PEOPLE.filter((p) => p.servers.includes(s.id)).length}</td></tr>`).join('');
+  return `<div class="head"><h1>Servers</h1><span class="sp"></span><button class="btn primary" type="button">Add server</button></div>
+    <div class="tiles">${tile('Servers', on, 'of ' + SERVERS.length + ' online')}${tile('Sessions', SERVERS.reduce((n, s) => n + s.sessions, 0), 'running now')}${tile('Warnings', SERVERS.reduce((n, s) => n + s.warn, 0), 'to look at')}</div>
+    ${win('servers', `<table><thead><tr><th>Server</th><th>State</th><th class="n">Sessions</th><th>Memory</th><th class="n">CPU</th><th>Attention</th><th class="n">People</th></tr></thead><tbody>${rows}</tbody></table>`, 'click a row for its details')}`;
+}
+
+function server(id, tab) {
+  const s = byId(id);
+  if (!s) return '<p>No such server.</p>';
+  const head = `<div><div class="crumb"><a href="#servers">Servers</a> › ${esc(s.name)}</div>
+    <div class="head"><h1>${esc(s.name)}</h1>${state(s)}<span class="dim small">${esc(s.os)} · ${esc(s.desktop)} · ${esc(s.gpu)}</span><span class="sp"></span></div></div>
+    <nav class="tabs" aria-label="Server">${TABS.map(([k, t]) => `<a href="#servers/${id}/${k}" ${k === tab ? 'aria-current="page"' : ''}>${t}${k === 'accounts' ? ' <span class="dim small">' + (ACCOUNTS[id] || []).length + '</span>' : ''}${k === 'sessions' ? ' <span class="dim small">' + s.sessions + '</span>' : ''}</a>`).join('')}</nav>`;
+  if (!s.online) return head + `<p class="note">This server is offline: the portal cannot ask it anything. Its accounts and sessions show again when its agent reconnects.</p>`;
+  let body = '';
+  if (tab === 'overview') {
+    body = `<div class="tiles">${tile('Sessions', s.sessions, s.max ? 'of ' + s.max : 'running')}${tile('Memory', s.mem + '%', 'in use')}${tile('CPU', s.cpu + '%', 'busy')}${tile('Warnings', s.warn, '')}</div>
+      <div class="cols">${win('status', `<table><tbody><tr><td class="dim">System</td><td>${esc(s.os)}</td></tr><tr><td class="dim">Desktop</td><td>${esc(s.desktop)}</td></tr><tr><td class="dim">Graphics</td><td>${esc(s.gpu)}</td></tr><tr><td class="dim">Accepts new sessions</td><td>yes</td></tr><tr><td class="dim">Agent link</td><td>up</td></tr></tbody></table>`, 'refreshes every 10 s')}
+      ${win('people on this server', PEOPLE.filter((p) => p.servers.includes(id)).map((p) => `<p><a href="#people">${esc(p.display)}</a> <span class="dim small">${esc(p.name)}</span></p>`).join('') || '<p class="dim">Nobody yet.</p>')}</div>
+      ${s.warn ? '<p class="note">1 warning: memory is below the level where a new session is accepted when more than 5 people are on.</p>' : ''}`;
+  } else if (tab === 'accounts') {
+    const rows = ACCOUNTS[id].map(([n, kind, run, st]) => `<tr><td><b>${esc(n)}</b></td><td class="dim">${esc(kind)}</td><td>${run ? '<span class="tag ok">session</span>' : '<span class="dim">no session</span>'} <span class="dim small">${esc(st)}</span></td><td class="n"><button class="btn sm" type="button">Details</button></td></tr>`).join('');
+    body = win('accounts on ' + s.name, ACCOUNTS[id].length ? `<table><thead><tr><th>Account</th><th>Origin</th><th>Session</th><th></th></tr></thead><tbody>${rows}</tbody></table>` : '<p class="dim">No accounts on this server yet.</p>', '<button class="btn sm primary" type="button">Add account</button>')
+      + '<p class="note">These are the Linux accounts of this one server. A person from People who is assigned here gets one automatically (“made by the portal”); you can also add or change local accounts here.</p>';
+  } else if (tab === 'sessions') {
+    body = win('running sessions', s.sessions ? `<table><thead><tr><th>Account</th><th>Since</th><th>Desktop</th><th>Encoder</th><th class="n">Memory</th><th></th></tr></thead><tbody><tr><td><b>pdemo-admin</b></td><td>20:01</td><td>${esc(s.desktop)}</td><td>openh264</td><td class="n mono">0.6 GB</td><td class="n"><button class="btn sm danger" type="button">End</button></td></tr></tbody></table>` : '<p class="dim">No sessions running.</p>');
+  } else if (tab === 'audit') {
+    body = win('audit of ' + s.name, `<table><thead><tr><th>Time</th><th>Event</th><th>Who</th></tr></thead><tbody>${AUDIT.slice(0, 3).map((r) => `<tr><td class="mono">${r[0]}</td><td class="mono">${r[1]}</td><td>${r[2]}</td></tr>`).join('')}</tbody></table>`, 'read from the server through its agent');
+  } else {
+    body = win('settings of ' + s.name, `<table><tbody><tr><td class="dim">Remote access</td><td>loopback only</td></tr><tr><td class="dim">Max sessions</td><td>${s.max || 'no limit'}</td></tr><tr><td class="dim">Default desktop</td><td>${esc(s.desktop)}</td></tr></tbody></table>`, '<button class="btn sm" type="button">Change</button>')
+      + win('portal link', `<p>Agent connected. <span class="dim small">The key is kept hashed on the portal.</span></p><div class="chips"><button class="btn sm" type="button">New join code</button><button class="btn sm danger" type="button">Revoke</button><button class="btn sm danger" type="button">Remove server</button></div>`);
+  }
+  return head + body;
+}
+
+function people() {
+  const rows = PEOPLE.map((p) => `<tr><td><b>${esc(p.display)}</b><div class="dim small">${esc(p.name)}${p.admin ? ' · admin' : ''}</div></td>
+    <td><div class="chips">${p.servers.map((id) => { const s = byId(id); return `<a class="chip" href="#servers/${id}/accounts"><span class="d ${s.online ? '' : 'off'}"></span>${esc(s.name)}</a>`; }).join('') || '<span class="dim">no server</span>'}</div></td>
+    <td>${p.app ? '<span class="tag ok">app password</span>' : '<span class="dim">none</span>'}</td><td class="n"><button class="btn sm" type="button">Servers</button> <button class="btn sm" type="button">New password</button></td></tr>`).join('');
+  return `<div class="head"><h1>People</h1><span class="sp"></span><button class="btn primary" type="button">Add person</button></div>
+    <p class="note">People are the portal’s own identities. Assigning a server makes their account there. Click a server chip to see that account on the server’s page.</p>
+    ${win('people', `<table><thead><tr><th>Person</th><th>Servers</th><th>RDP</th><th></th></tr></thead><tbody>${rows}</tbody></table>`)}`;
+}
+
+function audit() {
+  return `<div class="head"><h1>Audit</h1><span class="sp"></span><span class="small dim">Show</span> <select style="background:rgba(0,0,0,.35);color:inherit;border:1px solid var(--line);border-radius:8px;padding:8px 12px;font:inherit"><option>The portal</option>${SERVERS.map((s) => `<option>${esc(s.name)}</option>`).join('')}</select></div>
+    ${win('portal audit log', `<table><thead><tr><th>Time</th><th>Event</th><th>Who</th><th>Where</th></tr></thead><tbody>${AUDIT.map((r) => `<tr><td class="mono">${r[0]}</td><td class="mono">${r[1]}</td><td>${r[2]}</td><td>${r[3]}</td></tr>`).join('')}</tbody></table>`, 'the same log as a server’s Audit tab, with the portal’s own events')}`;
+}
+
+function desktop() {
+  return `<h1>My desktop</h1><div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(20rem,1fr));gap:24px">${SERVERS.filter((s) => PEOPLE[0].servers.includes(s.id)).map((s) => win(s.name, `<div style="aspect-ratio:16/9;border:1px dashed var(--line);border-radius:8px;display:flex;align-items:center;justify-content:center;color:var(--dim);margin-bottom:12px">${s.online ? 'thumbnail of the desktop' : 'Offline'}</div><p class="muted small">${s.online ? 'online' : 'offline'} · ${esc(s.desktop)}</p><button class="btn primary" type="button" ${s.online ? '' : 'disabled'}>Open desktop</button> <button class="btn" type="button">Open fullscreen</button>`)).join('')}</div>`;
+}
+
+function render() {
+  const [r, id, tab] = (location.hash.slice(1) || 'servers').split('/');
+  const route = ['desktop', 'account', 'servers', 'people', 'audit'].includes(r) ? r : 'servers';
+  for (const a of document.querySelectorAll('nav[aria-label="Portal"] a')) { if (a.dataset.r === route) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current'); }
+  $('#view').innerHTML = route === 'servers' ? (id ? server(id, TABS.some((t) => t[0] === tab) ? tab : 'overview') : servers()) : route === 'people' ? people() : route === 'audit' ? audit() : route === 'desktop' ? desktop() : '<h1>My account</h1><p class="dim">Unchanged.</p>';
+}
+document.addEventListener('click', (e) => { const row = e.target.closest('tr.row'); if (row && !e.target.closest('a,button')) location.hash = row.dataset.go; });
+window.addEventListener('hashchange', render);
+render();
+</script>
+</body>
+</html>

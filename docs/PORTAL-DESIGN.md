@@ -169,6 +169,19 @@ server: waydesk-agent (new unit, root helper's peer) --dials--> portal, authenti
 
 **Open:** persistence is a JSON file per collection, written through a temporary file (like the TOTP records) for slices 1 to 3; SQLite when the user count makes that slow (a 480-person organisation is fine for reads, writes are rare). OIDC and LDAP wait for stage 4; the user record has an `origin` field (`local` now) so they can be added without a migration.
 
+## Stage 4 plan: Windows hosts in the portal (decided 2026-11-20, not started)
+
+Windows as a *client* already works (Windows App, mstsc, the browser portal). This is about Windows machines as *servers* in the portal. Waydesk does not run on them: they already speak RDP, so the portal brokers them.
+
+- **Native RDP clients stay direct:** they connect straight to the host, as for Linux servers. The portal is only in the path for browser access.
+- **Server type "RDP host":** address, port, optional domain. No join code, no agent, no key. Assignment only decides who sees the card; it creates no accounts.
+- **Browser access:** a server-side IronRDP client in the portal connects to the Windows host and feeds frames, cursor and clipboard into the existing thin stream (`proto.rs`), so the browser code does not change. This is the main work (about the size of slice 4); the codec is the likely rough edge.
+- **Credentials:** the person types their Windows password at Open; the portal uses it for that connection and never stores it. A stored shared credential is not planned.
+- **Fleet and audit:** reachability check only; the audit is the portal's own `stream.open` (server kind `rdp`). No account, session or status management without an agent.
+- **Optional later:** a small Windows `waydesk-agent` service for status, session list and local-user management (the Rust core ports; helper, PAM and systemd parts do not). Only on demand.
+- **Limits outside our control:** Windows client editions allow one interactive session; several people on one host needs Windows Server with RDS CALs. GPU placement, memory protection and the desktop backends stay Linux-only.
+- **Open questions:** AD-joined office PCs or Windows Server session hosts; NLA/CredSSP and domain sign-in through IronRDP; certificate validation of the host (pin per server, as for agents).
+
 ## Later
 
 - **Stage 2, several hosts:** each host dials out to the portal with a single-use join token that carries the portal's certificate fingerprint; entitlements per user or group; audit events from all hosts; the list shows hosts with state. Data model to copy from ghost's Veil: devices, entitlements, join tokens, placements.
