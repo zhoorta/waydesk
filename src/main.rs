@@ -40,6 +40,7 @@ mod proto;
 #[cfg(any(feature = "vaapi", feature = "nvenc"))]
 mod qp;
 mod session;
+mod compact;
 mod sessionshot;
 mod sessionstatus;
 mod sessionaudio;
@@ -552,6 +553,8 @@ async fn main() -> anyhow::Result<()> {
     // How long a session without a client lives (seconds, 0 = for ever), and whether it ends when the client leaves.
     let mut idle_timeout = 8 * 3600u64;
     let mut end_on_disconnect = false;
+    // A session without a client this long (seconds, 0 = never) has its memory pushed out to swap (compact.rs).
+    let mut compact_after = compact::DEFAULT_AFTER.as_secs();
     // Internal: where a persistent session registers (set by the helper).
     let mut register: Option<PathBuf> = None;
     while let Some(a) = args.next() {
@@ -580,6 +583,7 @@ async fn main() -> anyhow::Result<()> {
             "--max-active-users" => max_active_users = args.next().context("--max-active-users needs a number (0 = no limit)")?.parse()?,
             "--idle-timeout" => idle_timeout = args.next().context("--idle-timeout needs seconds")?.parse()?,
             "--end-on-disconnect" => end_on_disconnect = true,
+            "--compact-after" => compact_after = args.next().context("--compact-after needs seconds (0: never)")?.parse()?,
             "--register" => register = args.next().map(PathBuf::from),
             "--helper-socket" => helper_socket = PathBuf::from(args.next().context("--helper-socket needs a path")?),
             "--daemon-user" => daemon_user = args.next().context("--daemon-user needs an account name")?,
@@ -617,7 +621,7 @@ async fn main() -> anyhow::Result<()> {
         worker::prefer_private_bin();
         let tuning = (!no_egfx).then_some(encode::Tuning { bitrate, max_qp, fps: 30 });
         let opts = session::Options { default_layout: layout, spawn_terminal, workspace, hook };
-        return worker::run(worker::Config { opts, tuning, own_sway, register, idle_timeout: std::time::Duration::from_secs(idle_timeout), end_on_disconnect }).await;
+        return worker::run(worker::Config { opts, tuning, own_sway, register, idle_timeout: std::time::Duration::from_secs(idle_timeout), end_on_disconnect, compact_after: std::time::Duration::from_secs(compact_after) }).await;
     }
     // What the session processes are started with.
     let mut worker_args = vec!["--kb-layout".to_string(), layout.clone(), "--workspace".into(), workspace.clone()];
@@ -630,6 +634,7 @@ async fn main() -> anyhow::Result<()> {
     }
     worker_args.extend(["--compositor".to_string(), compositor::name(compositor).to_string()]);
     worker_args.extend(["--idle-timeout".to_string(), idle_timeout.to_string()]);
+    worker_args.extend(["--compact-after".to_string(), compact_after.to_string()]);
     if end_on_disconnect {
         worker_args.push("--end-on-disconnect".into());
     }

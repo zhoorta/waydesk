@@ -29,6 +29,8 @@ ProtectSystem=full
 ProtectKernelModules=yes
 ProtectKernelTunables=yes
 ProtectControlGroups=yes
+# ...but the accounts' slices stay writable: the helper pushes the memory of a session without a client out to swap (memory.reclaim, src/compact.rs).
+ReadWritePaths=/sys/fs/cgroup/user.slice
 RestrictRealtime=yes
 LockPersonality=yes
 RestrictNamespaces=yes

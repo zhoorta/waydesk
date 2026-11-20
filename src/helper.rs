@@ -211,8 +211,8 @@ fn peer_uid(sock: &UnixStream) -> Option<u32> {
     (rc == 0).then_some(cred.uid)
 }
 
-/// A session process says it is up. It never sends anything: it stays connected until it ends, and the end of
-/// the connection is how we learn that it is gone.
+/// A session process says it is up. It stays connected until it ends, and the end of the connection is how we learn that it is gone (the only
+/// thing it ever sends is the request to be compacted).
 fn registration(mut conn: UnixStream, sessions: &Sessions) {
     use std::io::Read;
     let Some(uid) = peer_uid(&conn) else { return };
@@ -240,8 +240,22 @@ fn registration(mut conn: UnixStream, sessions: &Sessions) {
     sessions.by_uid.lock().unwrap().insert(uid, Registered { sock, generation });
     sessions.registered.notify_all();
     info!(uid, "session registered");
+    // The session sends one byte, `compact::REQUEST`, when it has been without a client for a while. Nothing else is read from it.
     let mut buf = [0u8; 64];
-    while matches!(conn.read(&mut buf), Ok(n) if n > 0) {}
+    let mut last_compact: Option<Instant> = None;
+    while let Ok(n) = conn.read(&mut buf) {
+        if n == 0 {
+            break;
+        }
+        if buf[..n].contains(&crate::compact::REQUEST) && last_compact.is_none_or(|t| t.elapsed() >= crate::compact::MIN_GAP) {
+            last_compact = Some(Instant::now());
+            // The account is the one checked on the socket; the slice is named from it alone.
+            match crate::compact::reclaim_account(uid) {
+                Ok(o) => info!(uid, "compacted the session: {} MB -> {} MB in RAM, {} MB in swap", crate::compact::mb(o.before), crate::compact::mb(o.after), crate::compact::mb(o.swapped)),
+                Err(why) => info!(uid, "session not compacted: {why}"),
+            }
+        }
+    }
     let mut map = sessions.by_uid.lock().unwrap();
     if map.get(&uid).is_some_and(|r| r.generation == generation) {
         map.remove(&uid);

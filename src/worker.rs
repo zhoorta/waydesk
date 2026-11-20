@@ -40,6 +40,8 @@ pub struct Config {
     pub idle_timeout: std::time::Duration,
     /// A persistent session ends when its client leaves.
     pub end_on_disconnect: bool,
+    /// A persistent session without a client this long has its memory pushed out to swap, once per absence (zero: never; see compact.rs).
+    pub compact_after: std::time::Duration,
 }
 
 /// Where clients come from.
@@ -66,6 +68,16 @@ impl Source {
     }
 }
 
+/// Our end of the registration socket, for the one-byte request of `compact.rs`.
+static HELPER: std::sync::Mutex<Option<std::os::unix::net::UnixStream>> = std::sync::Mutex::new(None);
+
+/// Asks the helper (root) to push this account's memory out to swap (src/compact.rs). False when there is no helper to ask.
+fn ask_helper_to_compact() -> bool {
+    use std::io::Write as _;
+    let guard = HELPER.lock().unwrap_or_else(|e| e.into_inner());
+    guard.as_ref().is_some_and(|mut sock| sock.write_all(&[crate::compact::REQUEST]).is_ok())
+}
+
 /// Connects to the helper's registration socket (the helper learns our account from the kernel) and turns every
 /// descriptor it sends into a client socket. If the helper goes away (a restart, an upgrade) it connects again, so the
 /// session stays reachable.
@@ -78,6 +90,8 @@ fn register(path: &std::path::Path) -> Result<Source> {
         let mut reg = Some(first);
         loop {
             if let Some(sock) = reg.take().or_else(|| std::os::unix::net::UnixStream::connect(&path).ok()) {
+                // Kept for `ask_helper_to_compact`: the helper reads this connection too.
+                *HELPER.lock().unwrap_or_else(|e| e.into_inner()) = sock.try_clone().ok();
                 while let Ok(fd) = crate::fdpass::recv_fd(&sock) {
                     if tx.send(std::os::unix::net::UnixStream::from(fd)).is_err() {
                         return;
@@ -161,6 +175,15 @@ pub async fn run(cfg: Config) -> Result<()> {
                     }
                 };
                 tokio::pin!(idle);
+                let compact_for = (session.is_some() && !cfg.compact_after.is_zero()).then_some(cfg.compact_after);
+                let compact = async {
+                    match compact_for {
+                        Some(d) => tokio::time::sleep(d).await,
+                        None => std::future::pending().await,
+                    }
+                };
+                tokio::pin!(compact);
+                let mut compacted = false;
                 let mut tick = tokio::time::interval(Duration::from_secs(2));
                 let next = loop {
                     tokio::select! {
@@ -168,6 +191,15 @@ pub async fn run(cfg: Config) -> Result<()> {
                         _ = &mut idle => {
                             info!("no client for {:?}: ending the session", cfg.idle_timeout);
                             break None;
+                        }
+                        _ = &mut compact, if !compacted => {
+                            compacted = true;
+                            // The helper does it (only root can) and logs what it freed.
+                            if ask_helper_to_compact() {
+                                info!("no client for {:?}: asked the helper to compact the session's memory", cfg.compact_after);
+                            } else {
+                                info!("no client for {:?}: no helper to ask, the session is not compacted", cfg.compact_after);
+                            }
                         }
                         _ = tick.tick() => if sway.as_mut().is_some_and(OwnCompositor::exited) {
                             info!("sway has ended: ending the session");
