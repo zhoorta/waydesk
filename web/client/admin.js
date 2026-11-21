@@ -3,7 +3,7 @@
 // Everything is put on the page with textContent (never innerHTML): a name from the machine's account list cannot become markup.
 import { el, chip, dot, win, button, modal, confirmBox } from './ui.js';
 
-const meter = (percent, warn = false) => el('div', { class: 'meter' }, el('i', { class: warn ? 'w' : '', style: `width:${Math.max(0, Math.min(100, Math.round(percent)))}%` }));
+const meter = (percent, warn = false, good = false) => el('div', { class: 'meter' + (good ? ' good' : '') }, el('i', { class: warn ? 'w' : '', style: `width:${Math.max(0, Math.min(100, Math.round(percent)))}%;--p:${Math.max(0, Math.min(100, Math.round(percent)))}` }));
 const gb = (mb) => (mb >= 1024 ? (mb / 1024).toFixed(mb >= 10240 ? 0 : 1) + ' GB' : Math.round(mb) + ' MB');
 const table = (heads, rows, empty) => el('div', { class: 'tw' }, rows.length === 0 ? el('p', { class: 'muted' }, empty) : el('table', {}, el('thead', {}, el('tr', {}, heads.map((h) => el('th', { class: h.startsWith('>') ? 'n' : '' }, h.replace(/^>/, ''))))), el('tbody', {}, rows)));
 // A window with a count at the right end of its title bar.
@@ -303,8 +303,8 @@ async function removeServer(v) {
   ctx.reload();
 }
 
-function tile(label, value, unit, percent, warn) {
-  return el('div', { class: 'tile' }, el('div', { class: 'k' }, label), el('div', { class: 'big' }, value, ' ', el('small', {}, unit)), percent == null ? null : meter(percent, warn));
+function tile(label, value, unit, percent, warn, good = false) {
+  return el('div', { class: 'tile' }, el('div', { class: 'k' }, label), el('div', { class: 'big' }, value, ' ', el('small', {}, unit)), percent == null ? null : meter(percent, warn, good));
 }
 
 // ---- one server: its page, with tabs ----
@@ -426,8 +426,8 @@ const views = {
     const total = rows.length;
     const sessions = list.reduce((n, v) => n + ((nums.get(v.id) || {}).sessions || 0), 0);
     return [
-      el('div', { class: 'head' }, el('h1', {}, 'Servers'), el('span', { class: 'sp' }), button('Add server', addServer, 'primary')),
-      el('div', { class: 'tiles' }, tile('Servers', online, 'of ' + total + ' online', total ? (online / total) * 100 : null, total > 0 && online < total), tile('Sessions', sessions, 'running now', null), tile('Users', fl.people || 0, 'in the portal', null)),
+      el('div', { class: 'head' }, el('div', {}, el('h1', {}, 'Servers'), el('p', { class: 'sub' }, total + (total === 1 ? ' server' : ' servers') + ' \u00b7 ' + online + ' online \u00b7 ' + sessions + (sessions === 1 ? ' session' : ' sessions') + ' running')), el('span', { class: 'sp' }), button('Add server', addServer, 'primary')),
+      el('div', { class: 'tiles' }, tile('Servers', online, 'of ' + total + ' online', total ? (online / total) * 100 : null, total > 0 && online < total, true), tile('Sessions', sessions, 'running now', null), tile('Users', fl.people || 0, 'in the portal', null)),
       win('servers · ' + total, table(['Server', 'State', '>Sessions', 'Memory', '>CPU', 'Attention', '>Users', ''], rows, 'No server yet. Add one to get a join code.'),
         el('p', { class: 'hint' }, 'Click a server for its details. A join code works once and for one hour; the server keeps its own key after it enrols, and revoking takes that key away.')),
     ];
@@ -583,7 +583,7 @@ const views = {
         button(p.disabled ? 'Switch on' : 'Switch off', () => personDo({ action: 'disable', name: p.name, on: !p.disabled }, p.name + (p.disabled ? ' may sign in again.' : ' was switched off.')), 'sm' + (p.disabled ? '' : ' danger')),
         button('Remove', () => personRemove(p), 'sm danger')), 'n')));
     return [
-      el('div', { class: 'head' }, el('h1', {}, 'Users'), el('span', { class: 'sp' }), button('Add user', addPerson, 'primary')),
+      el('div', { class: 'head' }, el('div', {}, el('h1', {}, 'Users'), el('p', { class: 'sub' }, rows.length + (rows.length === 1 ? ' user' : ' users') + ' \u00b7 ' + (r.people || []).filter((p) => p.admin).length + ' admin')), el('span', { class: 'sp' }), button('Add user', addPerson, 'primary')),
       win('users of the portal \u00b7 ' + rows.length, table(['Name', 'Role', 'State', 'Servers', ''], rows, 'Nobody yet.'),
         el('p', { class: 'hint' }, 'These are the users of the portal. Assigning a server makes the same user\u2019s account on that server (see the Accounts tab of the server), with a password nobody sees; the user makes an app password for RDP clients in My account.')),
     ];
