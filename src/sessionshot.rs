@@ -9,6 +9,7 @@
 
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -61,13 +62,38 @@ pub fn thumbnail(bgra: &[u8], w: usize, h: usize) -> Option<Vec<u8>> {
 }
 
 static LAST: Mutex<Option<Instant>> = Mutex::new(None);
+/// A frame came while no picture was due, so the picture on disk may be older than the screen.
+static SKIPPED: AtomicBool = AtomicBool::new(false);
+/// The picture has been still for a moment (the worker is sending its settle keyframe): the screen has reached its final state.
+static SETTLED: AtomicBool = AtomicBool::new(false);
+/// A settled screen is photographed early, but not more often than this.
+const SETTLED_MIN: Duration = Duration::from_secs(1);
+
+/// The worker calls this when the picture has stopped changing. Frames are only made when something changes, so without it a screen that went still
+/// less than `INTERVAL` after the last picture would keep showing the state from before its last changes, for as long as it stays still.
+pub fn settled() {
+    SETTLED.store(true, Ordering::Relaxed);
+}
 
 /// True when a picture is due now (and notes that one is being made).
 fn due() -> bool {
     let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
-    if last.is_some_and(|t| t.elapsed() < INTERVAL) {
-        return false;
+    if let Some(t) = *last {
+        if t.elapsed() < INTERVAL {
+            let late = SETTLED.load(Ordering::Relaxed) && SKIPPED.load(Ordering::Relaxed) && t.elapsed() >= SETTLED_MIN;
+            if !late {
+                // The settle frame of a picture that was photographed at its last change shows nothing new.
+                if SETTLED.load(Ordering::Relaxed) && !SKIPPED.load(Ordering::Relaxed) {
+                    SETTLED.store(false, Ordering::Relaxed);
+                } else {
+                    SKIPPED.store(true, Ordering::Relaxed);
+                }
+                return false;
+            }
+        }
     }
+    SETTLED.store(false, Ordering::Relaxed);
+    SKIPPED.store(false, Ordering::Relaxed);
     *last = Some(Instant::now());
     true
 }
@@ -101,6 +127,8 @@ pub fn clear() {
     let uid = unsafe { libc::geteuid() };
     let _ = std::fs::remove_file(path_for(Path::new(DIR), uid));
     *LAST.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    SKIPPED.store(false, Ordering::Relaxed);
+    SETTLED.store(false, Ordering::Relaxed);
 }
 
 /// A picture as the reader gets it: the PNG and when it was made (Unix seconds).
@@ -221,6 +249,25 @@ mod tests {
         assert!(!due(), "not again at once");
         *LAST.lock().unwrap() = Some(Instant::now() - INTERVAL - Duration::from_secs(1));
         assert!(due());
+        // A screen that goes still soon after a picture is photographed again once it has settled, and only if frames were skipped.
         *LAST.lock().unwrap() = None;
+        assert!(due());
+        settled();
+        *LAST.lock().unwrap() = Some(Instant::now() - Duration::from_secs(3));
+        assert!(!due(), "settled, but nothing was skipped: the picture is current");
+        assert!(!SKIPPED.load(Ordering::Relaxed) && !SETTLED.load(Ordering::Relaxed));
+        assert!(!due(), "a change frame, skipped");
+        settled();
+        *LAST.lock().unwrap() = Some(Instant::now() - Duration::from_secs(3));
+        assert!(due(), "a frame was skipped and the screen settled");
+        assert!(!due(), "not again at once");
+        // Settling right after a picture waits for the minimum.
+        *LAST.lock().unwrap() = Some(Instant::now() - Duration::from_millis(200));
+        assert!(!due());
+        settled();
+        assert!(!due(), "too soon after the last picture");
+        *LAST.lock().unwrap() = Some(Instant::now() - Duration::from_secs(2));
+        assert!(due());
+        clear();
     }
 }

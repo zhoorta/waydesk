@@ -455,6 +455,7 @@ impl Worker {
             return;
         }
         enc.force_keyframe();
+        crate::sessionshot::settled();
         self.settling = true;
         shared.mark_dirty(Rect { x: rect.x, y: rect.y, w: x1 - rect.x, h: y1 - rect.y });
     }

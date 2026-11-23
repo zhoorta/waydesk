@@ -277,3 +277,35 @@ signed-in browser.
 - **Passwords are not wiped from memory** in the portal or the agent (as for the daemon).
 - **A stolen server key** lets its holder pretend to be that server to the portal (answer requests, receive the app password of its people) until the server is revoked. There is no second proof such as a certificate per server.
 - **Not reviewed by someone else**, not fuzzed (the link and relay parsers are JSON and length prefixes; the daemon's side is as before).
+
+## Desktop thumbnails (2026-11-23)
+
+Added 2026-11-20 (`src/sessionshot.rs`, the agent's `shot` request, `GET /api/mine/shot`) and reviewed now by the code's author with an AI assistant; not independent. The
+picture is the one new thing that carries what is *on a person's screen* out of the session, so it gets its own list.
+
+**Path.** The session worker (the account's own uid) cuts a frame it already captured down to 320 px and writes `/run/waydesk/status/UID/shot.png` (folder 0700, file 0600,
+at most one every 10 s). The agent (root) reads it only for accounts it made for the portal. The portal serves it to that person only, as `image/png`, `no-store`, `nosniff`.
+
+| Control | Where | Checked by |
+|---|---|---|
+| Nobody else can read the file: the folder is the account's own, 0700, the file 0600 and written by rename | `sessionshot.rs`, `sessionstatus.rs` | unit test of the write; folder rules as for `status.json` |
+| The agent (root) reads as the account's file: no link followed (`O_NOFOLLOW`), a plain file, owned by that uid, at most 512 KiB, must start with the PNG signature. The account can write anything there, but only to be shown to itself | `agent.rs` `read_shot` | unit tests: a link, a non-PNG, another folder, a name like `../etc`, `root` |
+| Only accounts the agent made (the same list as passwords and desktops); the uid comes from the account name, never from the request | `desktop_shot` | unit tests |
+| The portal asks for the picture of the *signed-in* person only (the browser names a server, never an account); the person must be assigned there, made by the portal, not switched off | `mine_shot` | same checks as the desktop relay |
+| Answer is hex of a PNG, 512 KiB at most, must start with the signature; sent with `no-store` so no cache keeps a screen | `mine_shot`, `decode_hex` | unit test |
+| The picture is never logged and no audit line carries it | whole path | read through |
+| It goes when the session ends (`clear`) | `worker.rs` | read through |
+
+**Found and fixed.** A screen that went still less than 10 s after the last picture kept showing the state from before its last changes for as long as it stayed still
+(frames are made only when something changes, and a frame inside the 10 s was dropped). That is a wrong picture, not a leak, but the card is the person's idea of what
+their desktop is doing. The worker now tells `sessionshot` when the picture has settled (the settle keyframe, 300 ms after the last change) and, if a frame was dropped
+since the last picture, one more is taken (not within a second of the last).
+
+**Noted, not changed.**
+- **The picture can be old, and the portal does not say so.** A worker that is killed (not ended) leaves its last picture in `/run` until the next session of that account
+  ends or the machine restarts; a session with no client may stop capturing. The agent has the picture's age (`age_secs`) and the portal does not pass it on, so the card
+  shows an old screen as if it were now. It is the person's own screen, so nothing leaks; a timestamp on the card is the fix.
+- **Anything on the screen is in the picture**, passwords typed in clear included, for up to 10 s, in RAM (`/run` is tmpfs) and in the browser's memory while the card is shown. It is
+  at 320 px, which makes small text unreadable, but a large one (a banner, a code) is not. A person who shares a screen they would not show the portal should know the card exists.
+- **A compromised portal can read the picture** of every account the agent made (it is what the agent is for). The agent will not read any other account's.
+- **A server's administrator (root there) can read every screen anyway**; the thumbnail adds nothing for them.
