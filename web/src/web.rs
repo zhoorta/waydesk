@@ -1750,8 +1750,26 @@ async fn static_file(State(app): State<Arc<App>>, headers: HeaderMap, uri: Uri) 
             continue;
         }
         let Ok(body) = tokio::fs::read(&real).await else { continue };
-        let cache = if wanted.extension().is_some_and(|e| e == "html") || path == "/index.html" { "no-cache" } else { "public, max-age=3600" };
+        // The pages and their scripts and styles are asked again every time and answered with 304 when they are the same (an ETag of the content): a cache of an
+        // hour kept an administrator on the old script for an hour after an upgrade. Fonts, pictures and the WebAssembly keep the hour.
+        let changes = path == "/index.html" || wanted.extension().and_then(|e| e.to_str()).is_some_and(|e| matches!(e, "html" | "js" | "mjs" | "css" | "json"));
+        let cache = if changes { "no-cache" } else { "public, max-age=3600" };
+        let etag = {
+            use sha2::Digest as _;
+            let d = sha2::Sha256::digest(&body);
+            format!("\"{}{}\"", data_encoding::HEXLOWER.encode(&d[..12]), if gzipped { "-gz" } else { "" })
+        };
+        if changes && headers.get(header::IF_NONE_MATCH).and_then(|v| v.to_str().ok()).is_some_and(|v| v.split(',').any(|t| t.trim() == etag)) {
+            let mut res = StatusCode::NOT_MODIFIED.into_response();
+            res.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static(cache));
+            res.headers_mut().insert(header::ETAG, HeaderValue::from_str(&etag).unwrap());
+            res.headers_mut().insert(header::VARY, HeaderValue::from_static("accept-encoding"));
+            return res;
+        }
         let mut res = ([(header::CONTENT_TYPE, content_type(&wanted)), (header::CACHE_CONTROL, cache)], body).into_response();
+        if changes {
+            res.headers_mut().insert(header::ETAG, HeaderValue::from_str(&etag).unwrap());
+        }
         if gzipped {
             res.headers_mut().insert(header::CONTENT_ENCODING, HeaderValue::from_static("gzip"));
         }
