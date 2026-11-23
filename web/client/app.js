@@ -161,7 +161,13 @@ async function refreshShots() {
     try {
       const r = await fetch('/api/mine/shot?server=' + encodeURIComponent(img.dataset.server), { cache: 'no-store' });
       const none = img.nextElementSibling;
-      if (r.status !== 200) { img.hidden = true; if (none) none.hidden = false; return; }
+      if (r.status !== 200) {
+        img.hidden = true;
+        if (none) none.hidden = false;
+        const m = img.parentElement && img.parentElement.querySelector('p.muted');
+        if (m && m.dataset.base !== undefined) m.textContent = m.dataset.base;
+        return;
+      }
       const url = URL.createObjectURL(await r.blob());
       const old = shotUrls.get(img.dataset.server);
       img.src = url;
@@ -169,6 +175,13 @@ async function refreshShots() {
       if (none) none.hidden = true;
       shotUrls.set(img.dataset.server, url);
       if (old) URL.revokeObjectURL(old);
+      // A picture that is not fresh says so (a session that nobody is watching, or one whose worker died, keeps its last picture).
+      const age = parseInt(r.headers.get('x-shot-age') || '', 10);
+      const meta = img.parentElement && img.parentElement.querySelector('p.muted');
+      if (meta) {
+        if (meta.dataset.base === undefined) meta.dataset.base = meta.textContent;
+        meta.textContent = meta.dataset.base + (age >= 60 ? ' \u00b7 picture from ' + (age < 3600 ? Math.round(age / 60) + ' min' : Math.round(age / 3600) + ' h') + ' ago' : '');
+      }
     } catch { img.hidden = true; if (img.nextElementSibling) img.nextElementSibling.hidden = false; }
   }));
   shotTimer = setTimeout(refreshShots, 30000);

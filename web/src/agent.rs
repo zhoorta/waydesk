@@ -414,12 +414,13 @@ fn desktop_shot(account: &str) -> Result<String, String> {
     }
     let uid = unsafe { (*pw).pw_uid };
     match read_shot(std::path::Path::new(STATUS_DIR), uid) {
-        Some(png) => Ok(json!({ "hex": png.iter().map(|b| format!("{b:02x}")).collect::<String>() }).to_string()),
+        Some((png, age)) => Ok(json!({ "hex": png.iter().map(|b| format!("{b:02x}")).collect::<String>(), "age": age }).to_string()),
         None => none(),
     }
 }
 
-fn read_shot(dir: &std::path::Path, uid: u32) -> Option<Vec<u8>> {
+/// The picture and how old it is in seconds (from the file's own time: the portal says so on the card, because a worker that was killed leaves its last picture).
+fn read_shot(dir: &std::path::Path, uid: u32) -> Option<(Vec<u8>, u64)> {
     use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
     const MAX: u64 = 512 * 1024;
     let path = dir.join(uid.to_string()).join("shot.png");
@@ -430,7 +431,9 @@ fn read_shot(dir: &std::path::Path, uid: u32) -> Option<Vec<u8>> {
     }
     let mut png = Vec::with_capacity(meta.len() as usize);
     (&mut file).take(MAX).read_to_end(&mut png).ok()?;
-    png.starts_with(&[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]).then_some(png)
+    let made = u64::try_from(meta.mtime()).unwrap_or(0);
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    png.starts_with(&[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]).then(|| (png, now.saturating_sub(made)))
 }
 
 /// What one request from the portal gets: the JSON text, or why not.
@@ -723,7 +726,9 @@ mod tests {
         std::fs::create_dir_all(&folder).unwrap();
         let png = [&[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a][..], b"rest"].concat();
         std::fs::write(folder.join("shot.png"), &png).unwrap();
-        assert_eq!(read_shot(&dir, mine), Some(png.clone()));
+        let (got, age) = read_shot(&dir, mine).expect("a picture");
+        assert_eq!(got, png);
+        assert!(age < 5, "just written");
         assert!(read_shot(&dir, mine + 1).is_none(), "no folder of that account");
         std::fs::write(folder.join("shot.png"), b"<html>").unwrap();
         assert!(read_shot(&dir, mine).is_none(), "not a PNG");

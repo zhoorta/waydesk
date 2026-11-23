@@ -1461,12 +1461,16 @@ async fn mine_shot(State(app): State<Arc<App>>, Query(which): Query<WhichServer>
         Ok(a) => a,
         Err(e) => return link_error(e),
     };
-    let Some(png) = serde_json::from_str::<serde_json::Value>(&answer).ok().and_then(|v| v.get("hex")?.as_str().map(decode_hex)).flatten() else {
+    let answer = serde_json::from_str::<serde_json::Value>(&answer).ok();
+    let Some(png) = answer.as_ref().and_then(|v| v.get("hex")?.as_str().map(decode_hex)).flatten() else {
         return text(StatusCode::NO_CONTENT, "");
     };
+    // How old the picture is, in seconds: a number or nothing (what a server says is data, never put into a header as it came).
+    let age = answer.as_ref().and_then(|v| v.get("age")?.as_u64()).map_or(String::new(), |a| a.to_string());
     (
         StatusCode::OK,
         [(header::CONTENT_TYPE, "image/png"), (header::CACHE_CONTROL, "no-store"), (header::X_CONTENT_TYPE_OPTIONS, "nosniff")],
+        [("x-shot-age", age)],
         png,
     )
         .into_response()
