@@ -17,6 +17,9 @@ post_install() {
   # polkit's agent helper is no longer setuid: agents (Omarchy's shell has one) reach it through this socket, which pacman does not start, and without it every
   # authentication attempt fails at once and is retried about twenty times a second: 70 % of a core in an idle session. It is started at boot from then on.
   systemctl start polkit-agent-helper.socket >/dev/null 2>&1 || true
+  # The portal's administration requests (root only socket), and the link to a portal, which starts only once `waydesk-agent enrol` has written /etc/waydesk/agent.json.
+  systemctl enable --now waydesk-admin.socket >/dev/null 2>&1 || true
+  systemctl enable waydesk-agent.service >/dev/null 2>&1 || true
   cat <<MSG
 waydesk: to start it:
     sudo systemctl enable --now waydesk-helper.service waydesk.service
@@ -31,11 +34,13 @@ post_upgrade() {
   systemd-sysusers waydesk.conf >/dev/null 2>&1 || true
   systemd-tmpfiles --create waydesk.conf >/dev/null 2>&1 || true
   udevadm control --reload >/dev/null 2>&1 || true
+  systemctl enable --now waydesk-admin.socket >/dev/null 2>&1 || true
+  systemctl try-restart waydesk-agent.service >/dev/null 2>&1 || true   # an upgrade keeps the link to the portal
   echo "waydesk: restart the services to use the new version: sudo systemctl restart waydesk-helper.service waydesk.service"
   echo "         (sessions that are running keep the old version until their account logs out of them)"
 }
 
 pre_remove() {
-  systemctl stop waydesk.service waydesk-helper.service >/dev/null 2>&1 || true
-  systemctl disable waydesk.service waydesk-helper.service >/dev/null 2>&1 || true
+  systemctl stop waydesk-agent.service waydesk.service waydesk-helper.service >/dev/null 2>&1 || true
+  systemctl disable waydesk-agent.service waydesk-admin.socket waydesk.service waydesk-helper.service >/dev/null 2>&1 || true
 }

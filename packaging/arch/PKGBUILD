@@ -6,7 +6,7 @@
 # the account's own Hyprland (docs/HYPRLAND.md).
 pkgname=waydesk-server
 pkgver=0.5.0
-pkgrel=3
+pkgrel=4
 pkgdesc='RDP server giving each account its own headless Wayland desktop (sway; Hyprland, KDE Plasma and COSMIC optional)'
 arch=(x86_64 aarch64)
 url='https://waydesk.stackcare.pt'
@@ -40,12 +40,15 @@ prepare() {
   cd "$pkgname-$pkgver"
   export RUSTUP_TOOLCHAIN=stable
   cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+  (cd web && cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')")
 }
 
 build() {
   cd "$pkgname-$pkgver"
   export RUSTUP_TOOLCHAIN=stable CARGO_TARGET_DIR=target
   cargo build --frozen --release
+  # The agent (this server's link to a portal) is a program of its own in web/, so that the daemon carries no web stack; it runs only after `waydesk-agent enrol`.
+  (cd web && CARGO_TARGET_DIR=target-web cargo build --frozen --release --bin waydesk-agent)
 }
 
 check() {
@@ -57,12 +60,14 @@ check() {
 package() {
   cd "$pkgname-$pkgver"
   install -Dm755 target/release/waydesk-server target/release/waydesk-admin target/release/waydesk-passwd -t "$pkgdir/usr/bin"
+  install -Dm755 web/target-web/release/waydesk-agent -t "$pkgdir/usr/bin"
   install -Dm755 packaging/bin/waydesk-setup-admin "$pkgdir/usr/bin/waydesk-setup-admin"
   install -Dm644 packaging/org.waydesk.admin.policy -t "$pkgdir/usr/share/polkit-1/actions"
 
   # services, and the memory and kernel settings that go with them
   install -Dm644 packaging/systemd/waydesk.service packaging/systemd/waydesk-helper.service "packaging/systemd/waydesk-session@.service" \
-    packaging/systemd/waydesk-cert-renew.service packaging/systemd/waydesk-cert-renew.timer -t "$pkgdir/usr/lib/systemd/system"
+    packaging/systemd/waydesk-cert-renew.service packaging/systemd/waydesk-cert-renew.timer \
+    packaging/systemd/waydesk-agent.service packaging/systemd/waydesk-admin.socket "packaging/systemd/waydesk-admin@.service" -t "$pkgdir/usr/lib/systemd/system"
   install -Dm644 packaging/systemd/user-slice/10-waydesk.conf "$pkgdir/usr/lib/systemd/system/user-.slice.d/10-waydesk.conf"
   install -Dm644 packaging/systemd/zram/50-waydesk.conf "$pkgdir/usr/lib/systemd/zram-generator.conf.d/50-waydesk.conf"
   install -Dm644 packaging/systemd/sysctl/50-waydesk.conf "$pkgdir/usr/lib/sysctl.d/50-waydesk.conf"
