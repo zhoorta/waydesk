@@ -16,6 +16,9 @@ depends=(acl foot sway pam polkit libva libdrm mesa libxkbcommon openssl systemd
 makedepends=(cargo clang pkgconf)
 optdepends=('plasma-desktop: KDE Plasma sessions (waydesk-admin users set NAME --desktop plasma, see /usr/share/doc/waydesk-server/PLASMA.md)'
             'cosmic: COSMIC sessions (waydesk-admin users set NAME --desktop cosmic, see /usr/share/doc/waydesk-server/COSMIC.md)'
+            'xdg-terminal-exec: Omarchy sessions: its terminal key (Super+Return) starts terminals through this'
+            'xdg-user-dirs: Omarchy sessions: its per-account setup (theme included) stops without it'
+            'mise: Omarchy sessions: its per-account setup stops without it (omarchy-provision-user)'
             'hyprland: Hyprland sessions (WAYDESK_COMPOSITOR=hyprland; needs a GPU, see /usr/share/doc/waydesk-server/HYPRLAND.md)'
             'intel-media-driver: hardware H.264 encoding on Intel GPUs (VA-API)'
             'libva-mesa-driver: hardware H.264 encoding on AMD GPUs (VA-API)'
