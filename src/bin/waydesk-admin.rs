@@ -2066,7 +2066,7 @@ mod audit_tests {
         assert!(audited(&["cert", "status"]).is_none() && audited(&["vpn", "list"]).is_none());
         assert_eq!(audited(&["users", "add", "ana", "--admin"]).unwrap().0, "admin.user.add");
         assert_eq!(audited(&["access", "lan", "--allow", "10.0.0.0/8"]).unwrap().0, "admin.access");
-        assert_eq!(audited(&["users", "sudo", "ana", "on"]).unwrap().2.as_deref(), Some("sudo on"));
+        assert_eq!(audited(&["users", "sudo", "ana", "on"]).unwrap().2.as_deref(), Some(format!("{} on", sudo_group()).as_str()), "the detail names the machine's administrator group: sudo on Debian, wheel on Arch and Fedora");
     }
 
     #[test]
