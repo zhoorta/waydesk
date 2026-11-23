@@ -196,8 +196,78 @@ async fn enrol(portal: &str, code: &str, pin: Option<String>) -> Result<()> {
     let cfg = Config { portal: portal.trim_end_matches('/').to_string(), server: server.to_string(), key: key.to_string(), pin, helper_socket: default_helper(), gateway: default_gateway(), gateway_key_file: default_gateway_key() };
     std::fs::create_dir_all("/etc/waydesk")?;
     save_config(&cfg, Path::new(CONFIG))?;
+    match setup_gateway(Path::new(&cfg.gateway_key_file), Path::new(DEFAULTS)) {
+        Ok(true) => println!("desktops from the portal: key made and {DEFAULTS} updated; restart the daemon when nobody is connected: systemctl restart waydesk"),
+        Ok(false) => {}
+        Err(e) => eprintln!("warning: the gateway for desktops from the portal is not set up ({e:#}); the link works, opening a desktop will not"),
+    }
     println!("enrolled as {server}; start the link with: systemctl enable --now waydesk-agent");
     Ok(())
+}
+
+// ---- the daemon's gateway port (what opens a desktop in the browser) ----
+
+const DEFAULTS: &str = "/etc/default/waydesk";
+const GATEWAY_FLAGS: &str = "--gateway-bind 127.0.0.1:3390 --gateway-key /etc/waydesk/gateway.key";
+
+/// The text of `/etc/default/waydesk` with the gateway flags in `WAYDESK_ARGS`; `None` when they are already there.
+fn with_gateway_flags(text: &str) -> Option<String> {
+    if text.lines().any(|l| !l.trim_start().starts_with('#') && l.contains("WAYDESK_ARGS=") && l.contains("--gateway-bind")) {
+        return None;
+    }
+    let mut done = false;
+    let mut out: Vec<String> = text
+        .lines()
+        .map(|l| {
+            if done || !l.starts_with("WAYDESK_ARGS=") {
+                return l.to_string();
+            }
+            done = true;
+            let value = &l["WAYDESK_ARGS=".len()..];
+            let (quote, inner) = match value.chars().next() {
+                Some(q @ ('"' | '\'')) if value.len() >= 2 && value.ends_with(q) => (q.to_string(), &value[1..value.len() - 1]),
+                _ => (String::new(), value),
+            };
+            let joined = if inner.trim().is_empty() { GATEWAY_FLAGS.to_string() } else { format!("{} {GATEWAY_FLAGS}", inner.trim()) };
+            let q = if quote.is_empty() { "\"".to_string() } else { quote };
+            format!("WAYDESK_ARGS={q}{joined}{q}")
+        })
+        .collect();
+    if !done {
+        out.push(format!("WAYDESK_ARGS=\"{GATEWAY_FLAGS}\""));
+    }
+    Some(out.join("\n") + "\n")
+}
+
+/// Makes the gateway key (kept if there is one) and adds the flags to the daemon's settings, so a desktop can be opened from the portal. Returns
+/// true when the daemon has to be restarted to pick them up.
+fn setup_gateway(key_path: &Path, defaults: &Path) -> Result<bool> {
+    if !key_path.exists() {
+        let mut raw = [0u8; 32];
+        getrandom::fill(&mut raw).map_err(|e| anyhow::anyhow!("no random numbers: {e}"))?;
+        let hex: String = raw.iter().map(|b| format!("{b:02x}")).collect();
+        let tmp = key_path.with_extension("tmp");
+        let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&tmp)?;
+        writeln!(f, "{hex}")?;
+        f.sync_all()?;
+        // The daemon (user waydesk) reads it; nobody else but root.
+        if let Ok(c) = std::ffi::CString::new("waydesk") {
+            let pw = unsafe { libc::getpwnam(c.as_ptr()) };
+            if !pw.is_null() {
+                let (uid, gid) = unsafe { ((*pw).pw_uid, (*pw).pw_gid) };
+                std::os::unix::fs::chown(&tmp, Some(uid), Some(gid))?;
+            }
+        }
+        std::fs::rename(&tmp, key_path)?;
+    }
+    let text = std::fs::read_to_string(defaults).unwrap_or_default();
+    match with_gateway_flags(&text) {
+        Some(new) => {
+            std::fs::write(defaults, new)?;
+            Ok(true)
+        }
+        None => Ok(false),
+    }
 }
 
 // ---- accounts the portal manages ----
@@ -619,6 +689,30 @@ async fn enrol_as_root(portal: &str, code: &str, pin: Option<String>) -> Result<
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_gateway_flags_go_into_the_daemons_settings_once() {
+        let f = super::GATEWAY_FLAGS;
+        assert_eq!(super::with_gateway_flags("A=1\nWAYDESK_ARGS=\n").unwrap(), format!("A=1\nWAYDESK_ARGS=\"{f}\"\n"));
+        assert_eq!(super::with_gateway_flags("WAYDESK_ARGS=\"--quality 28\"\n").unwrap(), format!("WAYDESK_ARGS=\"--quality 28 {f}\"\n"));
+        assert_eq!(super::with_gateway_flags("#WAYDESK_ARGS=\"--x\"\n").unwrap(), format!("#WAYDESK_ARGS=\"--x\"\nWAYDESK_ARGS=\"{f}\"\n"));
+        assert!(super::with_gateway_flags(&format!("WAYDESK_ARGS=\"{f}\"\n")).is_none());
+        assert_eq!(super::with_gateway_flags("").unwrap(), format!("WAYDESK_ARGS=\"{f}\"\n"));
+    }
+
+    #[test]
+    fn the_gateway_key_is_made_once_and_kept() {
+        let dir = std::env::temp_dir().join(format!("wd-agent-gw-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (key, defaults) = (dir.join("gateway.key"), dir.join("waydesk"));
+        std::fs::write(&defaults, "WAYDESK_ARGS=\n").unwrap();
+        assert!(super::setup_gateway(&key, &defaults).unwrap());
+        let first = std::fs::read_to_string(&key).unwrap();
+        assert_eq!(first.trim().len(), 64);
+        assert!(!super::setup_gateway(&key, &defaults).unwrap(), "second run changes nothing");
+        assert_eq!(std::fs::read_to_string(&key).unwrap(), first);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     use std::os::unix::fs::symlink;
 
     #[test]
