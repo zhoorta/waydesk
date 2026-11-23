@@ -11,7 +11,8 @@ pkgrel=1
 arch=(x86_64 aarch64)
 url='https://waydesk.stackcare.pt'
 license=(AGPL-3.0-or-later)
-makedepends=(cargo clang pkgconf)
+# the libraries it links are depends of waydesk-server (set in its package function), which makepkg -s does not read to install the build: listed here too
+makedepends=(cargo clang pkgconf libva libdrm mesa libxkbcommon openssl pam)
 # makepkg's default LTO breaks the link of Rust crates that build C code (aws-lc-sys, under rustls): undefined aws_lc_* symbols
 options=(!lto)
 source=("$pkgname-$pkgver.tar.gz"
