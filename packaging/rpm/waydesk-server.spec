@@ -46,6 +46,8 @@ sessions are optional (docs in %{_docdir}/%{name}). Early software.
 %build
 export CARGO_TARGET_DIR=target
 cargo build --locked --release
+# The agent (this server's link to a portal) is a program of its own in web/, so that the daemon carries no web stack; it runs only after `waydesk-agent enrol`.
+(cd web && CARGO_TARGET_DIR=target-web cargo build --locked --release --bin waydesk-agent)
 
 %check
 export CARGO_TARGET_DIR=target
@@ -53,12 +55,14 @@ cargo test --locked --release
 
 %install
 install -Dm755 target/release/waydesk-server target/release/waydesk-admin target/release/waydesk-passwd -t %{buildroot}%{_bindir}
+install -Dm755 web/target-web/release/waydesk-agent -t %{buildroot}%{_bindir}
 install -Dm755 packaging/bin/waydesk-setup-admin %{buildroot}%{_bindir}/waydesk-setup-admin
 install -Dm644 packaging/org.waydesk.admin.policy -t %{buildroot}%{_datadir}/polkit-1/actions
 
 # services, and the memory and kernel settings that go with them
 install -Dm644 packaging/systemd/waydesk.service packaging/systemd/waydesk-helper.service "packaging/systemd/waydesk-session@.service" \
-    packaging/systemd/waydesk-cert-renew.service packaging/systemd/waydesk-cert-renew.timer -t %{buildroot}%{_unitdir}
+    packaging/systemd/waydesk-cert-renew.service packaging/systemd/waydesk-cert-renew.timer \
+    packaging/systemd/waydesk-agent.service packaging/systemd/waydesk-admin.socket "packaging/systemd/waydesk-admin@.service" -t %{buildroot}%{_unitdir}
 install -Dm644 packaging/systemd/user-slice/10-waydesk.conf %{buildroot}%{_unitdir}/user-.slice.d/10-waydesk.conf
 install -Dm644 packaging/systemd/zram/50-waydesk.conf %{buildroot}%{_prefix}/lib/systemd/zram-generator.conf.d/50-waydesk.conf
 install -Dm644 packaging/systemd/sysctl/50-waydesk.conf %{buildroot}%{_sysctldir}/50-waydesk.conf
@@ -118,6 +122,10 @@ modprobe tcp_bbr >/dev/null 2>&1 || true
 udevadm control --reload >/dev/null 2>&1 || true
 udevadm trigger --subsystem-match=drm --action=change >/dev/null 2>&1 || true
 %systemd_post waydesk-helper.service waydesk.service
+# The portal's administration requests (root only socket), and the link to a portal, which starts only once `waydesk-agent enrol` has written /etc/waydesk/agent.json.
+systemctl enable --now waydesk-admin.socket >/dev/null 2>&1 || true
+systemctl enable waydesk-agent.service >/dev/null 2>&1 || true
+systemctl try-restart waydesk-agent.service >/dev/null 2>&1 || true   # an upgrade keeps the link to the portal
 if [ "$1" -eq 1 ]; then
     cat <<MSG
 waydesk: to start it:
@@ -134,7 +142,7 @@ else
 fi
 
 %preun
-%systemd_preun waydesk-helper.service waydesk.service
+%systemd_preun waydesk-agent.service waydesk-admin.socket waydesk-helper.service waydesk.service
 
 %postun
 %systemd_postun waydesk-helper.service waydesk.service
@@ -145,12 +153,14 @@ fi
 %config(noreplace) %{_sysconfdir}/xdg/waydesk/sway.conf
 %{_bindir}/waydesk-server
 %{_bindir}/waydesk-admin
+%{_bindir}/waydesk-agent
 %{_bindir}/waydesk-passwd
 %{_bindir}/waydesk-setup-admin
 %{_datadir}/polkit-1/actions/org.waydesk.admin.policy
 %{_datadir}/polkit-1/rules.d/50-waydesk-no-power.rules
 %{_unitdir}/waydesk*.service
 %{_unitdir}/waydesk-cert-renew.timer
+%{_unitdir}/waydesk-admin.socket
 %{_unitdir}/user-.slice.d/10-waydesk.conf
 %{_prefix}/lib/systemd/zram-generator.conf.d/50-waydesk.conf
 %{_sysctldir}/50-waydesk.conf
