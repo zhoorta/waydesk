@@ -385,7 +385,8 @@ const views = {
             el('dt', {}, 'Load'), el('dd', { class: 'mono' }, (m.load || []).join(' ') + ' (' + (m.cores || '?') + ' cores)'),
             el('dt', {}, 'New sessions'), el('dd', { class: a.open === false ? 'bad' : 'ok' }, a.open === false ? 'refused' : 'accepted'),
             el('dt', {}, 'Desktop'), el('dd', {}, s.compositor_setting || '-'),
-            hasGpu ? el('dt', {}, 'Graphics') : null, hasGpu ? el('dd', {}, (s.gpu_setting || '-') + ' \u00b7 ' + gpus.map(gpuName).join(', ')) : null)))),
+            hasGpu ? el('dt', {}, gpus.length > 1 ? 'GPUs' : 'GPU') : null, hasGpu ? el('dd', {}, gpus.map((g) => el('div', {}, gpuName(g), el('span', { class: 'dim' }, ' \u00b7 ' + (g.driver || '-') + (g.mem_total_mb ? ' \u00b7 ' + gb(g.mem_total_mb) : '') + ((g.sessions || []).length ? ' \u00b7 ' + g.sessions.length + (g.sessions.length === 1 ? ' session' : ' sessions') : ''))))) : null,
+            hasGpu ? el('dt', {}, 'Graphics') : null, hasGpu ? el('dd', {}, s.gpu_setting || '-') : null)))),
     ];
   },
 
@@ -401,6 +402,8 @@ const views = {
       cell(n.sessions != null ? n.sessions + (n.max_sessions ? ' of ' + n.max_sessions : '') : '-', 'n mono'),
       cell(n.mem_percent != null ? el('div', { class: 'memcell' }, meter(n.mem_percent, n.mem_percent > 80), el('span', {}, Math.round(n.mem_percent) + '%')) : '-'),
       cell(n.cpu_percent != null ? Math.round(n.cpu_percent) + '%' : '-', 'n mono'),
+      // The adapters of the server (the status leaves the virtual ones out): the name, and how busy it is when it says.
+      cell(n.gpus == null ? '-' : n.gpus.length ? n.gpus.map((g) => g.name + (g.busy_percent != null ? ' \u00b7 ' + Math.round(g.busy_percent) + '%' : '')).join(', ') : el('span', { class: 'dim' }, 'none')),
       cell(n.warnings ? chip(n.warnings + (n.warnings === 1 ? ' warning' : ' warnings'), 'warn') : el('span', { class: 'dim' }, '-')),
     ];
     const open = (tr, id) => { tr.classList.add('row'); tr.addEventListener('click', (e) => { if (!e.target.closest('a,button')) location.hash = '#servers/' + id + '/overview'; }); return tr; };
@@ -415,7 +418,7 @@ const views = {
         const cores = m.cores || 1;
         const cpu = m.cpu_percent != null ? m.cpu_percent : Math.min(100, ((parseFloat((m.load || [])[0]) || 0) / cores) * 100);
         rows.push(open(el('tr', {}, cell(el('a', { href: '#servers/this/overview' }, el('b', {}, 'This machine'))), cell(chip('online', 'ok')),
-          ...numbers({ sessions: (here.users || []).filter((u) => u.session).length, mem_percent: mem, cpu_percent: cpu }), cell('-', 'n'), cell('', 'n')), 'this'));
+          ...numbers({ sessions: (here.users || []).filter((u) => u.session).length, mem_percent: mem, cpu_percent: cpu, gpus: realGpus(here).map((g) => ({ name: gpuName(g), busy_percent: g.busy_percent })) }), cell('-', 'n'), cell('', 'n')), 'this'));
       }
     }
     for (const v of list) {
@@ -438,7 +441,7 @@ const views = {
     return [
       el('div', { class: 'head' }, el('div', {}, el('h1', {}, 'Servers'), el('p', { class: 'sub' }, total + (total === 1 ? ' server' : ' servers') + ' \u00b7 ' + online + ' online \u00b7 ' + sessions + (sessions === 1 ? ' session' : ' sessions') + ' running')), el('span', { class: 'sp' }), button('Add server', addServer, 'primary')),
       el('div', { class: 'tiles' }, tile('Servers', online, 'of ' + total + ' online', total ? (online / total) * 100 : null, total > 0 && online < total, true), tile('Sessions', sessions, 'running now', null), tile('Users', fl.people || 0, 'in the portal', null)),
-      win('servers · ' + total, table(['Server', 'State', '>Sessions', 'Memory', '>CPU', 'Attention', '>Users', ''], rows, 'No server yet. Add one to get a join code.'),
+      win('servers · ' + total, table(['Server', 'State', '>Sessions', 'Memory', '>CPU', 'GPU', 'Attention', '>Users', ''], rows, 'No server yet. Add one to get a join code.'),
         el('p', { class: 'hint' }, 'Click a server for its details. A join code works once and for one hour; the server keeps its own key after it enrols, and revoking takes that key away.')),
     ];
   },

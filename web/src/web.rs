@@ -1340,7 +1340,35 @@ pub fn fleet_summary(status: &serde_json::Value) -> serde_json::Value {
         "cpu_percent": m["cpu_percent"],
         "warnings": status["warnings"].as_array().map_or(0, Vec::len),
         "open": a["open"],
+        "gpus": real_gpus(status),
     })
+}
+
+/// A virtual display adapter (a VM's virtio, QEMU, VMware ...) renders in software: it is not a GPU to show.
+fn is_virtual_gpu(driver: &str) -> bool {
+    let d = driver.to_ascii_lowercase();
+    ["virtio", "bochs", "qxl", "vmwgfx", "vboxvideo", "cirrus", "simpledrm", "hyperv"].iter().any(|v| d.contains(v))
+}
+
+/// The server's real GPUs as the fleet page shows them: the adapter's name ("HD Graphics 530" out of "Intel Skylake-S GT2 [HD Graphics 530]"), its driver and how busy it is.
+fn real_gpus(status: &serde_json::Value) -> Vec<serde_json::Value> {
+    status["gpus"]
+        .as_array()
+        .map(|list| {
+            list.iter()
+                .filter(|g| !is_virtual_gpu(g["driver"].as_str().unwrap_or("")))
+                .map(|g| {
+                    let model = g["model"].as_str().unwrap_or("");
+                    let name = match (model.find('['), model.rfind(']')) {
+                        (Some(a), Some(b)) if b > a + 1 => &model[a + 1..b],
+                        _ if !model.is_empty() => model,
+                        _ => g["driver"].as_str().unwrap_or("GPU"),
+                    };
+                    serde_json::json!({ "name": name, "driver": g["driver"], "busy_percent": g["busy_percent"] })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// All servers at a glance: each online server is asked for its status at the same time, and one that does not answer in time is shown as such.

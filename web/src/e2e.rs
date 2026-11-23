@@ -1472,6 +1472,12 @@ fn the_fleet_summary_reads_what_the_status_has_and_nothing_else() {
     let status = serde_json::json!({ "machine": { "mem_total_mb": 8000, "mem_available_mb": 2000, "cpu_percent": 12.5 }, "admission": { "sessions": 3, "max_active_users": 10, "open": true }, "warnings": ["a", "b"] });
     let s = crate::web::fleet_summary(&status);
     assert_eq!((s["sessions"].as_u64(), s["max_sessions"].as_u64(), s["mem_percent"].as_f64(), s["warnings"].as_u64(), s["open"].as_bool()), (Some(3), Some(10), Some(75.0), Some(2), Some(true)));
+    // The adapters: a real one by its name, a VM's virtio one left out.
+    let with_gpus = crate::web::fleet_summary(&serde_json::json!({ "gpus": [
+        { "driver": "i915", "model": "Intel Skylake-S GT2 [HD Graphics 530]", "busy_percent": 57.0 },
+        { "driver": "virtio-pci", "model": "1af4:1050", "busy_percent": null } ] }));
+    assert_eq!(with_gpus["gpus"], serde_json::json!([{ "name": "HD Graphics 530", "driver": "i915", "busy_percent": 57.0 }]));
+    assert_eq!(crate::web::fleet_summary(&serde_json::json!({ "gpus": [{ "driver": "virtio-pci", "model": "1af4:1050" }] }))["gpus"], serde_json::json!([]));
     let nothing = crate::web::fleet_summary(&serde_json::json!([1, 2]));
     assert_eq!((nothing["sessions"].as_u64(), nothing["mem_percent"].is_null()), (Some(0), true));
 }
