@@ -56,6 +56,30 @@ for entry in (os.getenv("PATH") or "/usr/local/bin:/usr/bin"):gmatch("[^:]+") do
     table.insert(parts, entry)
   end
 end
+-- What Omarchy's uwsm session would add (default/bash/env-bootstrap, default/uwsm/default); Waydesk starts Hyprland without uwsm, so nothing else does. Without
+-- the mise directories a coding agent chosen from "Set your default agent" installs and is then "not installed" (its command is a mise shim), and the
+-- other tools installed through mise are not found either. Only when Omarchy's configuration was loaded.
+if type(o) == "table" and type(o.bind) == "function" then
+  local mise = (os.getenv("MISE_DATA_DIR") or ((os.getenv("XDG_DATA_HOME") or (home .. "/.local/share")) .. "/mise"))
+  local wrappers = mise .. "/command-wrappers/bin"
+  -- The wrappers go in front of the system directories (a wrapped tool must win over a real one), behind Waydesk's own stand-ins.
+  if not seen[wrappers] then
+    seen[wrappers] = true
+    table.insert(parts, 3, wrappers)
+  end
+  for _, extra in ipairs({ mise .. "/shims", home .. "/.local/bin" }) do
+    if not seen[extra] then
+      seen[extra] = true
+      table.insert(parts, extra)
+    end
+  end
+  if not os.getenv("TERMINAL") then
+    hl.env("TERMINAL", "xdg-terminal-exec")
+  end
+  if not os.getenv("EDITOR") then
+    hl.env("EDITOR", "omarchy-launch-editor --inline")
+  end
+end
 hl.env("PATH", table.concat(parts, ":"))
 
 -- The size and scale of the session's output. Omarchy's own configuration has a rule for every monitor (output = "", mode = "preferred"), which a
