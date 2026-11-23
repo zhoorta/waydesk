@@ -527,7 +527,7 @@ async fn serve(cfg: &Config) -> Result<()> {
                 Some(Err(e)) => bail!("the link broke: {e}"),
             },
             Some(frame) = out_rx.recv() => tx.send(Message::Text(frame.into())).await?,
-            _ = watch.tick() => if last.elapsed() > Duration::from_secs(70) { bail!("the portal went quiet") },
+            _ = watch.tick() => if last.elapsed() > Duration::from_secs(30) { bail!("the portal went quiet") },
         }
     }
 }
@@ -536,9 +536,9 @@ async fn serve(cfg: &Config) -> Result<()> {
 
 /// Desktops that may be open through one agent at once.
 const MAX_DESKTOPS: usize = 32;
-/// Requests that may wait for one of the two places, and for how long (the portal gives up on a read after 25 s).
+/// Requests that may wait for one of the two places, and for how long (the portal gives up on a read after 15 s).
 const QUEUE: usize = 32;
-const QUEUE_WAIT: Duration = Duration::from_secs(20);
+const QUEUE_WAIT: Duration = Duration::from_secs(12);
 /// What the browser may send in a message (a clipboard text may be longer), and what the daemon may send (a whole H.264 picture): as in `stream.rs`.
 const MAX_FROM_PORTAL: usize = 1 + 1024 * 1024;
 const MAX_FROM_DAEMON: usize = 16 * 1024 * 1024;

@@ -1041,7 +1041,8 @@ async fn agent_link(mut socket: axum::extract::ws::WebSocket, ip: IpAddr, app: A
         app.links.detach(&server, link.gen);
         return;
     }
-    let mut ping = tokio::time::interval(Duration::from_secs(20));
+    // A server that vanishes (deleted, cut off) sends no close: only silence says so. Ping every 4 s and give up after 12 s, not after a minute.
+    let mut ping = tokio::time::interval(crate::link::PING_EVERY);
     let mut last = Instant::now();
     loop {
         tokio::select! {
@@ -1063,7 +1064,7 @@ async fn agent_link(mut socket: axum::extract::ws::WebSocket, ip: IpAddr, app: A
                 None => break, // replaced by a newer link, or revoked
             },
             _ = ping.tick() => {
-                if last.elapsed() > Duration::from_secs(60) || socket.send(Message::Ping(Vec::new().into())).await.is_err() {
+                if last.elapsed() > crate::link::SILENCE_LIMIT || socket.send(Message::Ping(Vec::new().into())).await.is_err() {
                     break;
                 }
             }

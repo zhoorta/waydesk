@@ -21,7 +21,10 @@ pub const MAX_FRAME: usize = 5 * 1024 * 1024;
 pub const MAX_ANSWER: usize = 4 * 1024 * 1024;
 /// How long a request may take: reads are quick, a change that waits for a session to end can take a minute and a half.
 #[allow(dead_code)]
-pub const READ_TIMEOUT: Duration = Duration::from_secs(25);
+pub const READ_TIMEOUT: Duration = Duration::from_secs(15);
+/// The portal pings an agent this often and drops the link after this much silence (a server that vanished sends no close).
+pub const PING_EVERY: Duration = Duration::from_secs(4);
+pub const SILENCE_LIMIT: Duration = Duration::from_secs(12);
 #[allow(dead_code)]
 pub const CHANGE_TIMEOUT: Duration = Duration::from_secs(110);
 

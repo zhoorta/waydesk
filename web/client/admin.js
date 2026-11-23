@@ -33,12 +33,21 @@ const q = () => (server ? '?server=' + encodeURIComponent(server) : '');
 
 // A select of the machines to look at, when any server has enrolled. Selecting one redraws the page.
 // The machines that can be looked at; settles the chosen one first (a portal account has no "this machine", so a server must be chosen before any page asks for data).
+// Said once by the next page that draws: the server that was chosen is offline, and another one is shown instead.
+let switchedNotice = '';
 async function settle() {
   let list = [];
   try { list = (await get('servers', true)).servers || []; } catch { return null; }
   const usable = list.filter((v) => v.state === 'online' || v.state === 'offline');
   if (!usable.length) { if (server) pick(''); return usable; }
   if (server && !usable.some((v) => v.id === server)) pick('');
+  // The chosen server is offline: every page would only say so. Show one that answers (another server, or the portal's own machine) and say it.
+  const chosen = usable.find((v) => v.id === server);
+  if (chosen && chosen.state === 'offline') {
+    const other = usable.find((v) => v.state === 'online');
+    if (other) { switchedNotice = chosen.name + ' is offline: showing ' + other.name + '.'; pick(other.id); }
+    else if (!portalOnly) { switchedNotice = chosen.name + ' is offline: showing this machine.'; pick(''); }
+  }
   if (portalOnly && !server) pick(usable.find((v) => v.state === 'online')?.id || usable[0].id);
   return usable;
 }
@@ -56,6 +65,9 @@ async function get(kind, local = false) {
   const r = await fetch('/api/admin/' + kind + (local ? '' : q()), { cache: 'no-store' });
   if (r.status === 401) { const e = new Error('Your sign-in ended.'); e.signedOut = true; throw e; }
   if (r.status === 403) throw new Error('This page is for administrators.');
+  // The portal says why in words: 503 the server's link is down, 504 it did not answer.
+  if (r.status === 503) throw new Error('That server is offline.');
+  if (r.status === 504) throw new Error('That server did not answer in time.');
   if (!r.ok) throw new Error('The server could not be asked (' + r.status + ').');
   return r.json();
 }
@@ -651,6 +663,9 @@ export async function render(path, root, onSignedOut, csrf, portal = false) {
   flashEl.hidden = true;
   const draw = async () => {
     try {
+      // A page about one named server is asked as it is; any other page follows the picker, which moves off a server that is offline.
+      if (!(view === 'servers' && sid)) await settle();
+      if (switchedNotice) { ctx.flash(switchedNotice, 'bad'); switchedNotice = ''; }
       root.replaceChildren(...(view === 'servers' && sid ? await serverPage(sid, tab) : await views[view]()));
     } catch (e) {
       if (e.signedOut) { clearInterval(timer); onSignedOut(); return; }
