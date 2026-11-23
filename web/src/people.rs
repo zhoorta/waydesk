@@ -383,6 +383,16 @@ impl People {
         }))
     }
 
+    /// A server was removed from the portal: forget it in every person's record of where the portal made accounts.
+    pub fn forget_server(&self, server: &str) -> Result<()> {
+        self.edit(|d| {
+            for p in d.people.iter_mut() {
+                p.made_on.retain(|s| s != server);
+            }
+            Ok(())
+        })
+    }
+
     pub fn made_on(&self, name: &str, server: &str) -> bool {
         self.refresh();
         self.data.lock().is_ok_and(|g| g.people.iter().any(|p| p.name == name && p.made_on.iter().any(|s| s == server)))
@@ -571,6 +581,10 @@ mod tests {
         p.mark_made("ana", "s-1").unwrap();
         p.mark_made("ana", "s-1").unwrap();
         assert!(p.made_on("ana", "s-1") && !p.made_on("ana", "s-2") && !p.made_on("boss", "s-1"));
+        // Removing a server forgets it everywhere.
+        p.mark_made("boss", "s-1").unwrap();
+        p.forget_server("s-1").unwrap();
+        assert!(!p.made_on("ana", "s-1") && !p.made_on("boss", "s-1"));
         // An older file without the list still opens.
         let old = r#"{"people":[{"name":"a","display":"","origin":"local","hash":"x","admin":false,"disabled":false,"created":1,"app_password_set":null,"servers":[]}]}"#;
         assert!(serde_json::from_str::<Data>(old).is_ok());

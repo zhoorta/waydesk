@@ -931,7 +931,12 @@ async fn servers_do(State(app): State<Arc<App>>, Extension(ClientAddr(peer)): Ex
         },
         "remove" if !app.people.assigned_to(&req.id).is_empty() => return fail(format!("{} are still assigned to it: take them away first", app.people.assigned_to(&req.id).join(", "))),
         "remove" => match app.fleet.remove(&req.id) {
-            Ok(()) => (crate::portal::NOTE_SERVER_REMOVED, req.id.clone(), serde_json::json!({})),
+            Ok(()) => {
+                if let Err(e) = app.people.forget_server(&req.id) {
+                    warn!("could not forget a removed server in the people records: {e:#}");
+                }
+                (crate::portal::NOTE_SERVER_REMOVED, req.id.clone(), serde_json::json!({}))
+            }
             Err(e) => return fail(format!("{e:#}")),
         },
         _ => return text(StatusCode::BAD_REQUEST, "bad request\n"),
