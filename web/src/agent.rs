@@ -476,6 +476,7 @@ async fn serve(cfg: &Config) -> Result<()> {
     eprintln!("waydesk-agent: link up to {}", cfg.portal);
     let (out_tx, mut out_rx) = tokio::sync::mpsc::channel::<String>(8);
     let slots = Arc::new(tokio::sync::Semaphore::new(2));
+    let queue = Arc::new(tokio::sync::Semaphore::new(QUEUE));
     let cfg_shared = Arc::new(Config { portal: cfg.portal.clone(), server: cfg.server.clone(), key: cfg.key.clone(), pin: cfg.pin.clone(), helper_socket: cfg.helper_socket.clone(), gateway: cfg.gateway.clone(), gateway_key_file: cfg.gateway_key_file.clone() });
     // At most this many desktops through this agent at once.
     let desktops = Arc::new(tokio::sync::Semaphore::new(MAX_DESKTOPS));
@@ -497,11 +498,20 @@ async fn serve(cfg: &Config) -> Result<()> {
                         tokio::spawn(open_desktop(cfg_shared.clone(), open.clone(), id, out_tx, desktops.clone()));
                         continue;
                     }
-                    let Ok(permit) = slots.clone().try_acquire_owned() else {
+                    // Two run at once (each starts a program as root); the others wait their turn, up to QUEUE of them and for at most QUEUE_WAIT. An administrator's
+                    // page asks for four or five things together: refusing the third made it show "could not be asked (502)" for what only had to wait a second.
+                    let Ok(place) = queue.clone().try_acquire_owned() else {
                         let _ = out_tx.send(json!({ "t": "res", "id": id, "ok": false, "error": "this server is busy, try again" }).to_string()).await;
                         continue;
                     };
+                    let slots = slots.clone();
                     tokio::spawn(async move {
+                        let permit = tokio::time::timeout(QUEUE_WAIT, slots.acquire_owned()).await;
+                        drop(place);
+                        let Ok(Ok(permit)) = permit else {
+                            let _ = out_tx.send(json!({ "t": "res", "id": id, "ok": false, "error": "this server is busy, try again" }).to_string()).await;
+                            return;
+                        };
                         let answer = tokio::task::spawn_blocking(move || handle(&req)).await.unwrap_or_else(|_| Err("it failed".into()));
                         drop(permit);
                         let frame = match answer {
@@ -526,6 +536,9 @@ async fn serve(cfg: &Config) -> Result<()> {
 
 /// Desktops that may be open through one agent at once.
 const MAX_DESKTOPS: usize = 32;
+/// Requests that may wait for one of the two places, and for how long (the portal gives up on a read after 25 s).
+const QUEUE: usize = 32;
+const QUEUE_WAIT: Duration = Duration::from_secs(20);
 /// What the browser may send in a message (a clipboard text may be longer), and what the daemon may send (a whole H.264 picture): as in `stream.rs`.
 const MAX_FROM_PORTAL: usize = 1 + 1024 * 1024;
 const MAX_FROM_DAEMON: usize = 16 * 1024 * 1024;
