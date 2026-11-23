@@ -11,6 +11,9 @@ Small, already understood, in the order I would do them.
 - **Docs still to write:** a line about Software (gnome-software) being heavy on small servers; a THREAT-MODEL note for the per-account keyboard file; recipes (a team server, a company behind a VPN, a slow link, removal).
 - **Release housekeeping:** back up the repository key (two USB sticks and the revocation certificate); a trademark search for the name; follow IronRDP issue #2224.
 
+- **Portal and packages.** Build and install-test the RPM (the spec has the agent and units); a portal package (`waydesk-web.service` ships in the server package with no binary); make `--totp required` the rule for a portal that is reachable from the internet; per-user GPU use for NVIDIA through `nvidia-smi`; the Assign dialog cannot name a specific GPU (it does not know the server yet).
+- **Omarchy.** Clipboard and audio in an Omarchy session, and its keys from a real Mac browser (Cmd+Space and Cmd+Option+Space belong to macOS: Ctrl+Alt+Space and Ctrl+Alt+A are added).
+
 ## Needs hardware I do not have now
 
 - **Several users on one NVIDIA card.** GeForce cards limit simultaneous NVENC sessions; the encoder then falls back to OpenH264 (written, not measured).
@@ -28,7 +31,7 @@ Small, already understood, in the order I would do them.
 
 ## More systems
 
-- **Ubuntu 24.04, Fedora, Arch:** different Qt and wlroots versions; no rpm yet. Not started.
+- **Ubuntu 24.04:** different Qt and wlroots versions. Not started. (Arch and Fedora have packages: `docs/ARCH.md`, `docs/FEDORA.md`.)
 
 ## Planned
 

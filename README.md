@@ -33,6 +33,7 @@ Waydesk turns a Debian 13, Ubuntu 26.04 or Arch Linux server into a multi-user d
 - **Your choice of desktop.** The Waydesk desktop (sway) is the default; `waydesk-admin users set NAME --desktop cosmic|plasma|hyprland` gives an account [COSMIC](docs/COSMIC.md), [KDE Plasma](docs/PLASMA.md) or [Hyprland](docs/HYPRLAND.md) instead (tested on Arch with an Intel GPU, Omarchy and ML4W for Hyprland, which needs a GPU; COSMIC and Plasma run inside the session's sway). An Arch Linux package is in `packaging/arch` ([notes](docs/ARCH.md)).
 - **Memory is protected.** A new session is refused when the machine is full, every account has ceilings, and compressed swap absorbs spikes. A 12-vCPU, 23 GB server held 12 heavy users (Chromium, Calc and VS Code open) before it refused the 13th: [measurements and methods](https://waydesk.dev/#measurements).
 - **Secure by default.** The RDP port listens on loopback only; a WireGuard VPN, a local certificate authority and an address allowlist are built in (`waydesk-admin vpn init`, `waydesk-admin access`). The daemon is unprivileged and sandboxed, and a small root helper only checks a password and starts a session. See the [threat model](docs/THREAT-MODEL.md).
+- **Browser access and a portal.** `waydesk-web` serves a page where people sign in and open their desktop in a browser (no client to install), and where administrators manage several servers, people and sessions; each server dials out to the portal with a small agent ([web/README.md](web/README.md)).
 - **Administration included.** `waydesk-admin` and a Users & Access panel manage accounts, limits and sessions, and a Task Manager shows what each account uses.
 - **Free software.** AGPL-3.0-or-later, built on [IronRDP](https://github.com/Devolutions/IronRDP) and [sway](https://swaywm.org).
 
@@ -64,6 +65,7 @@ Early. Tested with FreeRDP and the Windows App on macOS. Not independently revie
 - [Decision records](docs/decisions/README.md): why Waydesk is built the way it is
 - [Guide](docs/GUIDE.md): the long form of this page: server and desktop packages, memory protection, who may log in, account management, running the daemon by hand
 - [Reference](docs/REFERENCE.md): packages, commands, units, ports and files
+- [Portal](web/README.md) (people, servers, desktops in a browser) and its [design](docs/PORTAL-DESIGN.md)
 - [Access](docs/ACCESS.md) and [WireGuard](docs/WIREGUARD.md): who can reach the port
 - [Audit log](docs/AUDIT-DESIGN.md) (logins, sessions and administrator actions, exported to syslog) and [GPU placement](docs/GPU-PLACEMENT-DESIGN.md) (balancing sessions across several cards)
 - [Measurements](docs/MEASUREMENTS.md), [Portability](docs/PORTABILITY.md), [Changelog](CHANGELOG.md)

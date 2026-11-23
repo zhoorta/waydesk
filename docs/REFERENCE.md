@@ -7,6 +7,7 @@ Packages, commands, units, ports and files of Waydesk. The short version is on [
 
 - `waydesk`: metapackage: server and desktop
 - `waydesk-server`: daemon, root helper, waydesk-admin, waydesk-setup-admin, PAM services, units, zram and sysctl drop-ins, minimal sway config
+- `waydesk-agent` (in `waydesk-server`): the server's link to a portal; starts only after `waydesk-agent enrol`
 - `waydesk-desktop`: sway config, the shell it depends on, setup wizard (waydesk-setup), per-account shell setup, the Keyboard window, administrator panels
 - `waydesk-shell, waydesk-quickshell`: DankMaterialShell 2.0.0 built by us with our patches; quickshell 0.3.0, built per distribution
 - `waydesk-sway`: sway 1.11 with wlroots 0.19.3 linked statically and the title-bar button patch, under /usr/lib/waydesk/bin; built per distribution (+deb13, +ubuntu26.04)
@@ -32,6 +33,14 @@ Packages, commands, units, ports and files of Waydesk. The short version is on [
 - `waydesk-admin sessions list [--json] | end NAME`: running sessions; ending one closes that account's desktop
 - `waydesk-admin audit [--since 2h|7d|2026-10-29] [--user NAME] [--event PREFIX] [--outcome ok|fail|refused] [--limit N] [--json]`: the audit log (current and rotated files); needs root or the group `adm`
 
+## Commands: portal and agent
+
+- `waydesk-agent enrol URL CODE [--pin SHA256]`: join a portal with a join code from its Servers page (writes `/etc/waydesk/agent.json`, 0600; makes the gateway key and adds `--gateway-bind/--gateway-key` to `WAYDESK_ARGS`; restart `waydesk` afterwards)
+- `waydesk-agent run | status`: the link (run by `waydesk-agent.service`); the portal, the server id and the pin
+- `waydesk-web people add NAME [--admin] [--display TEXT] | list | passwd NAME | remove NAME`: the portal's own people
+- `waydesk-web totp add NAME | recovery NAME | remove NAME | list`: authenticator codes (`--totp off|optional|required`)
+- `waydesk-admin status --json`: also `gpus` (adapter, driver, busy, encoder, sessions on it) and, per account, `gpu_use` (`render_percent`, `video_percent` over the sample; absent without DRM counters)
+
 ## Commands: setup
 
 - `waydesk-setup [--list | --check]`: choose and install browsers, office, developer and creative apps (the shell comes with `waydesk-desktop`)
@@ -43,6 +52,8 @@ Packages, commands, units, ports and files of Waydesk. The short version is on [
 
 - `waydesk.service`: the daemon: TLS, RDP, framing (user waydesk)
 - `waydesk-helper.service`: the root helper: password check, session start, memory admission
+- `waydesk-agent.service`: the link to a portal (root; dials out, listens on nothing); `waydesk-admin.socket` + `waydesk-admin@.service`: the root-only socket (0600) the portal's changes arrive on
+- `waydesk-web.service`: the portal (user waydesk, `127.0.0.1:8443` by default)
 - `waydesk-session@UID.service`: one per account: its sway, capture, encoder and shell
 - `127.0.0.1:3389`: RDP over TLS; reach it through a tunnel or a VPN
 
@@ -54,6 +65,8 @@ Packages, commands, units, ports and files of Waydesk. The short version is on [
 - `/etc/xdg/waydesk/sway.conf`: the session's sway config (fallback: /usr/share/waydesk/sway-minimal.conf)
 - `/usr/lib/waydesk/bin`: private sway, swaymsg and swaybar; first in the session's PATH
 - `/run/waydesk/`: helper and session sockets
+- `/etc/waydesk/agent.json`: the agent's portal address, key and pin; `/var/lib/waydesk-agent/managed`: the accounts the portal made on this server
+- `/var/lib/waydesk-web/`: the portal's people, servers, authenticator records and audit log (`people.json`, `fleet.json`, `audit.jsonl`), all 0600
 - `/var/log/waydesk/audit.log`: the audit log (root, readable by the group `adm`); rotated weekly by `/etc/logrotate.d/waydesk`, 26 weeks kept. See "Audit log" below
 - `/etc/apt/sources.list.d/waydesk.sources`: the repository, written for your release
 - `/etc/apt/preferences.d/waydesk`: the pin: these packages win over third-party builds of the same names

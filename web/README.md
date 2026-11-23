@@ -19,6 +19,45 @@ password and the code", and takes as long (about 4 s) whatever was wrong, so the
 Until the browser stream replaces RDP in the page, the RDP login inside the connection asks for the password again: the page keeps it in its memory
 from the sign-in to the connection so that the person types it once.
 
+## The portal: people, servers, desktops (stage 3)
+
+Besides one machine's gateway, `waydesk-web` is a **portal for several servers**. People sign in to it, administrators manage servers and people, and a
+person opens the desktop of a server the portal made an account on. Design and reasons: `docs/PORTAL-DESIGN.md` ("Stage 3").
+
+**People.** The portal keeps its own people (`/var/lib/waydesk-web/people.json`: argon2id hashes, optional authenticator code). Make the first one on the portal's
+machine, then everything else is done in the browser:
+
+```
+sudo waydesk-web people add NAME --admin --display "Full name"     # prints a first password, shown once
+waydesk-web people list | passwd NAME | remove NAME
+```
+
+An administrator assigns a person to servers on the **People** page; the portal then makes the account on each server (through the server's agent), and the person
+opens it from **My desktop** (one card per server, with a thumbnail of their screen and "picture from N min ago" when it is old). A person can make an **app password** in
+My account for an RDP client (Windows App, Remmina). The portal never takes over an account it did not make.
+
+**Servers.** A server dials *out* to the portal; the portal needs no way into it.
+
+1. **Servers > Add a server** gives a join code (one use, one hour) and the portal's certificate pin.
+2. On the server (as root): `waydesk-agent enrol https://PORTAL:8443 CODE --pin PIN`, then `systemctl restart waydesk` (enrol makes the gateway key and adds the
+   gateway flags to `/etc/default/waydesk`) and `systemctl enable --now waydesk-agent`.
+3. The agent keeps one WebSocket link to the portal (`/agent`) and answers only the closed list of requests in `src/adminaction.rs` plus a few read-only ones;
+   two run at once (as root), up to 32 wait their turn for 20 s.
+
+The packages ship the agent and the root-only admin socket (`waydesk-agent.service`, `waydesk-admin.socket`): Debian and Arch (the RPM spec has them, not built yet).
+The agent starts only when `/etc/waydesk/agent.json` exists. **To let a server reach a portal over the internet**, bind it publicly and keep the source list short:
+`WAYDESK_WEB_BIND=0.0.0.0:8443` and `--allow-from SERVER-ADDRESS,YOUR-ADDRESS,loopback` in `WAYDESK_WEB_ARGS` of `/etc/default/waydesk` (the agent pins the portal's
+certificate, so a name is not needed). Make `--totp required` the rule for anyone who can reach it.
+
+**Administrator pages** (per server, picked at the top; "This machine" is the portal's own): **Overview** (sessions, memory, CPU, GPU, a machine card that names the
+adapters, attention items), **Accounts** (desktop, graphics, RDP, session; edit, reset password, switch off), **Sessions** (who is running since when, with the
+**End** button) and **Audit** (the portal's own log and each server's, live). The **Servers** list shows every server at a glance (state, sessions, memory, CPU, GPU, warnings, users).
+A GPU column or row shows only for a server with a real GPU: a VM's virtio adapter is software rendering and is left out. Each session shows one GPU figure after CPU: the
+busier of its drawing and its encoding over one second (both in the tooltip), from the kernel's per-process engine time (Intel and AMD; NVIDIA's proprietary driver has none).
+An account's graphics can be pinned to one of the server's GPUs by name (the setting is its render node, `renderD128`).
+
+**Cache.** Pages, scripts and styles are revalidated on every load (an ETag of the content), so an upgrade shows at once; fonts, pictures and the WebAssembly are cached for an hour.
+
 ## The browser stream (the desktop without RDP)
 
 The page shows the desktop from the daemon's own browser stream (`src/webstream.rs`, `client/desk.js`): H.264 pictures go to the browser's decoder
@@ -120,7 +159,7 @@ What it does and does not do:
 ## Build and test
 
 ```
-cd web && cargo test          # 44 tests, including end-to-end ones (gateway, stand-in daemon, a client that acts like the browser)
+cd web && cargo test          # 120+ tests, including end-to-end ones (gateway, stand-in daemon, a client that acts like the browser)
 cargo build --release         # builds anywhere Rust does; it shares no code with the daemon except src/allow.rs
 ```
 

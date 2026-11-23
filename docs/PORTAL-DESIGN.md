@@ -120,6 +120,8 @@ No other hosts, no SSO or LDAP login, no per-group policy, no session recording,
 
 ## Stage 3: several servers (decided 2026-11-18)
 
+**Status (2026-11-23): built and deployed on two servers** (slices 1 to 5: registry and enrolment, agent link, portal people and assignment, desktop relay, audit and fleet). Since the design: desktop thumbnails with their age, a GPU column and per-session GPU use, the agent in the Debian and Arch packages, a public bind with a source allow-list for a server that reaches the portal over the internet (see `web/README.md`), requests beyond two at a time wait in the agent instead of being refused.
+
 **Decision (José, 2026-11-18): the portal owns the users.** Identity moves from "a system account on this host" to a portal user record; system accounts on servers become something the portal creates and manages. The host-account sign-in stays for the Personal size (one computer, no fleet), so nothing that works today is removed.
 
 ```
