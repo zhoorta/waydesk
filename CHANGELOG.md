@@ -4,6 +4,8 @@ What changed, newest first. The numbered releases are the ones in the apt reposi
 
 ## Unreleased
 
+## 2026-11-23 · 0.6.0
+
 **A portal for several servers.** `waydesk-web` now has its own people (`waydesk-web people add NAME --admin`), a Servers page that makes join codes, a small agent (`waydesk-agent enrol URL CODE`) that each server runs to dial out to the portal, administrator pages per server (Overview, Accounts, Sessions with an End button, Audit, and a Fleet view in the Servers list), accounts made on a server when a person is assigned to it, app passwords for RDP clients, desktops opened from the portal through the agent, and thumbnails of each desktop with their age. See `web/README.md` and `docs/PORTAL-DESIGN.md` (Stage 3). The agent and its admin socket are in the Debian and Arch packages (the RPM spec has them, not built).
 
 **GPU in the portal.** The Servers list and the Overview name the server's GPU; each session shows one GPU figure (the busier of drawing and encoding) after CPU, read from the kernel's per-process engine time (`waydesk-admin status --json`: `gpu_use`; Intel and AMD); an account can be pinned to one of the server's GPUs by name; a server without a real GPU shows no GPU information. About 60 ms of CPU per status with six sessions.

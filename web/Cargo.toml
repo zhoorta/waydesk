@@ -1,6 +1,6 @@
 [package]
 name = "waydesk-web"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2021"
 description = "Browser access to Waydesk: serves the web client and bridges it (RDCleanPath over WebSocket) to the RDP daemon"
 license = "AGPL-3.0-or-later"

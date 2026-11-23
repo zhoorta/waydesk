@@ -5,8 +5,8 @@
 # title-bar buttons) is not part of this: a session gets plain sway (/usr/share/waydesk/sway-minimal.conf) or, with WAYDESK_COMPOSITOR=hyprland,
 # the account's own Hyprland (docs/HYPRLAND.md).
 pkgname=waydesk-server
-pkgver=0.5.0
-pkgrel=4
+pkgver=0.6.0
+pkgrel=1
 pkgdesc='RDP server giving each account its own headless Wayland desktop (sway; Hyprland, KDE Plasma and COSMIC optional)'
 arch=(x86_64 aarch64)
 url='https://waydesk.stackcare.pt'

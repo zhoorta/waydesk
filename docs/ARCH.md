@@ -38,7 +38,7 @@ The package installs the server, the root helper, the admin tools (`waydesk-admi
 sysusers and tmpfiles definitions and the docs. Installing does not start anything; it makes the account `waydesk`, the group `waydesk-users` (members may
 log in) and a self-signed certificate, and prints the fingerprint to check in your RDP client.
 
-The package (0.5.0-4) also ships `waydesk-agent` and the units `waydesk-agent.service` and `waydesk-admin.socket`: the admin socket is enabled and started, the agent
+The package (0.6.0) also ships `waydesk-agent` and the units `waydesk-agent.service` and `waydesk-admin.socket`: the admin socket is enabled and started, the agent
 is enabled and starts once `waydesk-agent enrol` has written its key (see `web/README.md`). Optional dependencies for **Omarchy** sessions: `xdg-terminal-exec`,
 `xdg-user-dirs` and `mise` (without them a new account gets no theme and no terminal, [HYPRLAND.md](HYPRLAND.md)).
 

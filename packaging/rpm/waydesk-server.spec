@@ -2,7 +2,7 @@
 # The desktop of the Debian packages (waydesk-desktop: shell, launcher, title-bar buttons) is not part of this: a session gets plain sway
 # (/usr/share/waydesk/sway-minimal.conf) or, with WAYDESK_COMPOSITOR=hyprland, the account's own Hyprland (docs/HYPRLAND.md).
 Name:           waydesk-server
-Version:        0.5.0
+Version:        0.6.0
 # A snapshot (a build that is not a release): rpmbuild --define 'snap 20261105git1234567' makes the release 0.20261105git1234567, which sorts before 1 so that the release upgrades it.
 Release:        %{?snap:0.%{snap}}%{!?snap:1}%{?dist}
 Summary:        RDP server giving each account its own headless Wayland desktop
@@ -178,5 +178,8 @@ fi
 %config(noreplace) %{_sysconfdir}/xkb/symbols/waydeskmac
 
 %changelog
+* Mon Nov 23 2026 StackCare <jose@stackcare.pt> - 0.6.0-1
+- The agent and the admin socket units; Hyprland starter, Omarchy session fixes (see the changelog of the project)
+
 * Wed Nov 04 2026 StackCare <jose@stackcare.pt> - 0.5.0-1
 - First RPM
