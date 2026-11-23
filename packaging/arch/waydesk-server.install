@@ -35,6 +35,7 @@ post_upgrade() {
   systemd-tmpfiles --create waydesk.conf >/dev/null 2>&1 || true
   udevadm control --reload >/dev/null 2>&1 || true
   systemctl enable --now waydesk-admin.socket >/dev/null 2>&1 || true
+  systemctl enable waydesk-agent.service >/dev/null 2>&1 || true   # also for a server that had an older package without it
   systemctl try-restart waydesk-agent.service >/dev/null 2>&1 || true   # an upgrade keeps the link to the portal
   echo "waydesk: restart the services to use the new version: sudo systemctl restart waydesk-helper.service waydesk.service"
   echo "         (sessions that are running keep the old version until their account logs out of them)"
