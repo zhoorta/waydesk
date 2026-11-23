@@ -366,12 +366,24 @@ pub mod hyprland {
         format!("hl.dispatch(hl.dsp.focus({{ monitor = {} }}))", lua_str(output))
     }
 
+    /// How Hyprland is told which workspace: a number is the workspace of that number, anything else a workspace of that name. A named workspace has
+    /// no number, which Omarchy's workspace code (`monitor-workspaces.lua`) cannot compare, and Omarchy's keys and bar (Super+1 ...) go to numbered
+    /// ones: windows left on a named "Remote" were out of reach after the first Super+number.
+    fn selector(workspace: &str) -> String {
+        if !workspace.is_empty() && workspace.bytes().all(|b| b.is_ascii_digit()) { workspace.to_string() } else { format!("name:{workspace}") }
+    }
+
+    /// The default session workspace of the daemon ("Remote") is workspace 1 on Hyprland, where the first window of an Omarchy desktop belongs.
+    pub(super) fn session_workspace(workspace: &str) -> &str {
+        if workspace == "Remote" { "1" } else { workspace }
+    }
+
     pub(super) fn focus_workspace_lua(workspace: &str) -> String {
-        format!("hl.dispatch(hl.dsp.focus({{ workspace = {} }}))", lua_str(&format!("name:{workspace}")))
+        format!("hl.dispatch(hl.dsp.focus({{ workspace = {} }}))", lua_str(&selector(workspace)))
     }
 
     pub(super) fn move_workspace_lua(workspace: &str, output: &str) -> String {
-        format!("hl.dispatch(hl.dsp.workspace.move({{ workspace = {}, monitor = {} }}))", lua_str(&format!("name:{workspace}")), lua_str(output))
+        format!("hl.dispatch(hl.dsp.workspace.move({{ workspace = {}, monitor = {} }}))", lua_str(&selector(workspace)), lua_str(output))
     }
 
     pub(super) fn exec_lua(command: &str) -> String {
@@ -516,6 +528,7 @@ pub mod hyprland {
         }
 
         fn show_workspace(&self, output: &str, workspace: &str) -> Result<()> {
+            let workspace = session_workspace(workspace);
             eval(&focus_monitor_lua(output))?;
             eval(&focus_workspace_lua(workspace))?;
             // A workspace of that name that already existed elsewhere was jumped to: bring it here.
@@ -556,6 +569,9 @@ pub mod hyprland {
             assert_eq!(monitor_lua("HEADLESS-1", (1600, 900), 1.5), "hl.monitor({ output = \"HEADLESS-1\", mode = \"1600x900@60\", position = 'auto', scale = 1.5 })");
             assert_eq!(focus_monitor_lua("HEADLESS-1"), "hl.dispatch(hl.dsp.focus({ monitor = \"HEADLESS-1\" }))");
             assert_eq!(focus_workspace_lua("Remote"), "hl.dispatch(hl.dsp.focus({ workspace = \"name:Remote\" }))");
+            assert_eq!(focus_workspace_lua("1"), "hl.dispatch(hl.dsp.focus({ workspace = \"1\" }))");
+            assert_eq!(session_workspace("Remote"), "1");
+            assert_eq!(session_workspace("Work"), "Work");
             assert_eq!(move_workspace_lua("Remote", "HEADLESS-1"), "hl.dispatch(hl.dsp.workspace.move({ workspace = \"name:Remote\", monitor = \"HEADLESS-1\" }))");
             assert_eq!(exec_lua("foot -T x"), "hl.exec_cmd(\"foot -T x\")");
             assert!(close_windows_lua("HEADLESS-1").contains("w.monitor.name == \"HEADLESS-1\""));
