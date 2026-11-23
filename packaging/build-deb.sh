@@ -11,10 +11,12 @@ docker run --rm --platform linux/$ARCH -v "$PWD:/src" -v waydesk-cargo:/opt/carg
   -e VERSION="$VERSION" -e ARCH="$ARCH" -e UID_HOST="$(id -u)" -e GID_HOST="$(id -g)" waydesk-build-$ARCH sh -c '
 set -e
 cd /src && cargo build --release
+(cd web && CARGO_TARGET_DIR=/tmp/target-web cargo build --release --bin waydesk-agent)   # the agent is its own small program (web/), no web stack in the daemon
 P=/tmp/pkg; rm -rf $P; mkdir -p $P/DEBIAN $P/usr/bin $P/lib/systemd/system $P/etc/default $P/etc/pam.d $P/usr/share/doc/waydesk-server
 install -m 755 /tmp/target/release/waydesk-server $P/usr/bin/waydesk-server
 install -m 755 /tmp/target/release/waydesk-admin $P/usr/bin/waydesk-admin
 install -m 755 /tmp/target/release/waydesk-passwd $P/usr/bin/waydesk-passwd
+install -m 755 /tmp/target-web/release/waydesk-agent $P/usr/bin/waydesk-agent   # runs only after `waydesk-agent enrol` (unit has ConditionPathExists)
 mkdir -p $P/usr/sbin && install -m 755 packaging/bin/waydesk-setup-admin $P/usr/sbin/waydesk-setup-admin   # the first administrator (RDP login)
 mkdir -p $P/usr/share/polkit-1/actions && install -m 644 packaging/org.waydesk.admin.policy $P/usr/share/polkit-1/actions/
 mkdir -p $P/usr/share/polkit-1/rules.d && install -m 644 packaging/polkit/50-waydesk-no-power.rules $P/usr/share/polkit-1/rules.d/   # RDP accounts may not reboot, power off or suspend the server
