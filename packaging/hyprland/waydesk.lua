@@ -36,6 +36,17 @@ if f then
   end
 end
 
+-- Omarchy opens its menu and its app launcher with Super+Space and Super+Alt+Space. In a browser on a Mac the first is Spotlight (Cmd+Space) and the second
+-- Finder search (Cmd+Option+Space): macOS keeps both, the page never sees them. Control+Option (Ctrl+Alt) plus Space and A are not taken, so they are added
+-- when Omarchy's configuration is the one that was loaded (its `o` helper exists). Added after the account's own file: a pcall keeps a failure here from
+-- stopping the rest of this file.
+if type(o) == "table" and type(o.bind) == "function" then
+  pcall(function()
+    o.bind("CTRL + ALT + SPACE", "Omarchy menu", { menu = "root" })
+    o.bind("CTRL + ALT + A", "Apps", "omarchy-shell omarchy.dock apps")
+  end)
+end
+
 local ours = "/usr/lib/waydesk/bin"
 local omarchy_bin = (os.getenv("OMARCHY_PATH") or "/usr/share/omarchy") .. "/bin"
 local seen, parts = { [ours] = true, [omarchy_bin] = true }, { ours, omarchy_bin }
