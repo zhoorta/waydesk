@@ -39,7 +39,7 @@ sysusers and tmpfiles definitions and the docs. Installing does not start anythi
 log in) and a self-signed certificate, and prints the fingerprint to check in your RDP client.
 
 The package (0.6.0) also ships `waydesk-agent` and the units `waydesk-agent.service` and `waydesk-admin.socket`: the admin socket is enabled and started, the agent
-is enabled and starts once `waydesk-agent enrol` has written its key (see `web/README.md`). Optional dependencies for **Omarchy** sessions: `xdg-terminal-exec`,
+is enabled and starts once `waydesk-agent enrol` has written its key (see `web/README.md`). The portal is a second package from the same build, `waydesk-portal` (`web/README.md`). Optional dependencies for **Omarchy** sessions: `xdg-terminal-exec`,
 `xdg-user-dirs` and `mise` (without them a new account gets no theme and no terminal, [HYPRLAND.md](HYPRLAND.md)).
 
 ## What a session is

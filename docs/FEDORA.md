@@ -5,7 +5,7 @@ optional, as on Arch). The desktop of the Debian packages (shell, launcher, titl
 
 Build: `packaging/rpm/build.sh [RELEASE]` (Docker, a Fedora container; output in `packaging/out/rpm/<arch>/`).
 
-The spec also ships `waydesk-agent` and its units (`waydesk-agent.service`, `waydesk-admin.socket`), enabled as in the other packages (written 2026-11-23, **not built yet**).
+The spec also ships `waydesk-agent` and its units (`waydesk-agent.service`, `waydesk-admin.socket`), enabled as in the other packages; the portal is the subpackage `waydesk-server-portal` (`web/README.md`).
 
 ## After installing
 

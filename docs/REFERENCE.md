@@ -7,6 +7,7 @@ Packages, commands, units, ports and files of Waydesk. The short version is on [
 
 - `waydesk`: metapackage: server and desktop
 - `waydesk-server`: daemon, root helper, waydesk-admin, waydesk-setup-admin, PAM services, units, zram and sysctl drop-ins, minimal sway config
+- `waydesk-portal` (Debian, Arch; `waydesk-server-portal` in Fedora): the portal: `waydesk-web`, its pages, `waydesk-web.service` and `/etc/default/waydesk-web`; optional, starts nothing by itself
 - `waydesk-agent` (in `waydesk-server`): the server's link to a portal; starts only after `waydesk-agent enrol`
 - `waydesk-desktop`: sway config, the shell it depends on, setup wizard (waydesk-setup), per-account shell setup, the Keyboard window, administrator panels
 - `waydesk-shell, waydesk-quickshell`: DankMaterialShell 2.0.0 built by us with our patches; quickshell 0.3.0, built per distribution

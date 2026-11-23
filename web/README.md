@@ -7,6 +7,18 @@ into the RDP connection, and the daemon checks them through PAM, as for any RDP 
 connection to the daemon, so the RDP packets, the login among them, pass through its memory in the clear: it does not look at them, keep them or log
 them, but it is a machine that has to be trusted as much as the daemon. Run it on the same machine as the daemon (the default).
 
+## Install
+
+The portal is a package of its own, so that a server that only wants RDP carries no web server: `sudo apt install waydesk-portal`, `sudo pacman -S waydesk-portal`
+or `sudo dnf install waydesk-server-portal`. It needs `waydesk-server` of the same version, starts nothing by itself and listens on `127.0.0.1:8443` only
+(settings in `/etc/default/waydesk-web`, read before `/etc/default/waydesk`):
+
+```
+sudo systemctl enable --now waydesk-web.service
+sudo waydesk-web people add NAME --admin          # the first person; the password is shown once
+ssh -N -L 8443:127.0.0.1:8443 USER@SERVER         # then open https://localhost:8443/
+```
+
 ## Sign-in (the portal's first step)
 
 People sign in to the site first, then open their desktop. The sign-in is the account's password, checked by the daemon's **root helper** (the same
