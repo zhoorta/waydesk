@@ -13,6 +13,13 @@ const sessionSince = (s) => (s ? s.replace(/^\w+ /, '').replace(/ [A-Z]{2,5}$/, 
 
 // Which machine the pages are about: '' is the one the portal runs on, otherwise the id of a server that dialled in (see the picker). Kept for the tab.
 let server = '';
+// A virtual display adapter (a VM's virtio, QEMU, VMware ...) renders in software: a server with only those has no GPU, and nothing about graphics is shown for it.
+const VIRTUAL_GPU = /virtio|bochs|qxl|vmwgfx|vboxvideo|cirrus|simpledrm|hyperv/i;
+const realGpus = (status) => (status.gpus || []).filter((g) => !VIRTUAL_GPU.test(g.driver || ''));
+// Whether the server whose page is open has a GPU; the overview and the accounts page set it, the dialogs read it.
+let hasGpu = true;
+// "Intel Skylake-S GT2 [HD Graphics 530]" -> "HD Graphics 530"
+const gpuName = (g) => { const m = /\[(.+)\]/.exec(g.model || ''); return m ? m[1] : (g.model || g.driver || 'GPU'); };
 // A portal account has nothing on the portal's own machine: the pages are about a server, never "this machine".
 let portalOnly = false;
 // Whose audit log the page shows (null: not chosen yet).
@@ -111,11 +118,11 @@ function editUser(u) {
   const gpu = select('Graphics', 'gpu', [['', 'no change'], ['default', 'server default'], ['auto', 'auto'], ['balance', 'balance'], ['off', 'off (software)']], '');
   const memory = el('input', { name: 'memory', placeholder: 'e.g. 6G, or reset', autocomplete: 'off', spellcheck: 'false' });
   const err = el('p', { class: 'bad', role: 'alert' });
-  const form = el('form', { class: 'form' }, desktop, gpu, el('label', {}, 'Memory limit of the session', memory), el('p', { class: 'hint' }, 'A running session keeps what it started with; the new setting applies from the next one.'), err);
+  const form = el('form', { class: 'form' }, desktop, hasGpu ? gpu : null, el('label', {}, 'Memory limit of the session', memory), el('p', { class: 'hint' }, 'A running session keeps what it started with; the new setting applies from the next one.'), err);
   const d = modal('edit ' + u.name, form, [button('Cancel', () => d.close()), button('Save', () => form.requestSubmit(), 'primary')]);
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
-    const dv = desktop.querySelector('select').value, gv = gpu.querySelector('select').value, mv = memory.value.trim();
+    const dv = desktop.querySelector('select').value, gv = hasGpu ? gpu.querySelector('select').value : '', mv = memory.value.trim();
     if (!dv && !gv && !mv) { err.textContent = 'Nothing to change.'; return; }
     try {
       if (dv || gv) await act({ action: 'user_set', name: u.name, desktop: dv || null, gpu: gv || null });
@@ -341,7 +348,8 @@ const views = {
     const s = await get('status');
     const m = s.machine || {};
     const a = s.admission || {};
-    const gpus = s.gpus || [];
+    const gpus = realGpus(s);
+    hasGpu = gpus.length > 0;
     const usedMb = (m.mem_total_mb || 0) - (m.mem_available_mb || 0);
     const memPct = m.mem_total_mb ? (usedMb / m.mem_total_mb) * 100 : 0;
     const swapTotal = m.swap_total_mb || 0;
@@ -357,16 +365,18 @@ const views = {
         const pct = m.cpu_percent != null ? m.cpu_percent : Math.min(100, ((parseFloat((m.load || [])[0]) || 0) / cores) * 100);
         return tile('CPU', Math.round(pct), '% busy \u00b7 ' + cores + (cores === 1 ? ' core' : ' cores'), pct, pct > 85);
       })(),
-      g0 ? tile('GPU' + (gpus.length > 1 ? ' 1 of ' + gpus.length : ''), g0.busy_percent == null ? '-' : Math.round(g0.busy_percent), '% busy' + (g0.encoder_percent != null ? ' · encode ' + Math.round(g0.encoder_percent) + '%' : ''), g0.busy_percent, g0.busy_percent > 85) : tile('GPU', 'none', 'software rendering', null));
+      g0 ? tile('GPU' + (gpus.length > 1 ? ' 1 of ' + gpus.length : ''), g0.busy_percent == null ? '-' : Math.round(g0.busy_percent), '% busy' + (g0.encoder_percent != null ? ' · encode ' + Math.round(g0.encoder_percent) + '%' : ''), g0.busy_percent, g0.busy_percent > 85) : null);
     const attention = [];
     if (a.open === false) attention.push(['full', 'bad', 'New sessions are refused: ' + (a.reason || 'the machine is full')]);
     for (const w of s.warnings || []) attention.push(['warning', 'warn', w]);
-    const rows = sessionsNow.map((u) => el('tr', {}, cell(el('b', {}, u.name)), cell((u.video && u.video.compositor) || '-'), cell(u.video && u.video.encoder ? u.video.encoder : '-'), cell(gb(u.mem_mb || 0), 'n mono'), cell(Math.round(u.cpu_percent || 0) + '%', 'n mono')));
+    // The GPU a session renders on: its render node, matched to the GPUs the server lists; "software" when it has none.
+    const gpuOf = (u) => { const node = u.video && u.video.render; const g = node && gpus.find((x) => x.node === node); return g ? gpuName(g) : el('span', { class: 'dim' }, 'software'); };
+    const rows = sessionsNow.map((u) => el('tr', {}, cell(el('b', {}, u.name)), cell((u.video && u.video.compositor) || '-'), cell(u.video && u.video.encoder ? u.video.encoder : '-'), hasGpu ? cell(gpuOf(u)) : null, cell(gb(u.mem_mb || 0), 'n mono'), cell(Math.round(u.cpu_percent || 0) + '%', 'n mono')));
     return [
       el('div', { class: 'head' }, el('h1', {}, 'Overview'), el('span', { class: 'sp' }), await picker(), null),
       tiles,
       el('div', { class: 'two' },
-        win('sessions now', table(['Account', 'Desktop', 'Encoder', '>Memory', '>CPU'], rows, 'Nobody is logged in.')),
+        win('sessions now', table(['Account', 'Desktop', 'Encoder'].concat(hasGpu ? ['GPU'] : [], ['>Memory', '>CPU']), rows, 'Nobody is logged in.')),
         el('div', { class: 'colstack' },
           win('needs attention', attention.length ? el('div', { class: 'tw' }, el('table', { class: 'plain' }, el('tbody', {}, attention.map(([k, tone, text]) => el('tr', {}, cell(chip(k, tone)), cell(text)))))) : el('p', { class: 'ok' }, 'Nothing needs attention.')),
           win('machine', el('dl', { class: 'kv' },
@@ -375,7 +385,7 @@ const views = {
             el('dt', {}, 'Load'), el('dd', { class: 'mono' }, (m.load || []).join(' ') + ' (' + (m.cores || '?') + ' cores)'),
             el('dt', {}, 'New sessions'), el('dd', { class: a.open === false ? 'bad' : 'ok' }, a.open === false ? 'refused' : 'accepted'),
             el('dt', {}, 'Desktop'), el('dd', {}, s.compositor_setting || '-'),
-            el('dt', {}, 'Graphics'), el('dd', {}, s.gpu_setting || '-'))))),
+            hasGpu ? el('dt', {}, 'Graphics') : null, hasGpu ? el('dd', {}, (s.gpu_setting || '-') + ' \u00b7 ' + gpus.map(gpuName).join(', ')) : null)))),
     ];
   },
 
@@ -434,15 +444,16 @@ const views = {
   },
 
   async accounts() {
-    const list = await get('users');
+    const [list, st] = await Promise.all([get('users'), get('status').catch(() => null)]);
+    if (st) hasGpu = realGpus(st).length > 0;
     const holder = el('div', {});
     const draw = () => {
       const shown = list;
-      holder.replaceChildren(win('accounts · ' + list.length, table(['Account', 'Desktop', 'Graphics', 'RDP', 'Admin', 'Session', ''],
+      holder.replaceChildren(win('accounts · ' + list.length, table(['Account', 'Desktop'].concat(hasGpu ? ['Graphics'] : [], ['RDP', 'Admin', 'Session', '']),
         shown.map((u) => el('tr', {},
           cell(el('b', {}, u.name)),
           cell((u.desktop || '-') + (u.desktop_from === 'account' ? '*' : '')),
-          cell(String(u.gpu || '-').split('/').pop() + (u.gpu_from === 'account' ? '*' : '')),
+          hasGpu ? cell(String(u.gpu || '-').split('/').pop() + (u.gpu_from === 'account' ? '*' : '')) : null,
           cell(u.rdp ? chip('yes', 'ok') : chip('no', 'bad')),
           cell(u.sudo ? chip('admin') : el('span', { class: 'dim' }, '-')),
           cell(u.session === 'running' ? [dot(), 'running' + (u.desktop_running ? ' on ' + u.desktop_running : ''), u.session_since ? el('span', { class: 'dim' }, ' since ' + sessionSince(u.session_since)) : null] : [dot('off'), 'none']),
