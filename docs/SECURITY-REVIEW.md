@@ -302,10 +302,37 @@ their desktop is doing. The worker now tells `sessionshot` when the picture has 
 since the last picture, one more is taken (not within a second of the last).
 
 **Noted, not changed.**
-- **The picture can be old, and the portal does not say so.** A worker that is killed (not ended) leaves its last picture in `/run` until the next session of that account
-  ends or the machine restarts; a session with no client may stop capturing. The agent has the picture's age (`age_secs`) and the portal does not pass it on, so the card
-  shows an old screen as if it were now. It is the person's own screen, so nothing leaks; a timestamp on the card is the fix.
+- **The picture can be old.** A worker that is killed (not ended) leaves its last picture in `/run` until the next session of that account ends or the machine restarts; a session
+  with no client may stop capturing. The agent sends the picture's age (`age`), the portal passes it as `X-Shot-Age` and the card says "picture from N min ago" from one minute on,
+  so an old screen is not shown as if it were now. It is the person's own screen, so nothing leaks either way.
 - **Anything on the screen is in the picture**, passwords typed in clear included, for up to 10 s, in RAM (`/run` is tmpfs) and in the browser's memory while the card is shown. It is
   at 320 px, which makes small text unreadable, but a large one (a banner, a code) is not. A person who shares a screen they would not show the portal should know the card exists.
 - **A compromised portal can read the picture** of every account the agent made (it is what the agent is for). The agent will not read any other account's.
 - **A server's administrator (root there) can read every screen anyway**; the thumbnail adds nothing for them.
+
+## GPU use per account, Omarchy session environment, package units (2026-11-23)
+
+Written by the code's author with an AI assistant; not independent. Small additions, listed so that the next pass does not have to find them.
+
+**GPU use per account (`src/gpuclients.rs`, `waydesk-admin status`).** For the administrator's "sessions now" table, root reads `/proc/PID/fd` of the processes of each account and, for the
+files that point into `/dev/dri/`, `/proc/PID/fdinfo/N` (the kernel's per-file engine time: `drm-engine-render: 123 ns`), twice, a second apart.
+- *What it reveals:* how long the GPU engines worked for an account (two percentages), nothing of what they drew. Only an administrator gets it (`status` is an administrator's
+  read, through the portal's admin pages or the `waydesk-admin` CLI); a caller who is not root cannot open other accounts' `/proc/PID/fd` and gets nothing.
+- *What it opens:* only the kernel's own `/proc` files, never a path an account controls; the text is parsed by a fixed list of keys and numbers (unit tests), and a file that does not
+  parse is skipped. The scan is bounded by the number of processes (about 60 ms of CPU for six sessions).
+- *Noted:* NVIDIA's proprietary driver writes no such counters, so those accounts have no figure; a hostile account could make many DRM files, which only makes its own sample slower.
+
+**Waydesk's Hyprland configuration and stand-ins (`packaging/hyprland/`).** They run as the account, in the account's session; nothing here is root.
+- `nm-online` and `checkupdates` stand-ins (in `/usr/lib/waydesk/bin`, first on the session's `PATH`): they only change what the account's own Omarchy scripts are told (online; nothing to
+  update). An administrator (group wheel) gets the real `checkupdates`; a server with NetworkManager gets the real `nm-online`.
+- With Omarchy loaded the wrapper appends `~/.local/share/mise/shims` and `~/.local/bin` to the session's `PATH`, puts `~/.local/share/mise/command-wrappers/bin` after Waydesk's directory, and
+  sets `TERMINAL`/`EDITOR` if unset: what Omarchy's uwsm would do. Directories the account owns are on its own `PATH` only; no other account and no root process reads it.
+- Two keys (Ctrl+Alt+Space, Ctrl+Alt+A) are added with Omarchy's own `o.bind`; they start Omarchy's menu and launcher as the account.
+
+**Agent.** Requests beyond the two that run at once now wait (at most 32, at most 20 s) instead of being refused. The two places are still the limit on what runs as root at one time; the
+queue costs memory for the waiting request text only and answers "busy" beyond it.
+
+**Packages.** Arch (and the RPM spec) now ship `waydesk-agent` and the admin socket and enable them as the Debian package does. The agent unit starts only when `/etc/waydesk/agent.json`
+exists (`ConditionPathExists`), so enabling it opens nothing; the admin socket is the same root-only socket (0600) as on Debian.
+
+**Portal.** Pages, scripts and styles are answered with an ETag of their content and revalidated on every load (304 when unchanged); fonts, pictures and the WebAssembly keep the hour. The tag is a hash of the file, which the file's reader has anyway.
