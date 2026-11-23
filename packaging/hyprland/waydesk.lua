@@ -13,6 +13,17 @@ package.path = config_dir .. "/?.lua;" .. config_dir .. "/?/init.lua;" .. packag
 
 local runtime = os.getenv("XDG_RUNTIME_DIR") or "/tmp"
 local f = io.open(user_config, "r")
+-- An account with no configuration gets Waydesk's starter (packaging/hyprland/starter.lua) in its place; without one Hyprland would write its example
+-- configuration into the account (a warning banner, a terminal and a file manager that are not installed, animations and blur).
+local starter = "/usr/share/waydesk/hyprland-starter.lua"
+if not f then
+  local sf = io.open(starter, "r")
+  if sf then
+    sf:close()
+    user_config = starter
+    f = io.open(user_config, "r")
+  end
+end
 if f then
   f:close()
   -- A configuration that fails must not stop the rest of this file: the session still needs its PATH, its output rule and the marker below, or the

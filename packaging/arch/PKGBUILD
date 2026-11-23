@@ -90,6 +90,7 @@ package() {
     packaging/hyprland/bin/omarchy-system-reboot packaging/hyprland/bin/omarchy-system-shutdown packaging/hyprland/bin/hyprshutdown -t "$pkgdir/usr/lib/waydesk/bin"
   # Omarchy's configuration puts its own bin first on PATH, behind which the stand-ins above would never be found: Hyprland starts with this wrapper
   install -Dm644 packaging/hyprland/waydesk.lua "$pkgdir/usr/lib/waydesk/hyprland.lua"
+  install -Dm644 packaging/hyprland/starter.lua "$pkgdir/usr/share/waydesk/hyprland-starter.lua"
   install -Dm644 packaging/polkit/50-waydesk-no-power.rules -t "$pkgdir/usr/share/polkit-1/rules.d"
   install -Dm644 packaging/udev/70-waydesk-gpu.rules -t "$pkgdir/usr/lib/udev/rules.d"
   # the card node for Hyprland sessions is a choice, not a default (docs/HYPRLAND.md, Security notes): shipped as an example

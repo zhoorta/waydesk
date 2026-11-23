@@ -368,7 +368,7 @@ pub fn hyprland_format_finding(has_lua: bool, has_old_conf: bool) -> Finding {
         (true, _) => Finding::new(Level::Ok, "hyprland.config-format", "the account has a Lua configuration (~/.config/hypr/hyprland.lua)"),
         (false, true) => Finding::new(Level::Fail, "hyprland.config-format", "the account has only the old hyprland.conf: Waydesk's Hyprland support needs the Lua configuration (Hyprland 0.55 and later)")
             .hint("convert it (Hyprland's wiki describes the Lua format), or use sway for this account"),
-        (false, false) => Finding::new(Level::Info, "hyprland.config-format", "the account has no Hyprland configuration of its own: Hyprland's defaults are used"),
+        (false, false) => Finding::new(Level::Info, "hyprland.config-format", "the account has no Hyprland configuration of its own: Waydesk's starter configuration is used (/usr/share/waydesk/hyprland-starter.lua; copy it to ~/.config/hypr/hyprland.lua to change it)"),
     }
 }
 

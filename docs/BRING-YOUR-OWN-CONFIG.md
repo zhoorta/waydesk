@@ -43,7 +43,8 @@ lookup (`~/.sway/config`, `~/.config/sway/config`, `/etc/sway/config`), and the 
 account's own `~/.config/sway/config` is therefore not used**; put it (or a link to it) at `~/.config/waydesk/config`, or leave the desktop package out.
 
 **Hyprland.** The account's `~/.config/hypr/hyprland.lua`. Waydesk starts Hyprland with a small wrapper (`/usr/lib/waydesk/hyprland.lua`) that loads that file unchanged, as Hyprland would
-have, and then adds three things: Waydesk's `bin` first on `PATH`, the size rule of the session's output, and a marker that tells the session the configuration has loaded. The old
+have, and then adds three things: Waydesk's `bin` first on `PATH`, the size rule of the session's output, and a marker that tells the session the configuration has loaded. An account with no such file gets
+Waydesk's starter (`/usr/share/waydesk/hyprland-starter.lua`: foot, no animations, a few keys); copy it to `~/.config/hypr/hyprland.lua` to change it. The old
 `hyprland.conf` format is not supported. A configuration that fails to load does not stop the session: it starts without it and the error is in the session's log.
 
 ## Stand-ins

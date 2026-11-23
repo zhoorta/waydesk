@@ -879,13 +879,17 @@ impl Drop for OwnCompositor {
 pub const PRIVATE_BIN: &str = "/usr/lib/waydesk/bin";
 
 /// Waydesk's wrapper for the Hyprland configuration (packaging/hyprland/waydesk.lua): it loads the account's own and then puts `PRIVATE_BIN` back in front of
-/// `PATH`, which Omarchy's configuration moves behind its own `bin`. Only used when the account has a configuration of its own for it to load.
+/// `PATH`, which Omarchy's configuration moves behind its own `bin`. Used when the account has a configuration of its own for it to load, or when the package
+/// has a starter configuration to give an account that has none (without one Hyprland would write its example configuration into the account: a warning on
+/// the screen, programs that are not installed).
 const HYPRLAND_WRAPPER: &str = "/usr/lib/waydesk/hyprland.lua";
+/// What the wrapper loads for an account that has no Hyprland configuration (packaging/hyprland/starter.lua).
+const HYPRLAND_STARTER: &str = "/usr/share/waydesk/hyprland-starter.lua";
 
 fn hyprland_config(home: Option<&std::path::Path>, is_file: impl Fn(&std::path::Path) -> bool) -> Option<std::path::PathBuf> {
     let wrapper = std::path::Path::new(HYPRLAND_WRAPPER);
     let own = home?.join(".config/hypr/hyprland.lua");
-    (is_file(wrapper) && is_file(&own)).then(|| wrapper.to_path_buf())
+    (is_file(wrapper) && (is_file(&own) || is_file(std::path::Path::new(HYPRLAND_STARTER)))).then(|| wrapper.to_path_buf())
 }
 
 /// `PATH` with `dir` first, once: everything the session worker starts (sway, swaymsg, and through sway the applications, the scripts
@@ -961,12 +965,14 @@ pub fn prefer_private_bin() {
 #[cfg(test)]
 mod private_bin_tests {
     #[test]
-    fn hyprland_wrapper_is_used_only_with_an_own_config() {
+    fn hyprland_wrapper_is_used_with_an_own_config_or_a_starter() {
         let home = Some(Path::new("/home/a"));
         let has = |files: &'static [&'static str]| move |p: &Path| files.iter().any(|f| p == Path::new(f));
         let both = has(&[HYPRLAND_WRAPPER, "/home/a/.config/hypr/hyprland.lua"]);
         assert_eq!(hyprland_config(home, both), Some(HYPRLAND_WRAPPER.into()));
-        assert_eq!(hyprland_config(home, has(&[HYPRLAND_WRAPPER])), None, "nothing of the account's to load: Hyprland keeps its own default");
+        assert_eq!(hyprland_config(home, has(&[HYPRLAND_WRAPPER])), None, "nothing to load for the account: Hyprland keeps its own default");
+        assert_eq!(hyprland_config(home, has(&[HYPRLAND_WRAPPER, HYPRLAND_STARTER])), Some(HYPRLAND_WRAPPER.into()), "no config of its own: the starter");
+        assert_eq!(hyprland_config(home, has(&[HYPRLAND_STARTER])), None, "no wrapper installed");
         assert_eq!(hyprland_config(home, has(&["/home/a/.config/hypr/hyprland.lua"])), None, "no wrapper installed");
         assert_eq!(hyprland_config(None, both), None);
     }
