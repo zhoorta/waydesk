@@ -48,6 +48,8 @@ mod adminaction;
 mod audit;
 #[path = "../configcheck.rs"]
 mod configcheck;
+#[path = "../gpuclients.rs"]
+mod gpuclients;
 #[path = "../gpuinfo.rs"]
 mod gpuinfo;
 #[path = "../gpuplace.rs"]
@@ -715,6 +717,8 @@ struct Usage {
     tasks: u64,
     /// Share of one core over the sample (a busy browser on two cores is 200).
     cpu_percent: f64,
+    /// The GPU time of the account's programs over the sample, in percent of one engine (render, video); `None` when the account has no DRM file open (or the driver counts nothing).
+    gpu_share: Option<(f64, f64)>,
     cap_mb: Option<u64>,
     /// The programs of the account that hold the most memory (resident, shared pages counted for each process).
     top: Vec<(String, u64)>,
@@ -747,10 +751,12 @@ fn resident_by_program(uids: &HashSet<u32>) -> HashMap<u32, HashMap<String, u64>
 fn gather_usage(sample: std::time::Duration) -> Result<Vec<Usage>> {
     let accounts = visible_accounts()?;
     let first: Vec<Option<u64>> = accounts.iter().map(|a| cpu_usec(&user_cgroup(a.uid))).collect();
+    let uids: HashSet<u32> = accounts.iter().map(|a| a.uid).collect();
+    let gpu_before = gpuclients::read(&uids);
     let started = std::time::Instant::now();
     std::thread::sleep(sample);
     let elapsed_us = started.elapsed().as_micros().max(1) as f64;
-    let uids: HashSet<u32> = accounts.iter().map(|a| a.uid).collect();
+    let gpu_after = gpuclients::read(&uids);
     let by_program = resident_by_program(&uids);
     let mut out = Vec::new();
     for (a, before) in accounts.into_iter().zip(first) {
@@ -774,6 +780,7 @@ fn gather_usage(sample: std::time::Duration) -> Result<Vec<Usage>> {
             swap_mb: read_number(&dir.join("memory.swap.current")).unwrap_or(0) / 1_048_576,
             tasks: read_number(&dir.join("pids.current")).unwrap_or(0),
             cpu_percent,
+            gpu_share: gpu_after.get(&a.uid).map(|after| gpuclients::percent(gpu_before.get(&a.uid).copied().unwrap_or(*after), *after, elapsed_us * 1000.0)),
             cap_mb: read_number(&dir.join("memory.max")).map(|b| b / 1_048_576),
             top,
             video: if session { sessionstatus::read(Path::new(sessionstatus::DIR), a.uid) } else { None },
@@ -1118,6 +1125,7 @@ fn status_once(json_out: bool, compact: bool) -> Result<()> {
         let users: Vec<_> = usage.iter().map(|u| json!({
             "name": u.name, "uid": u.uid, "session": u.session, "mem_mb": u.mem_mb, "swap_mb": u.swap_mb, "tasks": u.tasks,
             "cpu_percent": round(u.cpu_percent), "cap_mb": u.cap_mb, "ai_connections": ai_of(u.uid),
+            "gpu_use": u.gpu_share.map(|(render, video)| json!({ "render_percent": round(render), "video_percent": round(video) })),
             "top": u.top.iter().map(|(n, mb)| json!({ "name": n, "mb": mb })).collect::<Vec<_>>(),
             "video": u.video.as_ref().map(|v| json!({
                 "render": v.render, "encoder": v.encoder, "encoder_node": v.encoder_node, "compositor": v.compositor, "qp": v.qp, "fps": v.fps.map(round), "kbps": v.kbps, "current": sessionstatus::is_fresh(v),

@@ -370,7 +370,13 @@ const views = {
     if (a.open === false) attention.push(['full', 'bad', 'New sessions are refused: ' + (a.reason || 'the machine is full')]);
     for (const w of s.warnings || []) attention.push(['warning', 'warn', w]);
     // The GPU a session renders on: its render node, matched to the GPUs the server lists; "software" when it has none.
-    const gpuOf = (u) => { const node = u.video && u.video.render; const g = node && gpus.find((x) => x.node === node); return g ? gpuName(g) : el('span', { class: 'dim' }, 'software'); };
+    // After the name: how much of the GPU the account's programs worked over the second the status measured (drawing, and encoding on the video engine).
+    const gpuOf = (u) => {
+      const node = u.video && u.video.render; const g = node && gpus.find((x) => x.node === node);
+      if (!g) return el('span', { class: 'dim' }, 'software');
+      const use = u.gpu_use;
+      return [gpuName(g), use ? el('span', { class: 'dim mono' }, ' \u00b7 ' + Math.round(use.render_percent) + '% \u00b7 enc ' + Math.round(use.video_percent) + '%') : null];
+    };
     const rows = sessionsNow.map((u) => el('tr', {}, cell(el('b', {}, u.name)), cell((u.video && u.video.compositor) || '-'), cell(u.video && u.video.encoder ? u.video.encoder : '-'), hasGpu ? cell(gpuOf(u)) : null, cell(gb(u.mem_mb || 0), 'n mono'), cell(Math.round(u.cpu_percent || 0) + '%', 'n mono')));
     return [
       el('div', { class: 'head' }, el('h1', {}, 'Overview'), el('span', { class: 'sp' }), await picker(), null),
