@@ -346,6 +346,16 @@ async function serverPage(id, tab) {
   return [...head, ...body];
 }
 
+// One figure for the GPU an account uses: the busier of its drawing and its encoding (the video engine) over the second the status measured; the two are in
+// the tooltip. "-" for a session that draws in software or on a driver that counts nothing. With several GPUs the cell also names the one it renders on.
+function gpuCell(u, gpus) {
+  const g = u.video && u.video.render && gpus.find((x) => x.node === u.video.render);
+  const use = u.gpu_use;
+  if (!g || !use) return cell('-', 'n mono');
+  const pct = Math.round(Math.max(use.render_percent, use.video_percent));
+  return cell(el('span', { title: 'drawing ' + Math.round(use.render_percent) + '% \u00b7 encoding ' + Math.round(use.video_percent) + '%' }, pct + '%', gpus.length > 1 ? el('span', { class: 'dim' }, ' ' + gpuName(g)) : null), 'n mono');
+}
+
 const views = {
   async overview() {
     const s = await get('status');
@@ -373,20 +383,12 @@ const views = {
     const attention = [];
     if (a.open === false) attention.push(['full', 'bad', 'New sessions are refused: ' + (a.reason || 'the machine is full')]);
     for (const w of s.warnings || []) attention.push(['warning', 'warn', w]);
-    // The GPU a session renders on: its render node, matched to the GPUs the server lists; "software" when it has none.
-    // After the name: how much of the GPU the account's programs worked over the second the status measured (drawing, and encoding on the video engine).
-    const gpuOf = (u) => {
-      const node = u.video && u.video.render; const g = node && gpus.find((x) => x.node === node);
-      if (!g) return el('span', { class: 'dim' }, 'software');
-      const use = u.gpu_use;
-      return [gpuName(g), use ? el('span', { class: 'dim mono' }, ' \u00b7 ' + Math.round(use.render_percent) + '% \u00b7 enc ' + Math.round(use.video_percent) + '%') : null];
-    };
-    const rows = sessionsNow.map((u) => el('tr', {}, cell(el('b', {}, u.name)), cell((u.video && u.video.compositor) || '-'), cell(u.video && u.video.encoder ? u.video.encoder : '-'), hasGpu ? cell(gpuOf(u)) : null, cell(gb(u.mem_mb || 0), 'n mono'), cell(Math.round(u.cpu_percent || 0) + '%', 'n mono')));
+    const rows = sessionsNow.map((u) => el('tr', {}, cell(el('b', {}, u.name)), cell((u.video && u.video.compositor) || '-'), cell(u.video && u.video.encoder ? u.video.encoder : '-'), cell(gb(u.mem_mb || 0), 'n mono'), cell(Math.round(u.cpu_percent || 0) + '%', 'n mono'), hasGpu ? gpuCell(u, gpus) : null));
     return [
       el('div', { class: 'head' }, el('h1', {}, 'Overview'), el('span', { class: 'sp' }), await picker(), null),
       tiles,
       el('div', { class: 'two' },
-        win('sessions now', table(['Account', 'Desktop', 'Encoder'].concat(hasGpu ? ['GPU'] : [], ['>Memory', '>CPU']), rows, 'Nobody is logged in.')),
+        win('sessions now', table(['Account', 'Desktop', 'Encoder', '>Memory', '>CPU'].concat(hasGpu ? ['>GPU'] : []), rows, 'Nobody is logged in.')),
         el('div', { class: 'colstack' },
           win('needs attention', attention.length ? el('div', { class: 'tw' }, el('table', { class: 'plain' }, el('tbody', {}, attention.map(([k, tone, text]) => el('tr', {}, cell(chip(k, tone)), cell(text)))))) : el('p', { class: 'ok' }, 'Nothing needs attention.')),
           win('machine', el('dl', { class: 'kv' },
@@ -616,15 +618,18 @@ const views = {
   async sessions() {
     const [list, s] = await Promise.all([get('sessions'), get('status')]);
     const by = new Map((s.users || []).map((u) => [u.name, u]));
+    const gpus = realGpus(s);
+    hasGpu = gpus.length > 0;
+    serverGpus = gpus;
     const rows = list.map((r) => {
       const u = by.get(r.name) || {};
       const v = u.video || {};
-      return el('tr', {}, cell(el('b', {}, r.name)), cell([dot(), 'running']), cell(sessionSince(r.since)), cell(v.compositor || '-'), cell(v.encoder || '-'), cell(gb(u.mem_mb || 0), 'n mono'), cell(Math.round(u.cpu_percent || 0) + '%', 'n mono'), cell(el('div', { class: 'acts' }, button('End', () => endSession(r.name), 'sm danger')), 'n'));
+      return el('tr', {}, cell(el('b', {}, r.name)), cell([dot(), 'running']), cell(sessionSince(r.since)), cell(v.compositor || '-'), cell(v.encoder || '-'), cell(gb(u.mem_mb || 0), 'n mono'), cell(Math.round(u.cpu_percent || 0) + '%', 'n mono'), hasGpu ? gpuCell(u, gpus) : null, cell(el('div', { class: 'acts' }, button('End', () => endSession(r.name), 'sm danger')), 'n'));
     });
     const a = s.admission || {};
     return [
       el('div', { class: 'head' }, el('h1', {}, 'Sessions'), el('span', { class: 'sp' }), await picker()),
-      withCount(win('running sessions', table(['Account', 'State', 'Since', 'Desktop', 'Encoder', '>Memory', '>CPU', ''], rows, 'No sessions running.')), rows.length + (a.max_active_users ? ' of ' + a.max_active_users : '')),
+      withCount(win('running sessions', table(['Account', 'State', 'Since', 'Desktop', 'Encoder', '>Memory', '>CPU'].concat(hasGpu ? ['>GPU'] : [], ['']), rows, 'No sessions running.')), rows.length + (a.max_active_users ? ' of ' + a.max_active_users : '')),
     ];
   },
 };
