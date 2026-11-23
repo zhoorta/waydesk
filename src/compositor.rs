@@ -366,6 +366,25 @@ pub mod hyprland {
         format!("hl.dispatch(hl.dsp.focus({{ monitor = {} }}))", lua_str(output))
     }
 
+    /// The theme file that the account's `foot.ini` includes from Omarchy's state directory, when it is not there yet.
+    pub(super) fn pending_theme(home: Option<&std::path::Path>, exists: impl Fn(&std::path::Path) -> bool) -> Option<std::path::PathBuf> {
+        let home = home?;
+        let text = std::fs::read_to_string(home.join(".config/foot/foot.ini")).ok()?;
+        theme_include(&text, home).filter(|p| !exists(p))
+    }
+
+    /// The path of an `include=` line of a foot configuration that points into `~/.local/state/omarchy/`.
+    pub(super) fn theme_include(text: &str, home: &std::path::Path) -> Option<std::path::PathBuf> {
+        text.lines().find_map(|line| {
+            let (key, value) = line.split_once('=')?;
+            let value = value.trim();
+            (key.trim() == "include" && value.contains(".local/state/omarchy/")).then(|| match value.strip_prefix("~/") {
+                Some(rest) => home.join(rest),
+                None => std::path::PathBuf::from(value),
+            })
+        })
+    }
+
     /// How Hyprland is told which workspace: a number is the workspace of that number, anything else a workspace of that name. A named workspace has
     /// no number, which Omarchy's workspace code (`monitor-workspaces.lua`) cannot compare, and Omarchy's keys and bar (Super+1 ...) go to numbered
     /// ones: windows left on a named "Remote" were out of reach after the first Super+number.
@@ -537,6 +556,20 @@ pub mod hyprland {
         }
 
         fn spawn_terminal(&self) -> Result<()> {
+            // Omarchy's foot.ini includes a theme file that Omarchy's own first start makes a few seconds after the session begins; a terminal opened before
+            // that prints "failed to open" as its first line. Wait for the file (at most 20 s) off the session's own thread, so that nothing else waits.
+            if let Some(theme) = pending_theme(std::env::var_os("HOME").as_deref().map(std::path::Path::new), |p| p.exists()) {
+                std::thread::spawn(move || {
+                    for _ in 0..80 {
+                        if theme.exists() {
+                            break;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(250));
+                    }
+                    let _ = eval(&exec_lua("foot -T waydesk-server-session"));
+                });
+                return Ok(());
+            }
             eval(&exec_lua("foot -T waydesk-server-session"))
         }
 
@@ -572,6 +605,11 @@ pub mod hyprland {
             assert_eq!(focus_workspace_lua("1"), "hl.dispatch(hl.dsp.focus({ workspace = \"1\" }))");
             assert_eq!(session_workspace("Remote"), "1");
             assert_eq!(session_workspace("Work"), "Work");
+            let home = std::path::Path::new("/home/a");
+            assert_eq!(theme_include("[main]\ninclude=~/.local/state/omarchy/current/theme/foot.ini\nfont=x\n", home), Some("/home/a/.local/state/omarchy/current/theme/foot.ini".into()));
+            assert_eq!(theme_include("[main]\ninclude = /home/a/.local/state/omarchy/current/theme/foot.ini\n", home), Some("/home/a/.local/state/omarchy/current/theme/foot.ini".into()));
+            assert_eq!(theme_include("[main]\ninclude=/usr/share/foot/themes/x\nfont=y\n", home), None);
+            assert_eq!(theme_include("[main]\nfont=y\n", home), None);
             assert_eq!(move_workspace_lua("Remote", "HEADLESS-1"), "hl.dispatch(hl.dsp.workspace.move({ workspace = \"name:Remote\", monitor = \"HEADLESS-1\" }))");
             assert_eq!(exec_lua("foot -T x"), "hl.exec_cmd(\"foot -T x\")");
             assert!(close_windows_lua("HEADLESS-1").contains("w.monitor.name == \"HEADLESS-1\""));

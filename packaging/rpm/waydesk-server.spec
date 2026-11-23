@@ -85,7 +85,7 @@ cp -a packaging/cursors/waydesk-blank %{buildroot}%{_datadir}/icons/
 install -Dm644 packaging/xkb/waydeskmac %{buildroot}%{_sysconfdir}/xkb/symbols/waydeskmac
 # Hyprland sessions (Omarchy): see docs/HYPRLAND.md
 install -Dm755 packaging/hyprland/bin/omarchy-theme-set-browser-policy packaging/hyprland/bin/omarchy-system-logout \
-    packaging/hyprland/bin/omarchy-system-reboot packaging/hyprland/bin/omarchy-system-shutdown packaging/hyprland/bin/hyprshutdown -t %{buildroot}%{_prefix}/lib/waydesk/bin
+    packaging/hyprland/bin/omarchy-system-reboot packaging/hyprland/bin/omarchy-system-shutdown packaging/hyprland/bin/hyprshutdown packaging/hyprland/bin/nm-online packaging/hyprland/bin/checkupdates -t %{buildroot}%{_prefix}/lib/waydesk/bin
 install -Dm644 packaging/hyprland/waydesk.lua %{buildroot}%{_prefix}/lib/waydesk/hyprland.lua
 install -Dm644 packaging/hyprland/starter.lua %{buildroot}%{_datadir}/waydesk/hyprland-starter.lua
 install -Dm644 packaging/polkit/50-waydesk-no-power.rules -t %{buildroot}%{_datadir}/polkit-1/rules.d

@@ -1,0 +1,10 @@
+#!/bin/sh
+# Waydesk sessions: stand-in for checkupdates (pacman-contrib), found first on the session's PATH.
+#
+# Omarchy's first login runs it and, when something is waiting, shows a critical "update" toast that opens omarchy-update. On a shared server the accounts
+# cannot update anything: the administrator does, from the shell or the portal. An administrator (group wheel) gets the real command; everybody else is told
+# nothing is waiting (exit 2, as checkupdates says it), so no toast leads nowhere.
+if id -nG | tr ' ' '\n' | grep -qx wheel && [ -x /usr/bin/checkupdates ]; then
+    exec /usr/bin/checkupdates "$@"
+fi
+exit 2

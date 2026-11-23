@@ -1,0 +1,10 @@
+#!/bin/sh
+# Waydesk sessions: stand-in for NetworkManager's nm-online (found first on the session's PATH, see worker.rs prefer_private_bin).
+#
+# Omarchy's first login asks it whether the machine is online and, when it is not, shows "Setup Wi-Fi" and then holds back its other prompts for good. A
+# Waydesk server is reached over a network by definition, and its owner, not the account, sets up its connections: without NetworkManager (a server
+# usually has none) this answers "online". With NetworkManager installed its own answer is used.
+if [ -x /usr/bin/nm-online ]; then
+    exec /usr/bin/nm-online "$@"
+fi
+exit 0
