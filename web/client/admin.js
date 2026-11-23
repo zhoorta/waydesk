@@ -18,6 +18,9 @@ const VIRTUAL_GPU = /virtio|bochs|qxl|vmwgfx|vboxvideo|cirrus|simpledrm|hyperv/i
 const realGpus = (status) => (status.gpus || []).filter((g) => !VIRTUAL_GPU.test(g.driver || ''));
 // Whether the server whose page is open has a GPU; the overview and the accounts page set it, the dialogs read it.
 let hasGpu = true;
+// The real GPUs of that server: the Edit dialog offers each by name (the setting is its render node, "renderD128"), and the accounts page names them.
+let serverGpus = [];
+const nodeName = (g) => String(g.node || '').split('/').pop();
 // "Intel Skylake-S GT2 [HD Graphics 530]" -> "HD Graphics 530"
 const gpuName = (g) => { const m = /\[(.+)\]/.exec(g.model || ''); return m ? m[1] : (g.model || g.driver || 'GPU'); };
 // A portal account has nothing on the portal's own machine: the pages are about a server, never "this machine".
@@ -115,7 +118,7 @@ function addUser() {
 function editUser(u) {
   const select = (label, name, options, current) => el('label', {}, label, el('select', { name }, options.map((o) => el('option', { value: o[0], selected: o[0] === current }, o[1]))));
   const desktop = select('Desktop', 'desktop', [['', 'no change'], ['default', 'server default'], ['sway', 'Sway'], ['plasma', 'Plasma'], ['cosmic', 'COSMIC'], ['hyprland', 'Hyprland']], '');
-  const gpu = select('Graphics', 'gpu', [['', 'no change'], ['default', 'server default'], ['auto', 'auto'], ['balance', 'balance'], ['off', 'off (software)']], '');
+  const gpu = select('Graphics', 'gpu', [['', 'no change'], ['default', 'server default'], ['auto', 'auto'], ['balance', 'balance'], ['off', 'off (software)']].concat(serverGpus.map((g) => [nodeName(g), gpuName(g) + ' (' + nodeName(g) + ')'])), '');
   const memory = el('input', { name: 'memory', placeholder: 'e.g. 6G, or reset', autocomplete: 'off', spellcheck: 'false' });
   const err = el('p', { class: 'bad', role: 'alert' });
   const form = el('form', { class: 'form' }, desktop, hasGpu ? gpu : null, el('label', {}, 'Memory limit of the session', memory), el('p', { class: 'hint' }, 'A running session keeps what it started with; the new setting applies from the next one.'), err);
@@ -350,6 +353,7 @@ const views = {
     const a = s.admission || {};
     const gpus = realGpus(s);
     hasGpu = gpus.length > 0;
+    serverGpus = gpus;
     const usedMb = (m.mem_total_mb || 0) - (m.mem_available_mb || 0);
     const memPct = m.mem_total_mb ? (usedMb / m.mem_total_mb) * 100 : 0;
     const swapTotal = m.swap_total_mb || 0;
@@ -454,7 +458,7 @@ const views = {
 
   async accounts() {
     const [list, st] = await Promise.all([get('users'), get('status').catch(() => null)]);
-    if (st) hasGpu = realGpus(st).length > 0;
+    if (st) { serverGpus = realGpus(st); hasGpu = serverGpus.length > 0; }
     const holder = el('div', {});
     const draw = () => {
       const shown = list;
@@ -462,7 +466,7 @@ const views = {
         shown.map((u) => el('tr', {},
           cell(el('b', {}, u.name)),
           cell((u.desktop || '-') + (u.desktop_from === 'account' ? '*' : '')),
-          hasGpu ? cell(String(u.gpu || '-').split('/').pop() + (u.gpu_from === 'account' ? '*' : '')) : null,
+          hasGpu ? cell((() => { const node = String(u.gpu || '-').split('/').pop(); const g = serverGpus.find((x) => nodeName(x) === node); return (g ? gpuName(g) : node) + (u.gpu_from === 'account' ? '*' : ''); })()) : null,
           cell(u.rdp ? chip('yes', 'ok') : chip('no', 'bad')),
           cell(u.sudo ? chip('admin') : el('span', { class: 'dim' }, '-')),
           cell(u.session === 'running' ? [dot(), 'running' + (u.desktop_running ? ' on ' + u.desktop_running : ''), u.session_since ? el('span', { class: 'dim' }, ' since ' + sessionSince(u.session_since)) : null] : [dot('off'), 'none']),
