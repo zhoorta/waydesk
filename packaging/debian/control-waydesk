@@ -5,6 +5,7 @@ Maintainer: StackCare <jose@stackcare.pt>
 Section: metapackages
 Priority: optional
 Depends: waydesk-server (= @VERSION@), waydesk-desktop (= @VERSION@)
+Suggests: waydesk-portal (= @VERSION@)
 Description: Waydesk: a Windows-like remote Linux desktop over RDP
  Installs the RDP server (waydesk-server) and the desktop for its sessions
  (waydesk-desktop) in one step.

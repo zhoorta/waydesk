@@ -35,6 +35,17 @@ Suggests:       plasma-desktop, hyprland, intel-media-driver
 %{?systemd_requires}
 %{?sysusers_requires_compat}
 
+%package portal
+Summary:        Waydesk portal: desktops in a browser, and several servers in one place
+Requires:       %{name} = %{version}-%{release}
+Recommends:     qrencode
+%{?systemd_requires}
+
+%description portal
+A small HTTPS server: people sign in and open their desktop in a browser (no client to install); administrators manage servers, people and sessions for
+several servers, each of which dials out to the portal with the agent (waydesk-agent enrol, in waydesk-server). Starts nothing by itself: see
+%{_docdir}/%{name}-portal/README.md.
+
 %description
 Accounts log in over RDP with their normal password and get a private, headless sway session that survives disconnects. A small root helper
 checks passwords (PAM) and starts the sessions; the network-facing daemon runs as an unprivileged account. KDE Plasma, COSMIC and Hyprland
@@ -47,7 +58,7 @@ sessions are optional (docs in %{_docdir}/%{name}). Early software.
 export CARGO_TARGET_DIR=target
 cargo build --locked --release
 # The agent (this server's link to a portal) is a program of its own in web/, so that the daemon carries no web stack; it runs only after `waydesk-agent enrol`.
-(cd web && CARGO_TARGET_DIR=target-web cargo build --locked --release --bin waydesk-agent)
+(cd web && CARGO_TARGET_DIR=target-web cargo build --locked --release)   # the agent (waydesk-server) and the portal (waydesk-portal)
 
 %check
 export CARGO_TARGET_DIR=target
@@ -56,6 +67,13 @@ cargo test --locked --release
 %install
 install -Dm755 target/release/waydesk-server target/release/waydesk-admin target/release/waydesk-passwd -t %{buildroot}%{_bindir}
 install -Dm755 web/target-web/release/waydesk-agent -t %{buildroot}%{_bindir}
+install -Dm755 web/target-web/release/waydesk-web -t %{buildroot}%{_bindir}
+install -Dm644 packaging/systemd/waydesk-web.service -t %{buildroot}%{_unitdir}
+install -Dm644 packaging/default-waydesk-web %{buildroot}%{_sysconfdir}/default/waydesk-web
+install -d %{buildroot}%{_datadir}/waydesk/web
+cp -a web/client/. %{buildroot}%{_datadir}/waydesk/web/
+install -Dm644 web/README.md %{buildroot}%{_docdir}/%{name}-portal/README.md
+install -Dm644 docs/PORTAL-DESIGN.md -t %{buildroot}%{_docdir}/%{name}-portal
 install -Dm755 packaging/bin/waydesk-setup-admin %{buildroot}%{_bindir}/waydesk-setup-admin
 install -Dm644 packaging/org.waydesk.admin.policy -t %{buildroot}%{_datadir}/polkit-1/actions
 
@@ -149,6 +167,8 @@ fi
 
 %files
 %license LICENSE
+%exclude %{_unitdir}/waydesk-web.service
+%exclude %{_datadir}/waydesk/web
 %{_docdir}/%{name}
 %config(noreplace) %{_sysconfdir}/xdg/waydesk/sway.conf
 %{_bindir}/waydesk-server
@@ -177,9 +197,35 @@ fi
 %config(noreplace) %{_sysconfdir}/pam.d/waydesk-session
 %config(noreplace) %{_sysconfdir}/xkb/symbols/waydeskmac
 
+%post portal
+systemctl daemon-reload >/dev/null 2>&1 || true
+if [ "$1" -eq 1 ]; then
+    cat <<MSG
+waydesk-portal: installed, not started. It listens on 127.0.0.1:8443 only (settings: /etc/default/waydesk-web). To start it:
+    sudo systemctl enable --now waydesk-web.service
+    sudo waydesk-web people add NAME --admin     # the first person, with a password shown once
+Then reach it through an SSH tunnel: ssh -N -L 8443:127.0.0.1:8443 USER@SERVER, and open https://localhost:8443/
+MSG
+else
+    systemctl try-restart waydesk-web.service >/dev/null 2>&1 || true
+fi
+
+%preun portal
+%systemd_preun waydesk-web.service
+
+%postun portal
+%systemd_postun waydesk-web.service
+
+%files portal
+%{_bindir}/waydesk-web
+%{_unitdir}/waydesk-web.service
+%{_datadir}/waydesk/web
+%{_docdir}/%{name}-portal
+%config(noreplace) %{_sysconfdir}/default/waydesk-web
+
 %changelog
 * Mon Nov 23 2026 StackCare <jose@stackcare.pt> - 0.6.0-1
-- The agent and the admin socket units; Hyprland starter, Omarchy session fixes (see the changelog of the project)
+- The portal as a package of its own (waydesk-portal); the agent and the admin socket units; Hyprland starter, Omarchy session fixes (see the changelog of the project)
 
 * Wed Nov 04 2026 StackCare <jose@stackcare.pt> - 0.5.0-1
 - First RPM

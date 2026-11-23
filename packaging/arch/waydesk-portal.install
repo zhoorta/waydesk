@@ -1,0 +1,18 @@
+post_install() {
+  cat <<MSG
+waydesk-portal: installed, not started. It listens on 127.0.0.1:8443 only (settings: /etc/default/waydesk-web). To start it:
+    sudo systemctl enable --now waydesk-web.service
+    sudo waydesk-web people add NAME --admin     # the first person, with a password shown once
+Then reach it through an SSH tunnel: ssh -N -L 8443:127.0.0.1:8443 USER@SERVER, and open https://localhost:8443/
+Read /usr/share/doc/waydesk-portal/README.md before binding it to a network.
+MSG
+}
+
+post_upgrade() {
+  systemctl try-restart waydesk-web.service >/dev/null 2>&1 || true
+}
+
+pre_remove() {
+  systemctl stop waydesk-web.service >/dev/null 2>&1 || true
+  systemctl disable waydesk-web.service >/dev/null 2>&1 || true
+}

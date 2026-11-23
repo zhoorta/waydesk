@@ -8,6 +8,8 @@ Wants=waydesk.service waydesk-helper.service
 Type=simple
 User=waydesk
 Group=waydesk
+# The portal's own settings first, then the server's file, which may override them (a portal set up before it had its own file keeps its settings there).
+EnvironmentFile=-/etc/default/waydesk-web
 EnvironmentFile=-/etc/default/waydesk
 # Safe as shipped: this machine only (an SSH tunnel reaches it). WAYDESK_WEB_BIND and WAYDESK_WEB_ALLOW_FROM change that.
 ExecStart=/usr/bin/waydesk-web --bind ${WAYDESK_WEB_BIND} --cert /etc/waydesk/cert.pem --key /etc/waydesk/key.pem --target ${WAYDESK_BIND} --root /usr/share/waydesk/web $WAYDESK_WEB_ARGS

@@ -7,6 +7,6 @@ ver=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
 out=packaging/out/arch
 mkdir -p "$out"
 git archive --format=tar.gz --prefix="waydesk-server-$ver/" -o "$out/waydesk-server-$ver.tar.gz" HEAD -- . ':(exclude)site' ':(exclude)branding' ':(exclude)packaging/out'
-cp packaging/arch/PKGBUILD packaging/arch/waydesk-server.install packaging/arch/waydesk.sysusers packaging/arch/waydesk.tmpfiles "$out/"
+cp packaging/arch/PKGBUILD packaging/arch/waydesk-server.install packaging/arch/waydesk-portal.install packaging/arch/waydesk.sysusers packaging/arch/waydesk.tmpfiles "$out/"
 cd "$out"
 makepkg -f "$@"

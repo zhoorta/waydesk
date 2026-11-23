@@ -1,0 +1,11 @@
+# /etc/default/waydesk-web: settings of the portal (waydesk-web.service). Read before /etc/default/waydesk, which may override these.
+#
+# Where the portal listens. Loopback by default: reach it through an SSH tunnel (ssh -N -L 8443:127.0.0.1:8443 USER@SERVER, then https://localhost:8443/).
+# To serve a network or the internet bind it to an address and keep the list of source addresses short (--allow-from below); read web/README.md first
+# (/usr/share/doc/waydesk-portal/README.md) and make an authenticator code the rule (--totp required).
+WAYDESK_WEB_BIND=127.0.0.1:8443
+# More options of waydesk-web, for example:
+#   WAYDESK_WEB_ARGS="--allow-from 203.0.113.7,loopback --totp optional --target 127.0.0.1:3390 --gateway-key /etc/waydesk/gateway.key"
+# (--target and --gateway-key are for the browser stream and codes: the daemon then needs --gateway-bind 127.0.0.1:3390 --gateway-key FILE, which
+# `waydesk-agent enrol` sets up.)
+WAYDESK_WEB_ARGS=""

@@ -1,0 +1,16 @@
+Package: waydesk-portal
+Version: @VERSION@
+Architecture: @ARCH@
+Maintainer: StackCare <jose@stackcare.pt>
+Section: web
+Priority: optional
+Depends: waydesk-server (= @VERSION@)
+Recommends: qrencode
+Replaces: waydesk-server (<< 0.6.0)
+Breaks: waydesk-server (<< 0.6.0)
+Description: Waydesk portal: desktops in a browser, and several servers in one place
+ A small HTTPS server: people sign in and open their desktop in a browser
+ (no client to install); administrators manage servers, people and sessions
+ for several servers, each of which dials out to the portal with the agent
+ (waydesk-agent enrol, in waydesk-server). Starts nothing by itself: see
+ /usr/share/doc/waydesk-portal/README.md.

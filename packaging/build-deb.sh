@@ -11,7 +11,7 @@ docker run --rm --platform linux/$ARCH -v "$PWD:/src" -v waydesk-cargo:/opt/carg
   -e VERSION="$VERSION" -e ARCH="$ARCH" -e UID_HOST="$(id -u)" -e GID_HOST="$(id -g)" waydesk-build-$ARCH sh -c '
 set -e
 cd /src && cargo build --release
-(cd web && CARGO_TARGET_DIR=/tmp/target-web cargo build --release --bin waydesk-agent)   # the agent is its own small program (web/), no web stack in the daemon
+(cd web && CARGO_TARGET_DIR=/tmp/target-web cargo build --release)   # the agent (in waydesk-server) and the portal (waydesk-portal) are programs of their own (web/): no web stack in the daemon
 P=/tmp/pkg; rm -rf $P; mkdir -p $P/DEBIAN $P/usr/bin $P/lib/systemd/system $P/etc/default $P/etc/pam.d $P/usr/share/doc/waydesk-server
 install -m 755 /tmp/target/release/waydesk-server $P/usr/bin/waydesk-server
 install -m 755 /tmp/target/release/waydesk-admin $P/usr/bin/waydesk-admin
@@ -21,6 +21,7 @@ mkdir -p $P/usr/sbin && install -m 755 packaging/bin/waydesk-setup-admin $P/usr/
 mkdir -p $P/usr/share/polkit-1/actions && install -m 644 packaging/org.waydesk.admin.policy $P/usr/share/polkit-1/actions/
 mkdir -p $P/usr/share/polkit-1/rules.d && install -m 644 packaging/polkit/50-waydesk-no-power.rules $P/usr/share/polkit-1/rules.d/   # RDP accounts may not reboot, power off or suspend the server
 install -m 644 packaging/systemd/*.service packaging/systemd/*.socket $P/lib/systemd/system/   # includes waydesk-session@.service and the admin socket
+rm -f $P/lib/systemd/system/waydesk-web.service   # the portal unit belongs to waydesk-portal
 mkdir -p $P/lib/systemd/system/user-.slice.d && install -m 644 packaging/systemd/user-slice/10-waydesk.conf $P/lib/systemd/system/user-.slice.d/
 mkdir -p $P/usr/lib/systemd/zram-generator.conf.d $P/usr/lib/sysctl.d
 install -m 644 packaging/systemd/zram/50-waydesk.conf $P/usr/lib/systemd/zram-generator.conf.d/50-waydesk.conf
@@ -46,6 +47,22 @@ chmod 644 $P/DEBIAN/conffiles
 sed -e "s/@VERSION@/$VERSION/" -e "s/@ARCH@/$ARCH/" packaging/debian/control > $P/DEBIAN/control
 echo "Installed-Size: $(du -sk $P | cut -f1)" >> $P/DEBIAN/control
 dpkg-deb --root-owner-group -Zxz -b $P /src/packaging/out/ >/dev/null
+
+# the portal: a package of its own (optional), so that a server that only wants RDP carries no web server
+W=/tmp/pkgw; rm -rf $W; mkdir -p $W/DEBIAN $W/usr/bin $W/usr/share/waydesk/web $W/lib/systemd/system $W/etc/default $W/usr/share/doc/waydesk-portal
+install -m 755 /tmp/target-web/release/waydesk-web $W/usr/bin/waydesk-web
+cp -r web/client/. $W/usr/share/waydesk/web/ && chmod -R go-w,a+rX $W/usr/share/waydesk/web   # the pages; the IronRDP client bundles (an optional fallback) are not part of the repository
+install -m 644 packaging/systemd/waydesk-web.service $W/lib/systemd/system/waydesk-web.service
+install -m 644 packaging/default-waydesk-web $W/etc/default/waydesk-web
+install -m 644 web/README.md $W/usr/share/doc/waydesk-portal/README.md
+install -m 644 docs/PORTAL-DESIGN.md $W/usr/share/doc/waydesk-portal/PORTAL-DESIGN.md
+{ printf "Waydesk\nCopyright (c) 2026 StackCare\nLicense: GNU Affero General Public License, version 3 or later (AGPL-3.0-or-later). The full text follows.\n\n"; cat LICENSE; } > $W/usr/share/doc/waydesk-portal/copyright
+printf "/etc/default/waydesk-web\n" > $W/DEBIAN/conffiles
+install -m 755 packaging/debian/postinst-portal $W/DEBIAN/postinst
+install -m 755 packaging/debian/prerm-portal $W/DEBIAN/prerm
+sed -e "s/@VERSION@/$VERSION/g" -e "s/@ARCH@/$ARCH/" packaging/debian/control-portal > $W/DEBIAN/control
+echo "Installed-Size: $(du -sk $W | cut -f1)" >> $W/DEBIAN/control
+dpkg-deb --root-owner-group -Zxz -b $W /src/packaging/out/ >/dev/null
 
 # the desktop metapackage (architecture independent; built here only so that both packages share a version)
 D=/tmp/pkgd; rm -rf $D; mkdir -p $D/DEBIAN $D/usr/bin $D/etc/xdg/waydesk $D/usr/share/waydesk/setup $D/usr/lib/systemd/user/sway-session.target.wants $D/usr/share/doc/waydesk-desktop
