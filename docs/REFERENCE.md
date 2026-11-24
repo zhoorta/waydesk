@@ -69,7 +69,7 @@ Packages, commands, units, ports and files of Waydesk. The short version is on [
 - `/etc/waydesk/agent.json`: the agent's portal address, key and pin; `/var/lib/waydesk-agent/managed`: the accounts the portal made on this server
 - `/var/lib/waydesk-web/`: the portal's people, servers, authenticator records and audit log (`people.json`, `fleet.json`, `audit.jsonl`), all 0600
 - `/var/log/waydesk/audit.log`: the audit log (root, readable by the group `adm`); rotated weekly by `/etc/logrotate.d/waydesk`, 26 weeks kept. See "Audit log" below
-- `/etc/apt/sources.list.d/waydesk.sources`: the repository, written for your release
+- `/etc/apt/sources.list.d/waydesk.sources`: the repository, written for the release
 - `/etc/apt/preferences.d/waydesk`: the pin: these packages win over third-party builds of the same names
 - `/usr/lib/systemd/zram-generator.conf.d/50-waydesk.conf`: zram as large as the RAM, at most 16 GiB
 

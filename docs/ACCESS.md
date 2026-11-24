@@ -1,8 +1,7 @@
 # Who can reach the RDP port
 
-The RDP login is a TLS login with the account's password (PAM cannot do NLA), and there is no second factor. So the port is closed to the
-network until you open it, and there are four things to set: where it listens, which addresses may connect, what certificate clients
-check, and, if you want one, a VPN. `waydesk-admin` does each in one command, and `waydesk-setup-admin` asks the first question for you.
+The RDP login is a TLS login with the account's password (PAM cannot do NLA), and there is no second factor. So the port listens on `127.0.0.1` only. Four things are set: where it listens, which addresses may connect, what certificate clients
+check, and, optionally, a VPN. `waydesk-admin` does each in one command, and `waydesk-setup-admin` asks the first question.
 
 ```
 sudo waydesk-admin access            # what it is now, and how to connect
@@ -20,7 +19,7 @@ sudo waydesk-admin vpn init          # a WireGuard VPN, then: vpn add NAME
 | `local` (default) | `127.0.0.1:3389` | this machine; reach it with `ssh -N -L 3389:127.0.0.1:3389 ACCOUNT@SERVER` |
 | `lan` | this server's address on the local network | that network only (for example `192.168.1.0/24`) |
 | `vpn` | the VPN address (`10.8.0.1`) | the VPN's addresses only |
-| `custom` | what you choose with `--bind` | what you choose with `--allow` (default: private networks) |
+| `custom` | set with `--bind` | set with `--allow` (default: private networks) |
 
 The daemon checks the source address as soon as it accepts a connection, before TLS and before any login: an address that is not allowed gets
 nothing, so scans and password guessing from elsewhere never reach the login. It logs this at most once every ten seconds (with how many were
@@ -31,7 +30,7 @@ words `private`, `loopback` and `any`:
 
 ```
 sudo waydesk-admin access lan --allow "192.168.1.0/24 192.168.7.5"
-sudo waydesk-admin access custom --bind 0.0.0.0:3389 --allow any      # every address: only behind a firewall you trust
+sudo waydesk-admin access custom --bind 0.0.0.0:3389 --allow any      # every address: only behind a firewall
 ```
 
 A list the daemon cannot read makes it refuse to start, so a typo never opens the port. `access` puts the old settings back if the daemon does not
@@ -49,7 +48,7 @@ sudo waydesk-admin cert local-ca                   # also --san NAME_OR_IP for m
 sudo waydesk-admin cert export-ca                  # prints the path of the authority's certificate: copy it to each client
 ```
 
-This makes an authority of your own (its key stays in `/etc/waydesk/ca`, root only), and a certificate for this server's names and addresses
+This makes an authority (its key stays in `/etc/waydesk/ca`, root only), and a certificate for this server's names and addresses
 signed by it (valid 800 days; macOS refuses longer). Each client imports the authority's certificate **once** (macOS: double-click it, add it to
 the login keychain, set Trust to Always Trust; Windows: `certmgr.msc`, Trusted Root Certification Authorities, Import; Linux: `/usr/local/share/ca-certificates/`
 and `update-ca-certificates`), and from then on checks every connection; there is no fingerprint to compare and no warning. A timer renews the certificate
@@ -71,10 +70,10 @@ sudo waydesk-admin vpn remove laptop                       # stops its access at
 `vpn init` installs `wireguard-tools` if needed, makes the server side on its own interface (`waydesk0`, UDP 51820, `10.8.0.0/24`; change them with `--interface`, `--port`,
 `--subnet`), makes RDP listen on the VPN address only for the VPN's addresses (`access vpn`), starts the daemon after the VPN, and opens the port in `ufw` if it is on.
 Open UDP 51820 in the provider's firewall too. It refuses to replace an existing configuration without `--force` (a backup is kept) and uses an interface name of its own, so a
-`wg0` you made by hand is left alone. A client's configuration routes only this server's VPN address through the tunnel (not the client's other traffic), and has a preshared
+hand-made `wg0` is left alone. A client's configuration routes only this server's VPN address through the tunnel (not the client's other traffic), and has a preshared
 key on top of the keys. The configurations stay in `/etc/waydesk/vpn/peers` (root only), so `vpn show NAME` prints one again. The manual way is in `docs/WIREGUARD.md`.
 
 ## Over the internet
 
-A VPN is still the recommendation: there is no second factor, so a guessed or leaked password is enough. If you open the port to the internet anyway (`--allow any`),
+A VPN is still the recommendation: there is no second factor, so a guessed or leaked password is enough. If the port is opened to the internet anyway (`--allow any`),
 use long random passwords, a certificate from the local authority or Let's Encrypt, and a firewall that rate-limits the port.

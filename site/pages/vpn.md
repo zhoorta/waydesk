@@ -3,15 +3,15 @@ nav: VPN and security
 seo_title: WireGuard VPN for the RDP port, and securing access · Waydesk
 description: What protects the RDP login, and how to put the port behind a WireGuard VPN with three commands: init, add a client, scan the QR code.
 ---
-The RDP port is closed until you open it, and there are two good ways to open it to people who are not on the machine: an SSH tunnel and a WireGuard VPN. This page explains what protects the login, then sets up the VPN.
+The RDP port listens on `127.0.0.1` only. There are two good ways to reach it from another machine: an SSH tunnel and a WireGuard VPN. This page explains what protects the login, then sets up the VPN.
 
 ## Security: what protects the login {bar: notes}
 The login is the account's **password inside TLS**, with no second factor. Everything else is about making sure only the right people get as far as typing it:
 
-- **The port is closed until you open it**, and an address that is not allowed gets nothing, before TLS and before any login. Failed logins are delayed 2 seconds; five in a row refuse every login for a minute. Only members of `waydesk-users` may log in, never root.
+- **The port listens on `127.0.0.1` by default**, and an address that is not allowed gets nothing, before TLS and before any login. Failed logins are delayed 2 seconds; five in a row refuse every login for a minute. Only members of `waydesk-users` may log in, never root.
 - **Keep the port off the open internet.** Use an SSH tunnel for one person, or the VPN below for several. Long random passwords matter, because there is no second factor.
 - **Each part has only the rights it needs.** The network-facing daemon has none and never sees a user's files; a small root helper checks the password through PAM and starts the session; each session runs as the account itself, in its own systemd slice, with its own limits. The [architecture](/docs/architecture/) page draws it.
-- **A certificate you can verify** (`waydesk-admin cert local-ca`) lets the client check every connection instead of trusting the first one.
+- **A verifiable certificate** (`waydesk-admin cert local-ca`) lets the client check every connection instead of trusting the first one.
 - **This is not an audited product.** Five internal review passes are written down with what is still open: [`docs/SECURITY-REVIEW.md`](https://github.com/zhoorta/waydesk/blob/main/docs/SECURITY-REVIEW.md), who is assumed hostile in [`docs/THREAT-MODEL.md`](https://github.com/zhoorta/waydesk/blob/main/docs/THREAT-MODEL.md), and the access model in [`docs/ACCESS.md`](https://github.com/zhoorta/waydesk/blob/main/docs/ACCESS.md).
 
 ## Why a VPN {bar: notes}
@@ -26,7 +26,7 @@ Open UDP 51820 to the internet in this machine's firewall and in the provider's 
 Done.
 Listening on     10.8.0.1:3389  (vpn)
 Who may connect   10.8.0.0/24
-Signed by        CN=your-server
+Signed by        CN=SERVER
 Fingerprint      6F:E1:32:12:8C:64:71:A3:C0:51:C6:BB:80:37:64:B9:C4:E4:C7:1E:C7:C2:B8:93:E3:48:42:A5:C9:A4:FD:10
 
 Connect: bring the VPN up on the client, then point the RDP client at 10.8.0.1. `waydesk-admin vpn add NAME` makes a client.
@@ -34,10 +34,10 @@ Connect: bring the VPN up on the client, then point the RDP client at 10.8.0.1. 
 The VPN is ready. Add a client with:  sudo waydesk-admin vpn add NAME
 ```
 
-**Open UDP 51820** in the provider's firewall too (a cloud security group is outside the machine). Do not open 3389: the RDP port exists only inside the tunnel. `vpn init` refuses to replace an existing configuration without `--force` (it keeps a backup) and uses an interface name of its own, so a `wg0` you made by hand is left alone.
+**Open UDP 51820** in the provider's firewall too (a cloud security group is outside the machine). Do not open 3389: the RDP port exists only inside the tunnel. `vpn init` refuses to replace an existing configuration without `--force` (it keeps a backup) and uses an interface name of its own, so a hand-made `wg0` is left alone.
 
 ## Add a client {bar: terminal}
-One client per device, so that a lost laptop is one entry to remove. Install `qrencode` first if you want the QR code for a phone:
+One client per device, so that a lost laptop is one entry to remove. Install `qrencode` first for the QR code for a phone:
 
 ```console
 $ sudo apt install qrencode
@@ -79,7 +79,7 @@ $ sudo waydesk-admin vpn remove phone        # stops its access at once
 ## What it gives, and what it does not {bar: notes}
 - The RDP port is invisible to anyone without a peer key, and the password login only travels inside the tunnel.
 - **A peer key is not a login.** The account's password is still asked, and the memory and user limits still apply.
-- Everyone with a peer can try passwords for every account, so give peers only to people you would let near the login.
+- Everyone with a peer can try passwords for every account, so give peers only to people trusted near the login.
 - There is still no second factor: long, random passwords matter.
 
 ## VPN or SSH tunnel {bar: table}

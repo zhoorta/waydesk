@@ -38,14 +38,14 @@
 <main class="doc docindex">
 <div class="pagehead">
 <h1>Documentation</h1>
-<p class="lede">Read it in order, or jump to what you need. New to Waydesk: start with <a href="/docs/install/">Install and first login</a>, it takes about ten minutes from a fresh server. Every page is a file in the repository, written from what was run on real servers.</p>
+<p class="lede">Pages can be read in order or one at a time. A new install starts with <a href="/docs/install/">Install and first login</a>, which takes about ten minutes on a fresh server. Every page is a file in the repository, written from what was run on real servers.</p>
 </div>
 <section>
 <h2>Get started</h2>
 <ul class="toc">
 <li><a href="/docs/install/">Install and first login</a><span>Install Waydesk on Debian 13, Ubuntu 26.04 or Arch Linux, make the first administrator, connect, and add more people. About ten minutes from a fresh server.</span></li>
 <li><a href="/docs/connect/">Connect</a><span>The ways an RDP client can reach a Waydesk server: an SSH tunnel, the local network, a WireGuard VPN, and certificates a client can verify.</span></li>
-<li><a href="/docs/clients/">Set up your RDP client</a><span>Step by step for the Windows App on macOS, mstsc on Windows and FreeRDP on Linux: the tunnel, the account, the certificate and the first connection.</span></li>
+<li><a href="/docs/clients/">Set up an RDP client</a><span>Step by step for the Windows App on macOS, mstsc on Windows and FreeRDP on Linux: the tunnel, the account, the certificate and the first connection.</span></li>
 <li><a href="/docs/vpn/">VPN and securing access</a><span>What protects the RDP login, and how to put the port behind a WireGuard VPN with three commands: init, add a client, scan the QR code.</span></li>
 </ul>
 </section>
@@ -53,9 +53,10 @@
 <h2>Run it</h2>
 <ul class="toc">
 <li><a href="/docs/cli/">The command line</a><span>Every waydesk-admin command with its real output: accounts, sessions, limits, status and --watch, access, certificates and the VPN.</span></li>
+<li><a href="/docs/portal/">The portal: desktops in a browser</a><span>Install and use the optional portal: first sign-in, adding servers, users, two-step sign-in, reaching it from other machines and behind a reverse proxy.</span></li>
 <li><a href="/docs/recipes/">Recipes</a><span>Six set-ups made from the documented commands: a shared server for a small team, a server behind a WireGuard VPN, a long or lossy link, a GPU server that also runs a shared model, hosted AI with one key per account, and workstations that use that model.</span></li>
 <li><a href="/docs/gpu/">Using a GPU</a><span>What Waydesk does with a GPU (Intel, AMD, NVIDIA), how to set it up, how to see what each session runs, what happens when it fails, and what was measured.</span></li>
-<li><a href="/docs/desktops/">Other desktops</a><span>Waydesk gives every account the Waydesk desktop by default. An account can have COSMIC, KDE Plasma or Hyprland instead (all three tested on Arch): how each one runs, what you install, what was tested and what was not.</span></li>
+<li><a href="/docs/desktops/">Other desktops</a><span>Waydesk gives every account the Waydesk desktop by default. An account can have COSMIC, KDE Plasma or Hyprland instead (all three tested on Arch): how each one runs, what to install, what was tested and what was not.</span></li>
 <li><a href="/docs/reference/">Files and settings</a><span>The tested systems, clients, files, ports and settings of Waydesk, in tables.</span></li>
 </ul>
 </section>
@@ -72,7 +73,7 @@
 <h2>Help</h2>
 <ul class="toc">
 <li><a href="/docs/help/">When something is wrong</a><span>What to check when a client cannot connect, a session is refused, the image is slow or wrong, or the GPU is not used. Where the logs are.</span></li>
-<li><a href="/docs/faq/">Questions and answers</a><span>Short answers: whether a GPU is needed, why Sway, what happens when you disconnect, which apps run, how many users fit, and who makes Waydesk.</span></li>
+<li><a href="/docs/faq/">Questions and answers</a><span>Short answers: whether a GPU is needed, why Sway, what happens on disconnect, which apps run, how many users fit, and who makes Waydesk.</span></li>
 </ul>
 </section>
 </main>

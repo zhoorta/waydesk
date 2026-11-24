@@ -28,7 +28,7 @@ Each account's sessions need a sound server: `systemctl --user enable --now pipe
 
 ## The session's sway configuration
 
-The package installs `/etc/xdg/waydesk/sway.conf` (a config file: your edits survive upgrades). Sessions use it instead of Fedora's own `/etc/sway/config`, which would
+The package installs `/etc/xdg/waydesk/sway.conf` (a config file: local edits survive upgrades). Sessions use it instead of Fedora's own `/etc/sway/config`, which would
 start a status bar with a shell loop in every account's session and tile the windows. This one is lean and Windows-like: windows float with title bars,
 Alt+Tab switches, Alt+F4 closes, Super+Return opens `foot`, Super+D runs `wmenu-run`, Print takes a screenshot with `grim`, there is no bar, and
 `/etc/sway/config.d/*` (Fedora's systemd integration) is included. An account replaces it with its own `~/.config/waydesk/config`

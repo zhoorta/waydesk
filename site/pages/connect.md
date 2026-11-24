@@ -1,9 +1,9 @@
 title: Connect
 nav: Connect
-seo_title: How to connect to your Linux RDP desktop: SSH tunnel, LAN, VPN · Waydesk
+seo_title: How to connect to a Linux RDP desktop: SSH tunnel, LAN, VPN · Waydesk
 description: The ways an RDP client can reach a Waydesk server: an SSH tunnel, the local network, a WireGuard VPN, and certificates a client can verify.
 ---
-The RDP login is a TLS login with the account's password, and there is no second factor. So the port is **closed to the network until you open it**. Four things are set, each with one command: where it listens, which addresses may connect, what certificate clients check, and, if you want one, a VPN.
+The RDP login is a TLS login with the account's password, and there is no second factor. So the port listens on `127.0.0.1` only. Four things are set, each with one command: where it listens, which addresses may connect, what certificate clients check, and, optionally, a VPN.
 
 ## How a client reaches the port {bar: diagram}
 ```html
@@ -48,7 +48,7 @@ The RDP login is a TLS login with the account's password, and there is no second
 | `local` (the default) | `127.0.0.1:3389` | this machine; reach it with an SSH tunnel |
 | `lan` | this server's address on the local network | that network only (for example `192.168.1.0/24`) |
 | `vpn` | the VPN address (`10.8.0.1`) | the VPN's addresses only |
-| `custom` | what you choose with `--bind` | what you choose with `--allow` (default: private networks) |
+| `custom` | set with `--bind` | set with `--allow` (default: private networks) |
 
 The daemon checks the source address as soon as it accepts a connection, before TLS and before any login: an address that is not allowed gets nothing, so scans and password guessing from elsewhere never reach the login. Failed logins are delayed 2 seconds, and after five in a row every login is refused for a minute. Only members of `waydesk-users` may log in, and never root.
 
@@ -56,10 +56,10 @@ The daemon checks the source address as soon as it accepts a connection, before 
 $ waydesk-admin access show
 Listening on     127.0.0.1:3389  (local)
 Who may connect   this machine only
-Signed by        CN=your-server
+Signed by        CN=SERVER
 Fingerprint      6F:E1:32:12:8C:64:71:A3:C0:51:C6:BB:80:37:64:B9:C4:E4:C7:1E:C7:C2:B8:93:E3:48:42:A5:C9:A4:FD:10
 
-Connect: from your computer run  ssh -N -L 3389:127.0.0.1:3389 ACCOUNT@THIS-SERVER  and point the RDP client at localhost.
+Connect: from the client computer run  ssh -N -L 3389:127.0.0.1:3389 ACCOUNT@THIS-SERVER  and point the RDP client at localhost.
 $ sudo waydesk-admin access lan                   # this server's local network
 $ sudo waydesk-admin access lan --allow "192.168.1.0/24 192.168.7.5"
 $ sudo waydesk-admin access vpn                   # the WireGuard VPN made by `vpn init`
@@ -69,10 +69,10 @@ $ sudo waydesk-admin access local                 # back to this machine only
 A list the daemon cannot read makes it refuse to start, so a typo never opens the port, and `access` puts the old settings back if the daemon does not start with the new ones.
 
 ## An SSH tunnel {bar: terminal}
-One user, no setup on the server. Leave the port on `127.0.0.1` and, from your computer:
+One user, no setup on the server. Leave the port on `127.0.0.1` and, from the client computer:
 
 ```console
-$ ssh -N -L 3389:127.0.0.1:3389 you@your-server
+$ ssh -N -L 3389:127.0.0.1:3389 USER@SERVER
 ```
 
 Connect the RDP client to `localhost`. The tunnel lives only as long as that command runs; `ServerAliveInterval 30` in `~/.ssh/config`, or `autossh`, keeps it up across short drops.
@@ -84,12 +84,12 @@ Connect the RDP client to `localhost`. The tunnel lives only as long as that com
 $ sudo waydesk-admin access lan
 ```
 
-opens the port to this server's network only (other addresses are closed before TLS). `--allow` narrows or widens it. Do not use `--allow any` without a firewall you trust.
+opens the port to this server's network only (other addresses are closed before TLS). `--allow` narrows or widens it. Do not use `--allow any` without a firewall.
 
 ## A VPN {bar: notes}
 The recommendation for several people or devices, and for anything over the internet: a key per device, nothing exposed but one UDP port. [The VPN page](/docs/vpn/) walks through it.
 
-## A certificate you can verify {bar: terminal}
+## A verifiable certificate {bar: terminal}
 At install the server makes a self-signed certificate, and the client has to compare its fingerprint on the first connection (`waydesk-admin cert status` prints it). A local certificate authority removes the comparison:
 
 ```console
@@ -100,7 +100,7 @@ $ sudo waydesk-admin cert export-ca         # prints the path of the authority's
 Copy that file to each client and import it **once** (macOS: add it to the login keychain and set Trust to Always Trust; Windows: `certmgr.msc`, Trusted Root Certification Authorities; Linux: `/usr/local/share/ca-certificates/` and `update-ca-certificates`). From then on every connection is checked and nothing is compared by hand. A timer renews the certificate before it ends. Where the server has a public name, `cert install --cert FULLCHAIN.pem --key KEY.pem` puts a Let's Encrypt certificate in place instead.
 
 ## Which client {bar: table}
-Step by step for each of them: [Set up your RDP client](/docs/clients/).
+Step by step for each of them: [Set up an RDP client](/docs/clients/).
 
 | client | tried | notes |
 |---|---|---|

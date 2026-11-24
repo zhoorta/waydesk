@@ -8,8 +8,8 @@ the internal review passes are in [docs/SECURITY-REVIEW.md](docs/SECURITY-REVIEW
 Please do not open a public issue. Use GitHub's private report: **Security → Report a vulnerability** on
 <https://github.com/zhoorta/waydesk/security/advisories/new>.
 
-Include the version (`waydesk-server --version`), the distribution, and the steps to reproduce. You will get an answer within a few days; this is a small project, so
-fixes are made as quickly as one person can, and credit is given if you want it.
+Include the version (`waydesk-server --version`), the distribution, and the steps to reproduce. An answer comes within a few days; this is a small project, so
+fixes are made as quickly as one person can, and credit is given on request.
 
 ## Scope
 

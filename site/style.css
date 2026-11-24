@@ -345,7 +345,7 @@ blockquote { margin: var(--s3) 0; padding: var(--s2) var(--s3); border-left: 3px
 .demo { margin: var(--s3) 0 var(--s5); max-width: 1000px; }
 .demo video { display: block; width: 100%; height: auto; border-radius: var(--r-win); box-shadow: 16px 24px 48px rgba(0, 0, 0, .45); background: #1d1a2e; }
 .demo figcaption { margin-top: var(--s2); }
-#who .grid { grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); }
+#who .grid, #portal + .grid { grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); }
 
 /* no script on the site (its policy forbids it): on a narrow screen the sidebar is a short wrapped list */
 @media (max-width: 860px) {
@@ -377,16 +377,16 @@ body.sans code, body.sans pre, body.sans pre * { font-family: var(--mono); font-
 .gtext .body p { margin-top: var(--s2); }
 body.sans .gtext pre, body.sans .gtext pre * { font-size: 11px; }
 
-/* On the home page the cards of Who it is for, Built to stay light and fast, the shared model and the applications are boxes, like the desktop tiles
+/* On the home page the cards of Who it is for, the portal, the memory and speed cards, the shared model and the applications are boxes, like the desktop tiles
    (the documentation keeps its flat cards). */
-#who .win.card, #fast + .grid .win.card, #ai + .grid .win.card, #apps + .grid .win.card {
+#who .win.card, #fast + .grid .win.card, #ai + .grid .win.card, #apps + .grid .win.card, #portal + .grid .win.card {
   background: var(--panel);
   backdrop-filter: blur(10px);
   border: 1px solid rgba(255, 255, 255, .11);
   border-radius: var(--r-win);
   box-shadow: var(--shadow);
 }
-#who .win.card > .body, #fast + .grid .win.card > .body, #ai + .grid .win.card > .body, #apps + .grid .win.card > .body { padding: var(--s4); }
+#who .win.card > .body, #fast + .grid .win.card > .body, #ai + .grid .win.card > .body, #apps + .grid .win.card > .body, #portal + .grid .win.card > .body { padding: var(--s4); }
 
 /* The architecture page: the three components are panels, with what they may do in the title bar (the documentation's other cards stay flat). */
 .doc .grid.panels .win.card { background: var(--panel); backdrop-filter: blur(10px); border: 1px solid rgba(255, 255, 255, .11); border-radius: var(--r-win); box-shadow: var(--shadow); padding-left: 0; }

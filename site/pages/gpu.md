@@ -42,7 +42,7 @@ $ sudo update-initramfs -u && sudo reboot
 $ nvidia-smi                                    # the card and the driver version
 ```
 
-That adds a third-party apt repository and its key to the machine; read what you are trusting first. NVENC itself comes with the driver (`libnvidia-encode`); Waydesk loads it at run time, only when a session needs an encoder, so a machine without NVIDIA's driver is not affected.
+That adds a third-party apt repository and its key to the machine; read what is being trusted first. NVENC itself comes with the driver (`libnvidia-encode`); Waydesk loads it at run time, only when a session needs an encoder, so a machine without NVIDIA's driver is not affected.
 
 ## See what runs {bar: terminal}
 `waydesk-admin status` lists the GPUs and says, for every session, whether it renders on a GPU, which encoder it runs and which desktop it is. Four sessions on an Intel machine, one on each desktop, as the command printed them: all drawn on the card (`renderD128`) and encoded by VAAPI. The card has the role `both` (`WAYDESK_GPU_ROLES=renderD128=both`), `WAYDESK_AI_ENDPOINT=127.0.0.1:11434` names a small model (`qwen2.5:0.5b`) in Ollama on the CPU, so the `AI` line and column show (no account had a request open). The Intel card cannot hold a model: the line says so. The `System` line says Omarchy because Omarchy's package replaces `/etc/os-release`. Not edited:
@@ -104,7 +104,7 @@ All of these go in `/etc/default/waydesk` and take effect for sessions that star
 | setting | meaning |
 |---|---|
 | `WAYDESK_GPU=off` | software rendering, as without a GPU. Another value: the render node to use, for example `/dev/dri/renderD129` |
-| `WAYDESK_GPU_ROLES=renderD128=render,renderD129=inference` | what each card is for, by render node: `render` (sessions only), `inference` (a local model only: `auto` never picks it and no other card's session encodes on it; an account pinned there by hand still can) or `both`. Cards not listed are `render`. Set it with `sudo waydesk-admin gpu roles renderD129=inference` (only the named cards change; `gpu roles` alone shows the cards and their roles; `gpu roles reset` removes the setting). `waydesk-admin status` then prints the `CUDA_VISIBLE_DEVICES` to give the model service. A role starts nothing and moves nothing: you point the model service at its card yourself, and `inference` on an Intel or AMD card only keeps sessions off it |
+| `WAYDESK_GPU_ROLES=renderD128=render,renderD129=inference` | what each card is for, by render node: `render` (sessions only), `inference` (a local model only: `auto` never picks it and no other card's session encodes on it; an account pinned there by hand still can) or `both`. Cards not listed are `render`. Set it with `sudo waydesk-admin gpu roles renderD129=inference` (only the named cards change; `gpu roles` alone shows the cards and their roles; `gpu roles reset` removes the setting). `waydesk-admin status` then prints the `CUDA_VISIBLE_DEVICES` to give the model service. A role starts nothing and moves nothing: the model service has to be pointed at its card by hand, and `inference` on an Intel or AMD card only keeps sessions off it |
 | `WAYDESK_ENCODER=software` | keep the GPU for drawing but encode on the CPU. `auto` (the default: VAAPI, then NVENC), `vaapi` and `nvenc` are the others |
 | `WAYDESK_NVENC_DEVICE=1` | the NVIDIA card (CUDA number) that encodes; by default the card the session draws on, else the first |
 | `WAYDESK_DMABUF=0` | go back to copying the image through shared memory instead of the zero-copy capture |

@@ -18,7 +18,7 @@ description: Every waydesk-admin command with its real output: accounts, session
 | `cert [status \| local-ca \| reissue \| export-ca \| install \| self-signed]` | the certificate clients check |
 | `vpn [status \| init \| add \| show \| list \| remove]` | a WireGuard VPN for the port (see [the VPN page](/docs/vpn/)) |
 | `waydesk-setup-admin` | the first administrator, and how clients connect |
-| `waydesk-setup` | as your own account: choose browsers, office, developer and creative applications |
+| `waydesk-setup` | as the account itself: choose browsers, office, developer and creative applications |
 
 ## Accounts {bar: terminal}
 ```console
@@ -91,7 +91,7 @@ $ sudo waydesk-admin sessions end alice
 ended the session of alice
 ```
 
-A session outlives the RDP connection: the windows are where you left them when you reconnect. Ending it closes everything the account had open.
+A session outlives the RDP connection: the windows are as they were when the client reconnects. Ending it closes everything the account had open.
 
 ## Limits {bar: terminal}
 Every account lives in its own cgroup slice, with ceilings of 35 % and 50 % of the memory, 50 % of it in swap, and 8192 tasks. To change them for one account:
@@ -133,7 +133,7 @@ carol              cosmic    running     920 MB       -     3%  31.3 GB renderD1
 dave               hyprland  running     866 MB       -     6%  31.3 GB renderD128 vaapi@renderD128             -    quickshell 567 MB, Hyprland 363 MB, Xwayland 253 MB
 ```
 
-`RENDER` says whether the session's desktop is drawn on a GPU (the card's node) or on the CPU, and `ENCODER` which video encoder it runs (`vaapi`, `nvenc` or `openh264`), with the quantiser and the frame rate once frames flow: `vaapi@renderD128 q18 2fps`. A GPU encoder that cannot start falls back to OpenH264 on the CPU, and this is where you see it. `DESKTOP` is the desktop each session runs: `sway`, `plasma`, `cosmic` or `hyprland`. `AI` counts the connections each account has open to a local model, and shows only when `WAYDESK_AI_ENDPOINT` names one ([the GPU page](/docs/gpu/)). `PROGRAMS` lists the biggest programs of the session. On a server without a GPU the `GPU` line reads `none (no render node: sessions render and encode on the CPU)`, `RENDER` says `cpu` and `ENCODER` says `openh264`.
+`RENDER` says whether the session's desktop is drawn on a GPU (the card's node) or on the CPU, and `ENCODER` which video encoder it runs (`vaapi`, `nvenc` or `openh264`), with the quantiser and the frame rate once frames flow: `vaapi@renderD128 q18 2fps`. A GPU encoder that cannot start falls back to OpenH264 on the CPU, and it shows here. `DESKTOP` is the desktop each session runs: `sway`, `plasma`, `cosmic` or `hyprland`. `AI` counts the connections each account has open to a local model, and shows only when `WAYDESK_AI_ENDPOINT` names one ([the GPU page](/docs/gpu/)). `PROGRAMS` lists the biggest programs of the session. On a server without a GPU the `GPU` line reads `none (no render node: sessions render and encode on the CPU)`, `RENDER` says `cpu` and `ENCODER` says `openh264`.
 
 Two more forms, for watching a machine under load and for scripts:
 
@@ -150,10 +150,10 @@ A session's renderer, encoder and frame rate are readable by that account and by
 $ waydesk-admin access show
 Listening on     127.0.0.1:3389  (local)
 Who may connect   this machine only
-Signed by        CN=your-server
+Signed by        CN=SERVER
 Fingerprint      6F:E1:32:12:8C:64:71:A3:C0:51:C6:BB:80:37:64:B9:C4:E4:C7:1E:C7:C2:B8:93:E3:48:42:A5:C9:A4:FD:10
 $ waydesk-admin cert status
-Subject          CN=your-server
+Subject          CN=SERVER
 Signed by        itself (self-signed): clients have to compare the fingerprint
 Valid until      Oct 25 19:19:21 2036 GMT
 Names            

@@ -4,6 +4,8 @@ What changed, newest first. The numbered releases are the ones in the apt reposi
 
 ## Unreleased
 
+**Site and documentation.** waydesk.dev has a page for the portal (install, first sign-in, users, adding a server, reaching it from other machines, a reverse proxy, two-step sign-in) and a section for it on the home page, a Fedora 44 install block, and the status of 0.6.0 and of the RPM repository on the limits page. The wording of the site, `README.md` and the user-facing documents is now impersonal ("you", "your" and filler phrases removed); the port is described as listening on `127.0.0.1` only instead of "closed until opened".
+
 ## 2026-11-23 · 0.6.0
 
 **A portal for several servers.** `waydesk-web` now has its own people (`waydesk-web people add NAME --admin`), a Servers page that makes join codes, a small agent (`waydesk-agent enrol URL CODE`) that each server runs to dial out to the portal, administrator pages per server (Overview, Accounts, Sessions with an End button, Audit, and a Fleet view in the Servers list), accounts made on a server when a person is assigned to it, app passwords for RDP clients, desktops opened from the portal through the agent, and thumbnails of each desktop with their age. See `web/README.md` and `docs/PORTAL-DESIGN.md` (Stage 3). The portal is a package of its own (`waydesk-portal`; `waydesk-server-portal` on Fedora), optional and not started by the install; the agent and its admin socket are in the server packages. The server package no longer carries the portal's unit.

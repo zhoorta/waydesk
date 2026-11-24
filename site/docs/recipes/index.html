@@ -48,6 +48,7 @@
 <h2>Run it</h2>
 <ul>
 <li><a href="/docs/cli/">Command line</a></li>
+<li><a href="/docs/portal/">Portal and browser access</a></li>
 <li><a href="/docs/recipes/" aria-current="page">Recipes</a><ul><li><a href="#a-shared-server-for-a-small-team">A shared server for a small team</a></li><li><a href="#a-server-behind-a-vpn">A server behind a VPN</a></li><li><a href="#a-long-or-lossy-link">A long or lossy link</a></li><li><a href="#a-gpu-server-that-also-runs-a-shared-model">A GPU server that also runs a shared model</a></li><li><a href="#hosted-ai-for-every-account-one-key-each">Hosted AI for every account, one key each</a></li><li><a href="#workstations-that-use-the-server-s-model">Workstations that use the server's model</a></li></ul></li>
 <li><a href="/docs/gpu/">GPU</a></li>
 <li><a href="/docs/desktops/">Desktops</a></li>
@@ -112,7 +113,7 @@
 <section id="hosted-ai-for-every-account-one-key-each">
 <h2>Hosted AI for every account, one key each</h2>
 <p>Claude, GPT and the other hosted models can be used by every account of the server without anyone sharing a login. The organisation's key stays in a gateway on the server, each account gets a key of its own from the gateway, and usage, budgets and revocation are per account. Waydesk does not install or run the gateway: this is the pattern the vendors document, checked against their pages on 2026-11-01 and <strong>not yet tried on a Waydesk server</strong>.</p>
-<p>What not to do: copy one person's login (<code>~/.claude</code>, a browser session) into the other accounts, or put one API key in a file every account can read. A subscription login belongs to one person (read the terms of your plan), and a shared file means nobody can be cut off or told apart. ChatGPT's apps and GitHub Copilot are licensed per seat: each person needs their own, and no gateway changes that.</p>
+<p>What not to do: copy one person's login (<code>~/.claude</code>, a browser session) into the other accounts, or put one API key in a file every account can read. A subscription login belongs to one person (read the terms of the plan), and a shared file means nobody can be cut off or told apart. ChatGPT's apps and GitHub Copilot are licensed per seat: each person needs their own, and no gateway changes that.</p>
 <p>The gateway is a program on <code>127.0.0.1</code> that holds the real key and hands out virtual ones. <a href="https://docs.litellm.ai/docs/proxy/virtual_keys">LiteLLM</a> is an example (virtual keys need a Postgres database); Anthropic also documents <a href="https://code.claude.com/docs/en/llm-gateway">gateways for Claude Code</a> and a self-hosted one with single sign-on, and says it does not endorse or audit third-party gateway products. With LiteLLM:</p>
 <pre><code><span class="p">$</span> sudo litellm --config /etc/litellm/config.yaml    <span class="c"># the models, and DATABASE_URL and LITELLM_MASTER_KEY from root-only files</span>
 <span class="p">$</span> curl -s http://127.0.0.1:4000/key/generate -H "Authorization: Bearer $LITELLM_MASTER_KEY" -H 'Content-Type: application/json' \
@@ -128,7 +129,7 @@ exec tr -d '\n' &lt; "/etc/waydesk/ai-keys/$(id -un)"</code></pre>
 <p>While a gateway key is active, Claude Code sends it instead of any claude.ai login, and the usage is billed per token to whoever owns the key the gateway forwards (the organisation's account), not to a subscription. Inside the session, <code>/status</code> shows the base URL and the credential source. Remote Control and voice dictation need a claude.ai login and are unavailable with a gateway key. Version 2.1.285 or later can refuse any other destination with <code>allowedProviders: ["customEndpoint"]</code> in the same file.</p>
 <p><strong>Codex</strong> takes a custom provider in each account's <code>~/.codex/config.toml</code> (not in a project's file, which it ignores): <code>model_provider = "gateway"</code> and a <code>[model_providers.gateway]</code> table with <code>base_url</code> (the gateway's OpenAI-compatible address) and <code>env_key = "OPENAI_API_KEY"</code>, with that variable set from the account's key file. Other tools that accept an OpenAI-compatible base URL and a key are set up the same way.</p>
 <p>To cut an account off, block its key (<code>/key/block</code> in LiteLLM) and the next request fails at once, whatever the tool; the real key never reached the account. The <code>AI</code> column of <code>waydesk-admin status</code> shows which accounts have a connection open to the gateway; the tokens and the cost per key are the gateway's own report.</p>
-<p>Things to know. The gateway on <code>localhost</code> is reachable by every account, which is why each one needs its own key; keep the master key and the real provider key in files only root can read. A budget is only enforced when you set one (LiteLLM's is empty by default). The gateway is one more service to keep running and updated, and a gateway that does not forward what a new Claude Code release sends breaks the matching feature. And the answer to "can all my users share one subscription?" depends on your plan's terms, which are the vendor's, not ours.</p>
+<p>Things to know. The gateway on <code>localhost</code> is reachable by every account, which is why each one needs its own key; keep the master key and the real provider key in files only root can read. A budget is only enforced when one is set (LiteLLM's is empty by default). The gateway is one more service to keep running and updated, and a gateway that does not forward what a new Claude Code release sends breaks the matching feature. And the answer to "can all the users share one subscription?" depends on the plan's terms, which are the vendor's.</p>
 </section>
 <section id="workstations-that-use-the-server-s-model">
 <h2>Workstations that use the server's model</h2>
@@ -137,7 +138,7 @@ exec tr -d '\n' &lt; "/etc/waydesk/ai-keys/$(id -un)"</code></pre>
 <span class="p">$</span> sudo systemctl restart ollama</code></pre>
 <p>The port is reachable only through the <a href="/docs/vpn/">VPN</a>, as the RDP port is. The model service has no accounts, so for several people, separate keys or budgets, put a gateway such as LiteLLM or Open WebUI in front of it; that is their documentation, not Waydesk's.</p>
 </section>
-<nav class="prevnext" aria-label="Previous and next page"><a class="prev" href="/docs/cli/"><span>previous</span>The command line</a><a class="next" href="/docs/gpu/"><span>next</span>Using a GPU</a></nav>
+<nav class="prevnext" aria-label="Previous and next page"><a class="prev" href="/docs/portal/"><span>previous</span>The portal: desktops in a browser</a><a class="next" href="/docs/gpu/"><span>next</span>Using a GPU</a></nav>
 <p class="method">This page is <a href="https://github.com/zhoorta/waydesk/blob/main/site/pages/recipes.md">a file in the repository</a>: corrections are welcome.</p>
 </main>
 </div>

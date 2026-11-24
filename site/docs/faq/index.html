@@ -4,14 +4,14 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Waydesk FAQ: GPU, Sway, sessions, apps, capacity, security</title>
-<meta name="description" content="Short answers: whether a GPU is needed, why Sway, what happens when you disconnect, which apps run, how many users fit, and who makes Waydesk.">
+<meta name="description" content="Short answers: whether a GPU is needed, why Sway, what happens on disconnect, which apps run, how many users fit, and who makes Waydesk.">
 <link rel="canonical" href="https://waydesk.dev/docs/faq/">
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <link rel="icon" href="/favicon-32.png" sizes="32x32" type="image/png">
 <link rel="apple-touch-icon" href="/apple-touch-icon.png">
 <meta name="theme-color" content="#06121c">
 <meta property="og:title" content="Waydesk FAQ: GPU, Sway, sessions, apps, capacity, security">
-<meta property="og:description" content="Short answers: whether a GPU is needed, why Sway, what happens when you disconnect, which apps run, how many users fit, and who makes Waydesk.">
+<meta property="og:description" content="Short answers: whether a GPU is needed, why Sway, what happens on disconnect, which apps run, how many users fit, and who makes Waydesk.">
 <meta property="og:url" content="https://waydesk.dev/docs/faq/">
 <meta property="og:type" content="article">
 <meta property="og:site_name" content="Waydesk">
@@ -20,7 +20,7 @@
 <meta property="og:image:height" content="630">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="Waydesk FAQ: GPU, Sway, sessions, apps, capacity, security">
-<meta name="twitter:description" content="Short answers: whether a GPU is needed, why Sway, what happens when you disconnect, which apps run, how many users fit, and who makes Waydesk.">
+<meta name="twitter:description" content="Short answers: whether a GPU is needed, why Sway, what happens on disconnect, which apps run, how many users fit, and who makes Waydesk.">
 <meta name="twitter:image" content="https://waydesk.dev/og.jpg">
 <script type="application/ld+json">{"@context": "https://schema.org", "@type": "BreadcrumbList", "itemListElement": [{"@type": "ListItem", "position": 1, "name": "Waydesk", "item": "https://waydesk.dev/"}, {"@type": "ListItem", "position": 2, "name": "Documentation", "item": "https://waydesk.dev/docs/"}, {"@type": "ListItem", "position": 3, "name": "Questions and answers", "item": "https://waydesk.dev/docs/faq/"}]}</script>
 <link rel="stylesheet" href="/style.css">
@@ -48,6 +48,7 @@
 <h2>Run it</h2>
 <ul>
 <li><a href="/docs/cli/">Command line</a></li>
+<li><a href="/docs/portal/">Portal and browser access</a></li>
 <li><a href="/docs/recipes/">Recipes</a></li>
 <li><a href="/docs/gpu/">GPU</a></li>
 <li><a href="/docs/desktops/">Desktops</a></li>
@@ -63,7 +64,7 @@
 <h2>Help</h2>
 <ul>
 <li><a href="/docs/help/">Troubleshooting</a></li>
-<li><a href="/docs/faq/" aria-current="page">FAQ</a><ul><li><a href="#do-i-need-a-gpu">Do I need a GPU?</a></li><li><a href="#what-happens-when-i-close-the-rdp-window">What happens when I close the RDP window?</a></li><li><a href="#why-sway">Why Sway?</a></li><li><a href="#which-applications-run">Which applications run?</a></li><li><a href="#how-many-users-fit-on-one-server">How many users fit on one server?</a></li><li><a href="#is-it-safe-to-put-on-the-internet">Is it safe to put on the internet?</a></li><li><a href="#which-rdp-clients-work">Which RDP clients work?</a></li><li><a href="#what-does-it-cost-and-who-makes-it">What does it cost, and who makes it?</a></li><li><a href="#what-licence-is-it-under-and-what-does-it-mean-for-me">What licence is it under, and what does it mean for me?</a></li><li><a href="#can-i-see-how-it-is-built">Can I see how it is built?</a></li></ul></li>
+<li><a href="/docs/faq/" aria-current="page">FAQ</a><ul><li><a href="#do-i-need-a-gpu">Do I need a GPU?</a></li><li><a href="#what-happens-when-i-close-the-rdp-window">What happens when I close the RDP window?</a></li><li><a href="#why-sway">Why Sway?</a></li><li><a href="#which-applications-run">Which applications run?</a></li><li><a href="#how-many-users-fit-on-one-server">How many users fit on one server?</a></li><li><a href="#is-it-safe-to-put-on-the-internet">Is it safe to put on the internet?</a></li><li><a href="#can-i-use-it-from-a-browser">Can I use it from a browser?</a></li><li><a href="#which-rdp-clients-work">Which RDP clients work?</a></li><li><a href="#what-does-it-cost-and-who-makes-it">What does it cost, and who makes it?</a></li><li><a href="#what-licence-is-it-under-and-what-does-it-mean-for-me">What licence is it under, and what does it mean for me?</a></li><li><a href="#can-i-see-how-it-is-built">Can I see how it is built?</a></li></ul></li>
 </ul>
 </nav>
 </div>
@@ -74,11 +75,11 @@
 </div>
 <section id="do-i-need-a-gpu">
 <h2>Do I need a GPU?</h2>
-<p>No. Without one, everything is drawn and encoded on the CPU. With one (Intel, NVIDIA, AMD should work) the desktop is drawn on it and the video is encoded by the chip, which leaves the CPU to your programs. <a href="/docs/gpu/">The GPU page</a> has the numbers.</p>
+<p>No. Without one, everything is drawn and encoded on the CPU. With one (Intel, NVIDIA, AMD should work) the desktop is drawn on it and the video is encoded by the chip, which leaves the CPU to the programs. <a href="/docs/gpu/">The GPU page</a> has the numbers.</p>
 </section>
 <section id="what-happens-when-i-close-the-rdp-window">
 <h2>What happens when I close the RDP window?</h2>
-<p>Nothing: the session is a systemd unit of the account and keeps running, so reconnecting gives you the same windows. A second login from the same account takes the running session over.</p>
+<p>Nothing: the session is a systemd unit of the account and keeps running, so reconnecting shows the same windows. A second login from the same account takes the running session over.</p>
 </section>
 <section id="why-sway">
 <h2>Why Sway?</h2>
@@ -90,11 +91,15 @@
 </section>
 <section id="how-many-users-fit-on-one-server">
 <h2>How many users fit on one server?</h2>
-<p>On an 8 GB server 7 to 8 users fit with Chromium, Calc and VS Code open and left idle; people who are working use more, about 1.6 GB each on the 23 GB server we measured with active users. Memory is the limit, and a new session is refused rather than slowing everyone down. See <a href="/docs/limits/">Limits and status</a>.</p>
+<p>On an 8 GB server 7 to 8 users fit with Chromium, Calc and VS Code open and left idle; people who are working use more, about 1.6 GB each on the 23 GB server measured with active users. Memory is the limit, and a new session is refused rather than slowing everyone down. See <a href="/docs/limits/">Limits and status</a>.</p>
 </section>
 <section id="is-it-safe-to-put-on-the-internet">
 <h2>Is it safe to put on the internet?</h2>
 <p>Not with the port published: the login is a password with no second factor. Use an SSH tunnel or a VPN, which are both a few commands. <a href="/docs/vpn/">VPN and securing access</a> says what protects the login.</p>
+</section>
+<section id="can-i-use-it-from-a-browser">
+<h2>Can I use it from a browser?</h2>
+<p>Yes, with the optional portal: people sign in to a page and open their desktop there, with no client to install. An RDP client is still better on a slow or lossy link. <a href="/docs/portal/">The portal</a>.</p>
 </section>
 <section id="which-rdp-clients-work">
 <h2>Which RDP clients work?</h2>
@@ -106,7 +111,7 @@
 </section>
 <section id="what-licence-is-it-under-and-what-does-it-mean-for-me">
 <h2>What licence is it under, and what does it mean for me?</h2>
-<p>Waydesk is under the GNU Affero General Public License, version 3 or later. You may use it for any purpose, free of charge, including at a company and for paid work of your own, and you may charge for installing, hosting or supporting it. What the licence asks: if you give others a modified version, or let them use a modified version over a network, they must be able to get its source under the same licence. This is a summary, not legal advice: the <a href="https://github.com/zhoorta/waydesk/blob/main/LICENSE">licence text</a> decides. If the AGPL does not fit your case, write to <a href="https://stackcare.pt/en">StackCare</a>.</p>
+<p>Waydesk is under the GNU Affero General Public License, version 3 or later. It may be used for any purpose, free of charge, including at a company and for paid work, and installing, hosting or supporting it may be charged for. What the licence asks: whoever gives others a modified version, or lets them use one over a network, must make it possible for them to get its source under the same licence. This is a summary, not legal advice: the <a href="https://github.com/zhoorta/waydesk/blob/main/LICENSE">licence text</a> decides. If the AGPL does not fit a case, write to <a href="https://stackcare.pt/en">StackCare</a>.</p>
 </section>
 <section id="can-i-see-how-it-is-built">
 <h2>Can I see how it is built?</h2>

@@ -6,10 +6,10 @@ description: What Waydesk is not yet: early software, the clients and GPUs it wa
 Waydesk is early, free software, written and tested by one person on real servers. This page says what was tried, what was not, and what to expect. Nothing here is hidden in a footnote elsewhere.
 
 ## Status {bar: notes}
-- **Early software.** Version 0.5.0. Expect rough edges; [open an issue](https://github.com/zhoorta/waydesk/issues) when you find one.
-- **Systems:** Debian 13 and Ubuntu 26.04, on amd64 and arm64 (the table below). Clean installs of the 0.5.0 packages from the repository passed on both systems and both architectures (the packages were installed in clean containers on 2026-11-01; the sessions were checked on the earlier versions). Arch Linux has a package and a pacman repository ([Other desktops](/docs/desktops/#arch-linux)). Hyprland, COSMIC and KDE Plasma sessions are tested on Arch with an Intel GPU (Plasma also on Debian 13), none of them under load: [Other desktops](/docs/desktops/).
+- **Early software.** Version 0.6.0. Expect rough edges; [open an issue](https://github.com/zhoorta/waydesk/issues) for any that turns up.
+- **Systems:** Debian 13 and Ubuntu 26.04, on amd64 and arm64 (the table below). Clean installs of the 0.5.0 packages from the repository passed on both systems and both architectures (the packages were installed in clean containers on 2026-11-01; the sessions were checked on the earlier versions). 0.6.0 is published for the same systems; its portal was tried on Debian 13 and on Arch. Arch Linux has a package and a pacman repository ([Other desktops](/docs/desktops/#arch-linux)). Hyprland, COSMIC and KDE Plasma sessions are tested on Arch with an Intel GPU (Plasma also on Debian 13), none of them under load: [Other desktops](/docs/desktops/).
 - **No second factor.** The login is the account's password inside TLS: keep the port behind an SSH tunnel or a [VPN](/docs/vpn/#security-what-protects-the-login).
-- **Not an audited product.** Four internal review passes are written down in [`docs/SECURITY-REVIEW.md`](https://github.com/zhoorta/waydesk/blob/main/docs/SECURITY-REVIEW.md), with what is still open, and who is assumed hostile is in [`docs/THREAT-MODEL.md`](https://github.com/zhoorta/waydesk/blob/main/docs/THREAT-MODEL.md).
+- **Not an audited product.** Five internal review passes are written down in [`docs/SECURITY-REVIEW.md`](https://github.com/zhoorta/waydesk/blob/main/docs/SECURITY-REVIEW.md), with what is still open, and who is assumed hostile is in [`docs/THREAT-MODEL.md`](https://github.com/zhoorta/waydesk/blob/main/docs/THREAT-MODEL.md).
 
 ## Systems {bar: table}
 | System | amd64 | arm64 | Notes |
@@ -17,9 +17,10 @@ Waydesk is early, free software, written and tested by one person on real server
 | Debian 13 (trixie) | tested | tested | clean install from the repository, a session with the shell, Chromium, LibreOffice, VS Code |
 | Ubuntu 26.04 LTS | tested | tested | Chromium and Firefox come from Flathub (no Chromium deb) |
 | Arch Linux | tested, on real hardware | tested (Arch Linux ARM, container) | the server and its sessions from the pacman repository; no desktop shell packages; Hyprland, COSMIC and Plasma tested with an Intel GPU |
-| Ubuntu 24.04, Fedora | not yet | not yet | different Qt and wlroots; no rpm yet |
+| Fedora 44 | tested (server and sway sessions, SELinux enforcing) | built, installed in a container | RPM repository at `waydesk.dev/rpm`; no desktop shell package ([Fedora](https://github.com/zhoorta/waydesk/blob/main/docs/FEDORA.md)) |
+| Ubuntu 24.04 | not yet | not yet | different Qt and wlroots |
 
-Tested means a clean server, SSH hardened first, the install steps, an RDP login from FreeRDP and a look at the session. Ubuntu's own `xfreerdp3` (3.32) cannot decode our H.264 stream; Debian 13's client (3.15) can. The Windows App on macOS was also used, and mstsc on Windows 11 (ARM, in a VM) with the GPU encoders; older Windows clients were not tested.
+Tested means a clean server, SSH hardened first, the install steps, an RDP login from FreeRDP and a look at the session. Ubuntu's own `xfreerdp3` (3.32) cannot decode Waydesk's H.264 stream; Debian 13's client (3.15) can. The Windows App on macOS was also used, and mstsc on Windows 11 (ARM, in a VM) with the GPU encoders; older Windows clients were not tested.
 
 ## Clients {bar: table}
 | Client | Result |

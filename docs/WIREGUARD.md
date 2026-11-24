@@ -98,7 +98,7 @@ laptop is one block to remove.
 
 - The RDP port is invisible to anyone without a peer key, and the password login only travels inside the tunnel.
 - A peer key is not a login: the account's password is still asked, and the memory and user limits still apply.
-- Everyone with a peer can try passwords for every account, so give peers only to people you would let near the login.
+- Everyone with a peer can try passwords for every account, so give peers only to people trusted near the login.
 
 ## SSH tunnel (one user, no server setup)
 

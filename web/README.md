@@ -58,7 +58,7 @@ My account for an RDP client (Windows App, Remmina). The portal never takes over
 
 The packages ship the agent and the root-only admin socket (`waydesk-agent.service`, `waydesk-admin.socket`): Debian and Arch (the RPM spec has them, not built yet).
 The agent starts only when `/etc/waydesk/agent.json` exists. **To let a server reach a portal over the internet**, bind it publicly and keep the source list short:
-`WAYDESK_WEB_BIND=0.0.0.0:8443` and `--allow-from SERVER-ADDRESS,YOUR-ADDRESS,loopback` in `WAYDESK_WEB_ARGS` of `/etc/default/waydesk` (the agent pins the portal's
+`WAYDESK_WEB_BIND=0.0.0.0:8443` and `--allow-from SERVER-ADDRESS,CLIENT-ADDRESS,loopback` in `WAYDESK_WEB_ARGS` of `/etc/default/waydesk` (the agent pins the portal's
 certificate, so a name is not needed). Make `--totp required` the rule for anyone who can reach it.
 
 **Administrator pages** (per server, picked at the top; "This machine" is the portal's own): **Overview** (sessions, memory, CPU, GPU, a machine card that names the
@@ -85,7 +85,7 @@ an H.264 decoder falls back to it when this install has it.
 - Listens on `127.0.0.1:8443` only: reach it with `ssh -N -L 8443:127.0.0.1:8443 ACCOUNT@SERVER` and open `https://localhost:8443/`.
 - Source addresses are checked on accept, before TLS (`--allow-from`, the same list syntax as `WAYDESK_ALLOW_FROM`; non-loopback binds default to private networks).
 - Starting a session needs a one-time token (30 s, one use, only from the address that asked), and every request that changes anything must carry an
-  `Origin` of this host, so another web page cannot start a session from your browser.
+  `Origin` of this host, so another web page cannot start a session from the browser.
 - Per address: 10 tokens a minute, 3 sessions at once; 64 sessions in all (`--rate-per-minute`, `--max-per-ip`, `--max-total`). The daemon's own delay
   and lockout per account stay in force behind it.
 - It serves HTTPS with the certificate of the RDP daemon (`/etc/waydesk/cert.pem`, `key.pem`; re-read when `waydesk-admin cert` replaces them), and
@@ -94,7 +94,7 @@ an H.264 decoder falls back to it when this install has it.
 
 ## Behind a web server (a reverse proxy)
 
-For access without a VPN or a tunnel, put the gateway behind the web server you already run (nginx, Caddy, Traefik, Apache), which holds the
+For access without a VPN or a tunnel, put the gateway behind an existing web server (nginx, Caddy, Traefik, Apache), which holds the
 public name and its certificate (Let's Encrypt). The gateway then serves plain HTTP on this machine only and believes the proxy about who the client is:
 
 ```

@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Waydesk portal: Linux desktops in a browser, several servers, one sign-in</title>
+<meta name="description" content="Install and use the optional portal: first sign-in, adding servers, users, two-step sign-in, reaching it from other machines and behind a reverse proxy.">
+<link rel="canonical" href="https://waydesk.dev/docs/portal/">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="icon" href="/favicon-32.png" sizes="32x32" type="image/png">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<meta name="theme-color" content="#06121c">
+<meta property="og:title" content="Waydesk portal: Linux desktops in a browser, several servers, one sign-in">
+<meta property="og:description" content="Install and use the optional portal: first sign-in, adding servers, users, two-step sign-in, reaching it from other machines and behind a reverse proxy.">
+<meta property="og:url" content="https://waydesk.dev/docs/portal/">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="Waydesk">
+<meta property="og:image" content="https://waydesk.dev/og.jpg">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Waydesk portal: Linux desktops in a browser, several servers, one sign-in">
+<meta name="twitter:description" content="Install and use the optional portal: first sign-in, adding servers, users, two-step sign-in, reaching it from other machines and behind a reverse proxy.">
+<meta name="twitter:image" content="https://waydesk.dev/og.jpg">
+<script type="application/ld+json">{"@context": "https://schema.org", "@type": "BreadcrumbList", "itemListElement": [{"@type": "ListItem", "position": 1, "name": "Waydesk", "item": "https://waydesk.dev/"}, {"@type": "ListItem", "position": 2, "name": "Documentation", "item": "https://waydesk.dev/docs/"}, {"@type": "ListItem", "position": 3, "name": "The portal: desktops in a browser", "item": "https://waydesk.dev/docs/portal/"}]}</script>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body class="sans">
+<div class="col">
+<header>
+  <a class="logo" href="/"><img src="/logo-dark.svg" alt="Waydesk" width="159" height="35"></a>
+  <nav aria-label="Site">
+    <a href="/">home</a>
+    <a href="/docs/" aria-current="page">documentation</a>
+    <a class="gh" href="https://github.com/zhoorta/waydesk"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>github</a>
+  </nav>
+</header>
+<div class="docs">
+<div class="side">
+<nav aria-label="Documentation">
+<h2>Get started</h2>
+<ul>
+<li><a href="/docs/install/">Install</a></li>
+<li><a href="/docs/connect/">Connect</a></li>
+<li><a href="/docs/clients/">RDP clients</a></li>
+<li><a href="/docs/vpn/">VPN and security</a></li>
+</ul>
+<h2>Run it</h2>
+<ul>
+<li><a href="/docs/cli/">Command line</a></li>
+<li><a href="/docs/portal/" aria-current="page">Portal and browser access</a><ul><li><a href="#what-it-does">What it does</a></li><li><a href="#install">Install</a></li><li><a href="#first-sign-in">First sign-in</a></li><li><a href="#users">Users</a></li><li><a href="#adding-a-server">Adding a server</a></li><li><a href="#reaching-the-portal-from-other-machines">Reaching the portal from other machines</a></li><li><a href="#behind-a-reverse-proxy">Behind a reverse proxy</a></li><li><a href="#two-step-sign-in">Two-step sign-in</a></li><li><a href="#what-to-know">What to know</a></li></ul></li>
+<li><a href="/docs/recipes/">Recipes</a></li>
+<li><a href="/docs/gpu/">GPU</a></li>
+<li><a href="/docs/desktops/">Desktops</a></li>
+<li><a href="/docs/reference/">Files and settings</a></li>
+</ul>
+<h2>Understand it</h2>
+<ul>
+<li><a href="/docs/architecture/">Architecture</a></li>
+<li><a href="/docs/measurements/">Measurements</a></li>
+<li><a href="/docs/compare/">How it compares</a></li>
+<li><a href="/docs/limits/">Limits and status</a></li>
+</ul>
+<h2>Help</h2>
+<ul>
+<li><a href="/docs/help/">Troubleshooting</a></li>
+<li><a href="/docs/faq/">FAQ</a></li>
+</ul>
+</nav>
+</div>
+<main class="doc">
+<div class="pagehead">
+<h1>The portal: desktops in a browser</h1>
+<p class="lede">The portal is optional. Waydesk works without it: the RDP port and <code>waydesk-admin</code> are complete. The portal is for opening desktops <strong>in a browser</strong> (no client to install) and for managing <strong>more than one server</strong> from one place.</p>
+</div>
+<section id="what-it-does">
+<h2>What it does</h2>
+<ul class="plain"><li><strong>A desktop in a browser.</strong> People sign in to a page and open their session. The picture is H.264 decoded by the browser, with keys, mouse, clipboard (text and pictures) and the window size going back. Sound is off until switched on.</li><li><strong>Users and servers in one place.</strong> The portal has its own users. An administrator assigns a user to servers, and the portal makes the account on each of them.</li><li><strong>Administrator pages for each server:</strong> Overview (sessions, memory, CPU, GPU), Accounts, Sessions (with an End button) and Audit, and a Servers list that shows every server at a glance.</li><li><strong>App passwords</strong> for people who prefer an RDP client such as the Windows App or Remmina.</li><li><strong>Two-step sign-in</strong> with an authenticator app, optional or required.</li></ul>
+</section>
+<section id="install">
+<h2>Install</h2>
+<p>The portal is a package of its own, of the same version as the server, so a server that only needs RDP carries no web server.</p>
+<pre><code><span class="p">$</span> sudo apt install waydesk-portal            <span class="c"># Debian, Ubuntu</span>
+<span class="p">$</span> sudo pacman -S waydesk-portal              <span class="c"># Arch</span>
+<span class="p">$</span> sudo dnf install waydesk-server-portal     <span class="c"># Fedora</span>
+<span class="p">$</span> sudo systemctl enable --now waydesk-web.service</code></pre>
+<p>The package starts nothing by itself. The portal listens on <code>127.0.0.1:8443</code> only, and its settings are in <code>/etc/default/waydesk-web</code>.</p>
+</section>
+<section id="first-sign-in">
+<h2>First sign-in</h2>
+<p>Make the first user on the portal's machine. The password is printed once.</p>
+<pre><code><span class="p">$</span> sudo waydesk-web people add NAME --admin --display "Full name"
+<span class="p">$</span> ssh -N -L 8443:127.0.0.1:8443 USER@SERVER      <span class="c"># on the client computer</span></code></pre>
+<p>Then open <code>https://localhost:8443/</code>.</p>
+<p>The certificate is the server's own, so the browser warns on the first visit: compare the fingerprint with <code>sudo waydesk-admin cert status</code>. Everything after this is done in the browser. <code>waydesk-web people list</code>, <code>passwd NAME</code> and <code>remove NAME</code> remain available on the command line, for example when the only administrator forgets the password.</p>
+<p>The portal's own machine is also a server in the list ("This machine"), so a single server needs nothing else.</p>
+</section>
+<section id="users">
+<h2>Users</h2>
+<p>The Users page makes, switches off and removes users and sets who is an administrator. <strong>Servers</strong> on a user assigns them to servers: the portal makes the account on each server through its agent, and the user opens it from <strong>My desktop</strong>, which shows one card per server with a thumbnail of the screen (and how old it is, when it is not current). The portal never takes over an account it did not make.</p>
+<p>A user's <strong>My account</strong> page changes the password, turns two-step sign-in on or off and makes an <strong>app password</strong> for an RDP client. The Windows App and Remmina log in to the server's RDP port with that password.</p>
+</section>
+<section id="adding-a-server">
+<h2>Adding a server</h2>
+<p>A server dials <strong>out</strong> to the portal; the portal needs no way into the server.</p>
+<ol class="plain"><li>On the portal, Servers, Add a server shows a join code (one use, one hour) and the portal's certificate pin.</li><li>On the server, as root:</li></ol>
+<pre><code><span class="p">$</span> sudo waydesk-agent enrol https://PORTAL:8443 CODE --pin PIN
+<span class="p">$</span> sudo systemctl restart waydesk
+<span class="p">$</span> sudo systemctl enable --now waydesk-agent</code></pre>
+<p><code>enrol</code> also makes the key that lets the portal reach the daemon's browser stream and adds the flags for it to <code>/etc/default/waydesk</code>, which is why the daemon is restarted. The agent keeps one link open to the portal and answers only a closed list of requests. A server that stops answering is noticed in about 12 seconds, and the pages say so instead of failing. <code>waydesk-agent status</code> shows the link from the server's side.</p>
+<p>A server on another network needs the portal to be reachable from it: see the next section.</p>
+</section>
+<section id="reaching-the-portal-from-other-machines">
+<h2>Reaching the portal from other machines</h2>
+<p>By default only the local machine can connect. For other machines or the internet, set these in <code>/etc/default/waydesk</code> (or <code>WAYDESK_WEB_BIND</code> in <code>/etc/default/waydesk-web</code>):</p>
+<pre><code>WAYDESK_WEB_BIND=0.0.0.0:8443
+WAYDESK_WEB_ARGS="--allow-from SERVER-ADDRESS,CLIENT-ADDRESS,loopback --totp required"</code></pre>
+<ul class="plain"><li><code>--allow-from</code> is checked on connect, before TLS. List the addresses of every joined server and of the administrators; an address that is not listed gets nothing.</li><li><code>--totp required</code> makes a two-step code the rule for every user (<code>optional</code> asks for one only from users who have one). Users get theirs on <strong>My account</strong>.</li><li>The agents compare the portal's certificate with the pin, so a DNS name is not needed.</li><li>Failed logins are answered after about 4 seconds whatever was wrong, and are locked out per account and per address.</li></ul>
+</section>
+<section id="behind-a-reverse-proxy">
+<h2>Behind a reverse proxy</h2>
+<p>With a public name and a certificate from Let's Encrypt, the portal can sit behind nginx, Caddy, Traefik or Apache. The portal then serves plain HTTP on the same machine and believes the proxy about who the client is:</p>
+<pre><code><span class="p">$</span> waydesk-web --plain-http --trusted-proxy 127.0.0.1 \
+    --public-origin https://desk.example.org</code></pre>
+<ul class="plain"><li><code>--trusted-proxy</code> names the proxy. Only connections from it are believed when they send <code>X-Forwarded-For</code>.</li><li><code>--public-origin</code> is the one address people open. A request from any other page is refused.</li><li>The portal's port must be reachable only by the proxy.</li></ul>
+<p>nginx:</p>
+<pre><code>location / {
+    proxy_pass http://127.0.0.1:8443;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-For $remote_addr;
+    proxy_set_header X-Forwarded-Host $host;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_read_timeout 1h;
+    proxy_send_timeout 1h;
+}</code></pre>
+<p>Caddy:</p>
+<pre><code>desk.example.org {
+    reverse_proxy 127.0.0.1:8443
+}</code></pre>
+</section>
+<section id="two-step-sign-in">
+<h2>Two-step sign-in</h2>
+<p>Any authenticator app works (Aegis, Google Authenticator, 1Password, Bitwarden): six digits, thirty seconds. A user turns it on in <strong>My account</strong> and is shown eight recovery codes once. A code works once. Five wrong codes from one address for one account, or twenty for one account from anywhere, lock that account for ten minutes.</p>
+<p>An administrator sees which users have it on the Settings page and can remove it when a phone is lost. Keep the server's clock right (chrony or systemd-timesyncd): codes one step either side of now are accepted.</p>
+<p>Two-step sign-in protects the portal, not the RDP port. An account can still log in over RDP with its password for anyone who can reach port 3389, so keep that port on <code>127.0.0.1</code> or behind a VPN.</p>
+</section>
+<section id="what-to-know">
+<h2>What to know</h2>
+<ul class="plain"><li><strong>Native RDP is better on a bad link.</strong> The browser stream was measured against the RDP client on lossy and slow connections and loses there; on a good link it is fine. <a href="/docs/measurements/">Measurements</a> has the method.</li><li><strong>Trust.</strong> A portal reaches every server that joined it, so a compromised portal is a compromise of all of them. Run it on a machine as trusted as the servers, keep <code>--allow-from</code> short and require two-step sign-in.</li><li><strong>Early software.</strong> The portal is new in 0.6.0 and has had fewer hours of use than the RDP server. <a href="/docs/limits/">Limits and status</a> says what was tried.</li></ul>
+<p>The complete reference, with every option, is <a href="https://github.com/zhoorta/waydesk/blob/main/web/README.md"><code>web/README.md</code></a> in the repository; the design and its reasons are in <a href="https://github.com/zhoorta/waydesk/blob/main/docs/PORTAL-DESIGN.md"><code>docs/PORTAL-DESIGN.md</code></a>.</p>
+</section>
+<nav class="prevnext" aria-label="Previous and next page"><a class="prev" href="/docs/cli/"><span>previous</span>The command line</a><a class="next" href="/docs/recipes/"><span>next</span>Recipes</a></nav>
+<p class="method">This page is <a href="https://github.com/zhoorta/waydesk/blob/main/site/pages/portal.md">a file in the repository</a>: corrections are welcome.</p>
+</main>
+</div>
+<footer>
+  <span>© 2026 StackCare</span>
+  <a href="mailto:jose@stackcare.pt">jose@stackcare.pt</a>
+  <a class="gh" href="https://github.com/zhoorta/waydesk"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>github</a>
+  <a href="https://github.com/zhoorta/waydesk/blob/main/CHANGELOG.md">changelog</a>
+  <a href="https://stackcare.pt/en">commercial support: StackCare</a>
+  <span>AGPL-3.0-or-later</span>
+</footer>
+</div>
+</body>
+</html>

@@ -48,6 +48,7 @@
 <h2>Run it</h2>
 <ul>
 <li><a href="/docs/cli/">Command line</a></li>
+<li><a href="/docs/portal/">Portal and browser access</a></li>
 <li><a href="/docs/recipes/">Recipes</a></li>
 <li><a href="/docs/gpu/">GPU</a></li>
 <li><a href="/docs/desktops/">Desktops</a></li>
@@ -70,12 +71,12 @@
 <main class="doc">
 <div class="pagehead">
 <h1>VPN and securing access</h1>
-<p class="lede">The RDP port is closed until you open it, and there are two good ways to open it to people who are not on the machine: an SSH tunnel and a WireGuard VPN. This page explains what protects the login, then sets up the VPN.</p>
+<p class="lede">The RDP port listens on <code>127.0.0.1</code> only. There are two good ways to reach it from another machine: an SSH tunnel and a WireGuard VPN. This page explains what protects the login, then sets up the VPN.</p>
 </div>
 <section id="security-what-protects-the-login">
 <h2>Security: what protects the login</h2>
 <p>The login is the account's <strong>password inside TLS</strong>, with no second factor. Everything else is about making sure only the right people get as far as typing it:</p>
-<ul class="plain"><li><strong>The port is closed until you open it</strong>, and an address that is not allowed gets nothing, before TLS and before any login. Failed logins are delayed 2 seconds; five in a row refuse every login for a minute. Only members of <code>waydesk-users</code> may log in, never root.</li><li><strong>Keep the port off the open internet.</strong> Use an SSH tunnel for one person, or the VPN below for several. Long random passwords matter, because there is no second factor.</li><li><strong>Each part has only the rights it needs.</strong> The network-facing daemon has none and never sees a user's files; a small root helper checks the password through PAM and starts the session; each session runs as the account itself, in its own systemd slice, with its own limits. The <a href="/docs/architecture/">architecture</a> page draws it.</li><li><strong>A certificate you can verify</strong> (<code>waydesk-admin cert local-ca</code>) lets the client check every connection instead of trusting the first one.</li><li><strong>This is not an audited product.</strong> Five internal review passes are written down with what is still open: <a href="https://github.com/zhoorta/waydesk/blob/main/docs/SECURITY-REVIEW.md"><code>docs/SECURITY-REVIEW.md</code></a>, who is assumed hostile in <a href="https://github.com/zhoorta/waydesk/blob/main/docs/THREAT-MODEL.md"><code>docs/THREAT-MODEL.md</code></a>, and the access model in <a href="https://github.com/zhoorta/waydesk/blob/main/docs/ACCESS.md"><code>docs/ACCESS.md</code></a>.</li></ul>
+<ul class="plain"><li>**The port listens on <code>127.0.0.1</code> by default**, and an address that is not allowed gets nothing, before TLS and before any login. Failed logins are delayed 2 seconds; five in a row refuse every login for a minute. Only members of <code>waydesk-users</code> may log in, never root.</li><li><strong>Keep the port off the open internet.</strong> Use an SSH tunnel for one person, or the VPN below for several. Long random passwords matter, because there is no second factor.</li><li><strong>Each part has only the rights it needs.</strong> The network-facing daemon has none and never sees a user's files; a small root helper checks the password through PAM and starts the session; each session runs as the account itself, in its own systemd slice, with its own limits. The <a href="/docs/architecture/">architecture</a> page draws it.</li><li><strong>A verifiable certificate</strong> (<code>waydesk-admin cert local-ca</code>) lets the client check every connection instead of trusting the first one.</li><li><strong>This is not an audited product.</strong> Five internal review passes are written down with what is still open: <a href="https://github.com/zhoorta/waydesk/blob/main/docs/SECURITY-REVIEW.md"><code>docs/SECURITY-REVIEW.md</code></a>, who is assumed hostile in <a href="https://github.com/zhoorta/waydesk/blob/main/docs/THREAT-MODEL.md"><code>docs/THREAT-MODEL.md</code></a>, and the access model in <a href="https://github.com/zhoorta/waydesk/blob/main/docs/ACCESS.md"><code>docs/ACCESS.md</code></a>.</li></ul>
 </section>
 <section id="why-a-vpn">
 <h2>Why a VPN</h2>
@@ -89,17 +90,17 @@ Open UDP 51820 to the internet in this machine's firewall and in the provider's 
 Done.
 Listening on     10.8.0.1:3389  (vpn)
 Who may connect   10.8.0.0/24
-Signed by        CN=your-server
+Signed by        CN=SERVER
 Fingerprint      6F:E1:32:12:8C:64:71:A3:C0:51:C6:BB:80:37:64:B9:C4:E4:C7:1E:C7:C2:B8:93:E3:48:42:A5:C9:A4:FD:10
 
 Connect: bring the VPN up on the client, then point the RDP client at 10.8.0.1. `waydesk-admin vpn add NAME` makes a client.
 
 The VPN is ready. Add a client with:  sudo waydesk-admin vpn add NAME</code></pre>
-<p><strong>Open UDP 51820</strong> in the provider's firewall too (a cloud security group is outside the machine). Do not open 3389: the RDP port exists only inside the tunnel. <code>vpn init</code> refuses to replace an existing configuration without <code>--force</code> (it keeps a backup) and uses an interface name of its own, so a <code>wg0</code> you made by hand is left alone.</p>
+<p><strong>Open UDP 51820</strong> in the provider's firewall too (a cloud security group is outside the machine). Do not open 3389: the RDP port exists only inside the tunnel. <code>vpn init</code> refuses to replace an existing configuration without <code>--force</code> (it keeps a backup) and uses an interface name of its own, so a hand-made <code>wg0</code> is left alone.</p>
 </section>
 <section id="add-a-client">
 <h2>Add a client</h2>
-<p>One client per device, so that a lost laptop is one entry to remove. Install <code>qrencode</code> first if you want the QR code for a phone:</p>
+<p>One client per device, so that a lost laptop is one entry to remove. Install <code>qrencode</code> first for the QR code for a phone:</p>
 <pre><code><span class="p">$</span> sudo apt install qrencode
 <span class="p">$</span> sudo waydesk-admin vpn add phone
 Client phone (10.8.0.2) added. Import this in the WireGuard app (or scan the QR code), then connect the RDP client to 10.8.0.1:
@@ -133,14 +134,14 @@ phone                10.8.0.2        never
 </section>
 <section id="what-it-gives-and-what-it-does-not">
 <h2>What it gives, and what it does not</h2>
-<ul class="plain"><li>The RDP port is invisible to anyone without a peer key, and the password login only travels inside the tunnel.</li><li><strong>A peer key is not a login.</strong> The account's password is still asked, and the memory and user limits still apply.</li><li>Everyone with a peer can try passwords for every account, so give peers only to people you would let near the login.</li><li>There is still no second factor: long, random passwords matter.</li></ul>
+<ul class="plain"><li>The RDP port is invisible to anyone without a peer key, and the password login only travels inside the tunnel.</li><li><strong>A peer key is not a login.</strong> The account's password is still asked, and the memory and user limits still apply.</li><li>Everyone with a peer can try passwords for every account, so give peers only to people trusted near the login.</li><li>There is still no second factor: long, random passwords matter.</li></ul>
 </section>
 <section id="vpn-or-ssh-tunnel">
 <h2>VPN or SSH tunnel</h2>
 <div class="tw"><table><tr><th></th><th>WireGuard VPN</th><th>SSH tunnel</th></tr><tr><td>Server setup</td><td>one command</td><td>none (sshd is usually there)</td></tr><tr><td>Many users and devices</td><td>yes, a key per device</td><td>an SSH account each</td></tr><tr><td>Always on</td><td>yes, in the background</td><td>only while the command runs</td></tr><tr><td>Long round trips</td><td>handles them well</td><td>TCP inside TCP stalls</td></tr><tr><td>Port exposed</td><td>UDP 51820</td><td>TCP 22</td></tr></table></div>
 <p>The manual way, without <code>waydesk-admin</code>, is in <a href="https://github.com/zhoorta/waydesk/blob/main/docs/WIREGUARD.md"><code>docs/WIREGUARD.md</code></a>, and the whole access model in <a href="https://github.com/zhoorta/waydesk/blob/main/docs/ACCESS.md"><code>docs/ACCESS.md</code></a>.</p>
 </section>
-<nav class="prevnext" aria-label="Previous and next page"><a class="prev" href="/docs/clients/"><span>previous</span>Set up your RDP client</a><a class="next" href="/docs/cli/"><span>next</span>The command line</a></nav>
+<nav class="prevnext" aria-label="Previous and next page"><a class="prev" href="/docs/clients/"><span>previous</span>Set up an RDP client</a><a class="next" href="/docs/cli/"><span>next</span>The command line</a></nav>
 <p class="method">This page is <a href="https://github.com/zhoorta/waydesk/blob/main/site/pages/vpn.md">a file in the repository</a>: corrections are welcome.</p>
 </main>
 </div>

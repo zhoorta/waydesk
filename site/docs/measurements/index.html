@@ -48,6 +48,7 @@
 <h2>Run it</h2>
 <ul>
 <li><a href="/docs/cli/">Command line</a></li>
+<li><a href="/docs/portal/">Portal and browser access</a></li>
 <li><a href="/docs/recipes/">Recipes</a></li>
 <li><a href="/docs/gpu/">GPU</a></li>
 <li><a href="/docs/desktops/">Desktops</a></li>
@@ -70,13 +71,13 @@
 <main class="doc">
 <div class="pagehead">
 <h1>Measurements</h1>
-<p class="lede">Our own servers and our own scripts: each chart says how it was measured, and the failed attempts are in the tables of the repository.</p>
+<p class="lede">Servers and scripts of the project: each chart says how it was measured, and the failed attempts are in the tables of the repository.</p>
 </div>
 <section class="sect" id="measurements">
 <div class="win">
 <div class="bar"><span class="t">figures and methods</span><span class="cap" aria-hidden="true"><i>&#x2013;</i><i>&#x25a1;</i><i>&#x2715;</i></span></div>
 <div class="body">
-<p class="small">Our own servers: Hetzner cloud with no GPU for the charts, a dedicated Core i7-7700 with its integrated GPU for the GPU figures. Each chart says how it was measured; all tables and the failed attempts are in <a href="https://github.com/zhoorta/waydesk/blob/main/docs/MEASUREMENTS.md"><code>docs/MEASUREMENTS.md</code></a>.</p>
+<p class="small">Servers used: Hetzner cloud with no GPU for the charts, a dedicated Core i7-7700 with its integrated GPU for the GPU figures. Each chart says how it was measured; all tables and the failed attempts are in <a href="https://github.com/zhoorta/waydesk/blob/main/docs/MEASUREMENTS.md"><code>docs/MEASUREMENTS.md</code></a>.</p>
 <h3>Two questions, two kinds of test</h3>
 <p class="small"><strong>How many users fit in memory:</strong> the first chart. Each user logs in and opens Chromium, Calc with 300,000 rows and VS Code, and the applications are left idle; on an 8 GB, 4-vCPU server 8 fit on Debian 13 and 7 on Ubuntu 26.04. <strong>How a server behaves under active users:</strong> the table with and without a GPU, further down: the users scroll, type and watch video, on a 64 GB machine (21 and 24 users) and, earlier, on a 23 GB server that held 12 before it refused the 13th, at about 1.6 GB a user. Active users on an 8 GB server were not measured: it would hold fewer than the idle 7 to 8, about five if the 23 GB figure scaled, and that is arithmetic, not a measurement.</p>
 <div class="tiles"><div class="tile"><div class="big">430 to 600 MB</div><div class="cap2">an idle session with the shell</div></div><div class="tile"><div class="big">7 to 8</div><div class="cap2">users with Chromium, Calc and VS Code open (idle) on an 8 GB server</div></div><div class="tile"><div class="big">4.5 : 1</div><div class="cap2">compressed swap, zstd</div></div><div class="tile"><div class="big">60 s</div><div class="cap2">a frozen client is cut off</div></div><div class="tile"><div class="big">4.8 % vs 15 %</div><div class="cap2">CPU of the capture and encoding with 20 active heavy users, GPU or CPU</div></div></div>

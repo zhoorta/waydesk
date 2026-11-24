@@ -22,7 +22,7 @@ GH_ICON = (SITE / "index.html").read_text().split('<a class="gh" href="https://g
 # The documentation, in groups: the order of the sidebar, of the index and of "next page".
 GROUPS = [
     ("Get started", ["install", "connect", "clients", "vpn"]),
-    ("Run it", ["cli", "recipes", "gpu", "desktops", "reference"]),
+    ("Run it", ["cli", "portal", "recipes", "gpu", "desktops", "reference"]),
     ("Understand it", ["architecture", "measurements", "compare", "limits"]),
     ("Help", ["help", "faq"]),
 ]
@@ -272,7 +272,7 @@ def index_html(pages):
     body = f"""<main class="doc docindex">
 <div class="pagehead">
 <h1>Documentation</h1>
-<p class="lede">Read it in order, or jump to what you need. New to Waydesk: start with <a href="/docs/install/">Install and first login</a>, it takes about ten minutes from a fresh server. Every page is a file in the repository, written from what was run on real servers.</p>
+<p class="lede">Pages can be read in order or one at a time. A new install starts with <a href="/docs/install/">Install and first login</a>, which takes about ten minutes on a fresh server. Every page is a file in the repository, written from what was run on real servers.</p>
 </div>
 {chr(10).join(cols)}
 </main>"""

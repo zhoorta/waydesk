@@ -56,10 +56,10 @@ when the account quits its sway. Accounts cannot reach each other's sockets. The
 install time and its fingerprint is printed.
 
 **The server works on its own.** `waydesk-server` needs only sway (our own `waydesk-sway` where the repository has it), foot, PAM, openssl, systemd and `libopenh264`; it does not need
-`waydesk-desktop`. Installed alone you get the RDP login with the account's password, persistent per-account sessions, the memory
+`waydesk-desktop`. Installed alone it gives the RDP login with the account's password, persistent per-account sessions, the memory
 protection (admission check, per-account caps, zram) and `waydesk-admin`; the session itself is plain sway: the account's `~/.config/waydesk/config` if it has one, otherwise sway's usual lookup
 (`~/.config/sway/config`, then `/etc/sway/config`). Install `waydesk-desktop` (or `waydesk`, which pulls in both)
-only if you want the Windows-like desktop below. **Debian 13 and Ubuntu 26.04 LTS, arm64 and amd64**, from one signed repository with a suite for each (`trixie`,
+only for the Windows-like desktop below. **Debian 13 and Ubuntu 26.04 LTS, arm64 and amd64**, from one signed repository with a suite for each (`trixie`,
 `resolute`; `waydesk-repo` picks the right one). Both run the same compositor and shell stack from `/usr/lib/waydesk` (`waydesk-sway`: sway 1.11 with wlroots 0.19.3 and the
 title-bar patch; `waydesk-quickshell`), built per distribution in a container; see [PORTABILITY.md](PORTABILITY.md). On Ubuntu, Chromium and Firefox come from Flathub (Ubuntu has no deb). Other distros,
 Debian-based ones included, have not been tried (Fedora: not yet), and the packages are `.deb` only.
@@ -70,7 +70,7 @@ an account's `~/.config/waydesk/config` replaces it), the glue that starts [Dank
 through the account's systemd user session (`waydesk-shell`, our own build from source, which `waydesk-desktop` depends on; it is not in Debian), and `waydesk-setup`, a
 whiptail wizard for browsers, office, developer, creative and AI apps. Design, threat model and what is not done yet:
 [docs/MULTIUSER-DESIGN.md](MULTIUSER-DESIGN.md). The sections below describe the single-account form, which still
-exists (run the binary inside your own sway).
+exists (run the binary inside an existing sway).
 
 **Task Manager** (the launcher, or `Ctrl+Shift+Esc`; administrators only, like Users & Access) opens the shell's System Monitor: processes (search, sort by CPU or memory, end one), CPU, memory and swap, network speeds,
 disks and system information, for the machine's processes, as `/proc` shows them. It is hidden and refused for accounts outside the group `sudo`, but that is a convenience, not a barrier:
@@ -102,12 +102,12 @@ shell's bar shows the same three buttons for the focused window instead.
 - Clipboard: text only (up to 1 MiB), both ways, **on by default** (`--no-clipboard` turns it off; it needs `wl-clipboard`). The session process does the `wl-copy`/`wl-paste` as the account; the daemon only relays text. Tried with FreeRDP and the macOS Windows App (2026-10-19). The server waits 5 s after connecting before it asks the client for its clipboard.
 - Security: TLS always on. There is **no built-in credential**. Two ways to log in (one user, the one running the server):
   - `--auth file` (default): NLA with the `user:password` on the first line of `--credentials FILE` (password of at least 8
-    characters). NLA protects the password even if you accept an unverified certificate.
+    characters). NLA protects the password even when an unverified certificate is accepted.
   - `--auth pam`: the account's own password, checked through PAM (service `waydesk-server`, see `contrib/pam/`), so no
     password is stored anywhere. This needs plain TLS login without NLA, because NLA has to know the password itself.
     **The password then travels inside the TLS connection**: someone who intercepts it and shows another certificate could
-    read it, so verify the certificate fingerprint on first use, and prefer loopback, a tunnel or a VPN on networks you do
-    not control. Failures are delayed 2 s, and after 5 failed attempts in a row every login is refused for 60 s.
+    read it, so verify the certificate fingerprint on first use, and prefer loopback, a tunnel or a VPN on networks that are not
+    controlled. Failures are delayed 2 s, and after 5 failed attempts in a row every login is refused for 60 s.
   - A self-signed certificate is fine for a start (`--cert`, `--key`). `--tls-only` forces plain TLS login with `--auth file` (testing).
 - Built on [IronRDP](https://github.com/Devolutions/IronRDP) (`ironrdp-server` 0.13 with three small local patches in
   `patches/`, see `patches/ironrdp-server.diff`) and `ironrdp-egfx`.
@@ -116,7 +116,7 @@ shell's bar shows the same three buttons for the focused window instead.
 
 ```
 waydesk-server --bind 127.0.0.1:3389 --cert cert.pem --key key.pem --credentials rdp.cred
-# or, with your login password: waydesk-server --bind 127.0.0.1:3389 --cert cert.pem --key key.pem --auth pam
+# or, with the login password: waydesk-server --bind 127.0.0.1:3389 --cert cert.pem --key key.pem --auth pam
 ```
 
 Run it inside the sway session it should serve (it needs `SWAYSOCK` and `WAYLAND_DISPLAY`). Needs libpam (`libpam0g`) for `--auth pam`, and `swaymsg`, `foot` (only for
@@ -133,7 +133,7 @@ replaces the open one; that is on by default only for loopback, because the old 
 
 ## Keyboard
 
-The layout of a session follows the keyboard layout that the client reports (Portuguese, English, German and so on). An account that types on a keyboard whose keys do not arrive where that layout expects them picks its own in the **Keyboard** window (in the launcher), which writes `~/.config/waydesk/keyboard`: a line of its own with the name of an xkb layout (`#` for comments). The session follows the file while it runs, within a second; removing it goes back to the client's layout. `waydeskmac` is for the built-in keyboard of a Portuguese MacBook through the Windows App (measured: its `º ´ ' + § ~ \` keys arrive at the places of other keys, and the left Option key is AltGr); the file is `/etc/xkb/symbols/waydeskmac`, and you can add layouts of your own next to it.
+The layout of a session follows the keyboard layout that the client reports (Portuguese, English, German and so on). An account that types on a keyboard whose keys do not arrive where that layout expects them picks its own in the **Keyboard** window (in the launcher), which writes `~/.config/waydesk/keyboard`: a line of its own with the name of an xkb layout (`#` for comments). The session follows the file while it runs, within a second; removing it goes back to the client's layout. `waydeskmac` is for the built-in keyboard of a Portuguese MacBook through the Windows App (measured: its `º ´ ' + § ~ \` keys arrive at the places of other keys, and the left Option key is AltGr); the file is `/etc/xkb/symbols/waydeskmac`, and more layouts can be added next to it.
 
 ## Session hook
 
@@ -209,7 +209,7 @@ the connection" for `--max-active-users`; FreeRDP shows it, tested; other client
    makes it as large as the RAM (at most 16 GiB; the idle memory of a desktop compresses about 4.5 to 1, so full it costs about a fifth of the RAM), picks zstd for it and sets `vm.swappiness=100` and `vm.page-cluster=0` (`/usr/lib/sysctl.d/50-waydesk.conf`). A short spike is absorbed by compressing idle pages instead of
    killing a browser. A disk swap behind it works too (zram has the higher priority); disk swap alone is slow for a desktop, and on network storage worse.
 4. **Look at it.** `waydesk-admin status` shows the memory, the swap, the load, whether a new session would be accepted, and for every
-   account its memory, swap, CPU and the programs that hold the most memory (resident memory, so shared pages count for each process); `--json` for scripts. It also lists the GPUs (model, driver, how busy: NVIDIA's card and its encoder through NVML, AMD from sysfs, Intel by the time out of its idle state) and, for each session, whether it renders on a GPU or on the CPU and which video encoder it runs: a GPU encoder that could not start falls back to OpenH264 on the CPU, which used to show only as a line in the journal. `--watch` keeps it on the screen, refreshed every 2 seconds (or the number you give), and `--json --watch` writes one line of JSON per refresh, for a script that follows a machine under load. A session's renderer, encoder, quantiser and frame rate are readable by that account and by root: another administrator's row shows a dash. The same is in
+   account its memory, swap, CPU and the programs that hold the most memory (resident memory, so shared pages count for each process); `--json` for scripts. It also lists the GPUs (model, driver, how busy: NVIDIA's card and its encoder through NVML, AMD from sysfs, Intel by the time out of its idle state) and, for each session, whether it renders on a GPU or on the CPU and which video encoder it runs: a GPU encoder that could not start falls back to OpenH264 on the CPU, which used to show only as a line in the journal. `--watch` keeps it on the screen, refreshed every 2 seconds (or the number given), and `--json --watch` writes one line of JSON per refresh, for a script that follows a machine under load. A session's renderer, encoder, quantiser and frame rate are readable by that account and by root: another administrator's row shows a dash. The same is in
    the **Users & Access** panel (administrators only): a bar for the machine, and memory, CPU and programs on each account's card.
    Administrators (the group `sudo`) see every account; any other account that runs `status`, `users list` or `sessions list` sees its own row and the totals of the
    machine. That only keeps the tool from collecting it: the same numbers are in `/proc` and the cgroup files, which every account can read on Debian. On a

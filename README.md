@@ -12,7 +12,7 @@
   <a href="https://waydesk.dev"><img alt="Website" src="https://img.shields.io/badge/website-waydesk.dev-orange"></a>
 </p>
 
-# Multi-user Linux desktops over RDP, out of the box
+# Multi-user Linux desktops over RDP and in a browser
 
 Waydesk turns a Debian 13, Ubuntu 26.04 or Arch Linux server into a multi-user desktop system: every account gets its own desktop session, which keeps running when the user disconnects. Install from a signed apt or pacman repository. The picture is H.264, and a GPU is used for drawing and encoding when there is one (Intel, AMD or NVIDIA; without one, software). No shared session and no client to install: use the Windows App, Remmina or any RDP client.
 
@@ -25,12 +25,12 @@ Waydesk turns a Debian 13, Ubuntu 26.04 or Arch Linux server into a multi-user d
   <tr>
     <td align="center"><img src="docs/img/gallery/omarchy.webp" alt="Omarchy on Hyprland" width="280"><br>Omarchy (Hyprland)</td>
     <td align="center"><img src="docs/img/gallery/ml4w.webp" alt="ML4W on Hyprland" width="280"><br>ML4W (Hyprland)</td>
-    <td align="center"><br>Or your own sway or Hyprland configuration</td>
+    <td align="center"><br>Or an existing sway or Hyprland configuration</td>
   </tr>
 </table>
 
-- **One desktop per account.** Each login gets its own headless desktop session (sway by default), sized and scaled from what the client asks for (a Retina Mac or a laptop at 200 % scaling gets a sharp picture, and the window resizes live). Reconnect and the windows are where you left them.
-- **Your choice of desktop.** The Waydesk desktop (sway) is the default; `waydesk-admin users set NAME --desktop cosmic|plasma|hyprland` gives an account [COSMIC](docs/COSMIC.md), [KDE Plasma](docs/PLASMA.md) or [Hyprland](docs/HYPRLAND.md) instead (tested on Arch with an Intel GPU, Omarchy and ML4W for Hyprland, which needs a GPU; COSMIC and Plasma run inside the session's sway). An Arch Linux package is in `packaging/arch` ([notes](docs/ARCH.md)).
+- **One desktop per account.** Each login gets its own headless desktop session (sway by default), sized and scaled from what the client asks for (a Retina Mac or a laptop at 200 % scaling gets a sharp picture, and the window resizes live). Reconnect and the windows are as they were.
+- **A desktop chosen per account.** The Waydesk desktop (sway) is the default; `waydesk-admin users set NAME --desktop cosmic|plasma|hyprland` gives an account [COSMIC](docs/COSMIC.md), [KDE Plasma](docs/PLASMA.md) or [Hyprland](docs/HYPRLAND.md) instead (tested on Arch with an Intel GPU, Omarchy and ML4W for Hyprland, which needs a GPU; COSMIC and Plasma run inside the session's sway). An Arch Linux package is in `packaging/arch` ([notes](docs/ARCH.md)).
 - **Memory is protected.** A new session is refused when the machine is full, every account has ceilings, and compressed swap absorbs spikes. A 12-vCPU, 23 GB server held 12 heavy users (Chromium, Calc and VS Code open) before it refused the 13th: [measurements and methods](https://waydesk.dev/#measurements).
 - **Secure by default.** The RDP port listens on loopback only; a WireGuard VPN, a local certificate authority and an address allowlist are built in (`waydesk-admin vpn init`, `waydesk-admin access`). The daemon is unprivileged and sandboxed, and a small root helper only checks a password and starts a session. See the [threat model](docs/THREAT-MODEL.md).
 - **Browser access and a portal.** `waydesk-web` serves a page where people sign in and open their desktop in a browser (no client to install), and where administrators manage several servers, people and sessions; each server dials out to the portal with a small agent ([web/README.md](web/README.md)).
@@ -57,7 +57,7 @@ Then connect an RDP client to the server (through the tunnel) with the administr
 ## Status
 
 Early. Tested with FreeRDP and the Windows App on macOS. Not independently reviewed: five internal security passes are in
-[docs/SECURITY-REVIEW.md](docs/SECURITY-REVIEW.md), and the open items are in the [threat model](docs/THREAT-MODEL.md). Supported: Debian 13, Ubuntu 26.04 and Arch Linux (x86_64 and aarch64); other distributions are not. The Waydesk desktop (sway) is packaged for Debian and Ubuntu; on Arch the other desktops are ordinary packages you install. The clipboard carries text and images (not files); the [roadmap](docs/ROADMAP.md) lists what is next. To report a vulnerability, see [SECURITY.md](SECURITY.md).
+[docs/SECURITY-REVIEW.md](docs/SECURITY-REVIEW.md), and the open items are in the [threat model](docs/THREAT-MODEL.md). Supported: Debian 13, Ubuntu 26.04 and Arch Linux (x86_64 and aarch64); other distributions are not. The Waydesk desktop (sway) is packaged for Debian and Ubuntu; on Arch the other desktops are ordinary packages to install. The clipboard carries text and images (not files); the [roadmap](docs/ROADMAP.md) lists what is next. To report a vulnerability, see [SECURITY.md](SECURITY.md).
 
 ## Documentation
 
@@ -75,7 +75,7 @@ Early. Tested with FreeRDP and the Windows App on macOS. Not independently revie
 **Waydesk** is a working name; `apt install waydesk` installs everything (`waydesk-server` and `waydesk-desktop`). Waydesk builds on the sway compositor and is not part of the sway
 project. No trademark or package-name clearance has been done.
 
-Waydesk is licensed under the GNU Affero General Public License, version 3 or (at your option) any later version: [LICENSE](LICENSE). In short: you may use, study, change and share it, for any purpose, including at a company and for paid work of your own. If you give others a modified version, or let them use a modified version over a network, they must be able to get its source under the same licence. Charging for installing, hosting or supporting it is allowed. The text decides, not this summary; if the AGPL does not fit your case, write to [StackCare](https://stackcare.pt/en).
+Waydesk is licensed under the GNU Affero General Public License, version 3 or (at the user's option) any later version: [LICENSE](LICENSE). In short: it may be used, studied, changed and shared for any purpose, including at a company and for paid work. Whoever gives others a modified version, or lets them use one over a network, must make its source available under the same licence. Charging for installing, hosting or supporting it is allowed. The text decides, not this summary; if the AGPL does not fit a case, write to [StackCare](https://stackcare.pt/en).
 
 The third-party code in the repository keeps its own licences: `patches/ironrdp-server` is a modified copy of IronRDP's `ironrdp-server` crate (MIT or Apache-2.0, files included there), and the other patches belong to the projects they patch.
 The repository also ships three copyleft programs as binaries (matugen, quickshell, a patched pcmanfm-qt); their source is at <https://waydesk.dev/apt/source/>, see [the guide](docs/GUIDE.md#source-of-the-copyleft-programs).
